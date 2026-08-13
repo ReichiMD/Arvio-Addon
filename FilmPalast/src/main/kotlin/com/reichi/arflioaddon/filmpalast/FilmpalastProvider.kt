@@ -364,7 +364,7 @@ class FilmpalastProvider : TmdbProvider() {
         if (links.isEmpty()) {
             DebugLog.w(dbg, "loadLinks: 0 links -> no real sources (debug sources already emitted above)")
             emitTraceAsSources(callback)
-            return false
+            return
         }
 
         var any = false
@@ -393,7 +393,6 @@ class FilmpalastProvider : TmdbProvider() {
         DebugLog.t(dbg, "loadLinks: DONE, any=$any (any=true means at least one source emitted)")
         // Final summary as a diagnostic source so the user sees the outcome too.
         emitTraceAsSources(callback)
-        return any
     }
 
     /**
