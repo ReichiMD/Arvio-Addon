@@ -13,6 +13,10 @@ on:
       - '*.md'
       - 'repo.json'
 
+# The workflow needs to push the compiled .cs3 + plugins.json to the builds branch.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,6 +31,7 @@ jobs:
         with:
           ref: "builds"
           path: "builds"
+          persist-credentials: true
 
       - name: Clean old builds
         run: rm -f $GITHUB_WORKSPACE/builds/*.cs3
