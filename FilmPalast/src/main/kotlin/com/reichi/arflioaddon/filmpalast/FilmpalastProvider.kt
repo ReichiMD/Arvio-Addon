@@ -24,6 +24,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
 
@@ -49,7 +50,11 @@ class FilmpalastProvider : TmdbProvider() {
     override val useMetaLoadResponse = false
 
     private val dbg = "Filmpalast"
-    private val pluginVersion = 7
+    private val pluginVersion = 8
+    // Per-network-call timeout. ARVIO's scraper has a total timeout that covers load() +
+    // loadLinks(); if a single app.get() hangs, it would consume the whole budget and loadLinks
+    // would never run (hiding all diagnostics). Keep each call well under ARVIO's total budget.
+    private val NET_TIMEOUT_MS = 8000L
 
     override val mainPage = mainPageOf(
         "" to "Neu",
@@ -184,7 +189,13 @@ class FilmpalastProvider : TmdbProvider() {
         val path = if (isTv) "/tv/$tmdbId" else "/movie/$tmdbId"
         val full = "$tmdbApiUrl$path"
         return try {
-            val res = app.get(full, params = mapOf("api_key" to tmdbApiKey, "language" to "de-DE"))
+            val res = withTimeoutOrNull(NET_TIMEOUT_MS) {
+                app.get(full, params = mapOf("api_key" to tmdbApiKey, "language" to "de-DE"))
+            }
+            if (res == null) {
+                DebugLog.e(dbg, "fetchTmdbMeta: TIMED OUT after ${NET_TIMEOUT_MS}ms (network hang?)")
+                return null
+            }
             DebugLog.t(dbg, "fetchTmdbMeta: GET $full -> ${res.code}")
             parseJson<TmdbMeta>(res.text)
         } catch (e: Exception) {
@@ -233,7 +244,11 @@ class FilmpalastProvider : TmdbProvider() {
     private suspend fun searchFilmpalast(query: String): List<FilmpalastEntry> {
         val searchUrl = "$mainUrl/search/title/${query.encode()}"
         return try {
-            val res = app.get(searchUrl)
+            val res = withTimeoutOrNull(NET_TIMEOUT_MS) { app.get(searchUrl) }
+            if (res == null) {
+                DebugLog.e(dbg, "searchFilmpalast: TIMED OUT after ${NET_TIMEOUT_MS}ms (network hang?)")
+                return emptyList()
+            }
             DebugLog.t(dbg, "searchFilmpalast: GET $searchUrl -> ${res.code}")
             val document = res.document
             val selected = document.select("#content article.liste, #content .glowliste")
