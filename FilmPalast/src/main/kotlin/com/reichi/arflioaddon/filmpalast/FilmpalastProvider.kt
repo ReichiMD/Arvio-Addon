@@ -331,8 +331,12 @@ class FilmpalastProvider : TmdbProvider() {
         isCasting: Boolean,
         subtitleCallback: (com.lagradost.cloudstream3.SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    ) {
         DebugLog.t(dbg, "loadLinks() called with data=${data.take(300)}")
+        // Emit the trace accumulated so far (during load()) as diagnostic "sources" so the
+        // user can read what happened directly in ARVIO's source picker — no logcat/PC needed.
+        emitTraceAsSources(callback)
+
         val links: List<String> = when {
             data.trimStart().startsWith("{") -> {
                 try { parseJson<LoadData>(data).links } catch (e: Exception) {
@@ -358,7 +362,8 @@ class FilmpalastProvider : TmdbProvider() {
         }
         DebugLog.t(dbg, "loadLinks: resolved ${links.size} hoster links to try")
         if (links.isEmpty()) {
-            DebugLog.w(dbg, "loadLinks: 0 links -> returning false (no sources)")
+            DebugLog.w(dbg, "loadLinks: 0 links -> no real sources (debug sources already emitted above)")
+            emitTraceAsSources(callback)
             return false
         }
 
@@ -386,7 +391,34 @@ class FilmpalastProvider : TmdbProvider() {
             }
         }
         DebugLog.t(dbg, "loadLinks: DONE, any=$any (any=true means at least one source emitted)")
+        // Final summary as a diagnostic source so the user sees the outcome too.
+        emitTraceAsSources(callback)
         return any
+    }
+
+    /**
+     * Emits the current trace entries as fake "sources" so the diagnosis shows up directly
+     * in ARVIO's source picker (the only place we can reach without logcat). ARVIO keeps only
+     * links whose url starts with http(s), so we use a harmless placeholder url and put the
+     * real diagnostic text into the link's name/source. These are not playable; their only
+     * purpose is to be visible.
+     */
+    private fun emitTraceAsSources(callback: (ExtractorLink) -> Unit) {
+        val snap = DebugLog.snapshot()
+        if (snap.isEmpty()) return
+        snap.take(40).forEachIndexed { idx, e ->
+            val text = DebugLog.format(e).take(140)
+            callback.invoke(
+                ExtractorLink(
+                    source = "ArvioAddon-Debug",
+                    name = "[$idx] $text",
+                    url = "https://arvio-addon.invalid/debug/$idx",
+                    referer = mainUrl,
+                    quality = Qualities.Unknown.value,
+                    type = ExtractorLinkType.VIDEO
+                )
+            )
+        }
     }
 
     /**
