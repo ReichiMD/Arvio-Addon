@@ -50,37 +50,41 @@ object DebugServer {
     private fun handle(client: Socket) {
         thread(start = true, isDaemon = true) {
             try {
-                val input = BufferedReader(InputStreamReader(client.getInputStream()))
-                val requestLine = input.readLine() ?: return
-                // drain headers
-                var line: String?
-                do { line = input.readLine() } while (!line.isNullOrEmpty())
-                val out: OutputStream = client.getOutputStream()
-                val (contentType, body) = when {
-                    requestLine.startsWith("GET /clear") || requestLine.startsWith("POST /clear") -> {
-                        DebugLog.clear()
-                        DebugLog.t(TAG, "trace cleared by user")
-                        "text/html; charset=utf-8" to htmlPage("Trace cleared. <a href=\"/\">back</a>", autoRefresh = false)
-                    }
-                    requestLine.startsWith("GET /raw") -> {
-                        "text/plain; charset=utf-8" to
-                            (DebugLog.snapshot().joinToString("\n") { DebugLog.format(it) }).ifEmpty { "(empty trace)" }
-                    }
-                    else -> "text/html; charset=utf-8" to htmlPage(renderTrace(), autoRefresh = true)
-                }
-                val bytes = body.toByteArray()
-                out.write("HTTP/1.1 200 OK\r\n".toByteArray())
-                out.write("Content-Type: $contentType\r\n".toByteArray())
-                out.write("Content-Length: ${bytes.size}\r\n".toByteArray())
-                out.write("Connection: close\r\n\r\n".toByteArray())
-                out.write(bytes)
-                out.flush()
+                processRequest(client)
             } catch (e: Exception) {
                 Log.w("ArvioAddon[$TAG]", "request failed: ${e.message}")
             } finally {
                 try { client.close() } catch (_: Exception) {}
             }
         }
+    }
+
+    private fun processRequest(client: Socket) {
+        val input = BufferedReader(InputStreamReader(client.getInputStream()))
+        val requestLine = input.readLine() ?: return
+        // drain headers
+        var line: String?
+        do { line = input.readLine() } while (!line.isNullOrEmpty())
+        val out: OutputStream = client.getOutputStream()
+        val (contentType, body) = when {
+            requestLine.startsWith("GET /clear") || requestLine.startsWith("POST /clear") -> {
+                DebugLog.clear()
+                DebugLog.t(TAG, "trace cleared by user")
+                "text/html; charset=utf-8" to htmlPage("Trace cleared. <a href=\"/\">back</a>", autoRefresh = false)
+            }
+            requestLine.startsWith("GET /raw") -> {
+                "text/plain; charset=utf-8" to
+                    (DebugLog.snapshot().joinToString("\n") { DebugLog.format(it) }).ifEmpty { "(empty trace)" }
+            }
+            else -> "text/html; charset=utf-8" to htmlPage(renderTrace(), autoRefresh = true)
+        }
+        val bytes = body.toByteArray()
+        out.write("HTTP/1.1 200 OK\r\n".toByteArray())
+        out.write("Content-Type: $contentType\r\n".toByteArray())
+        out.write("Content-Length: ${bytes.size}\r\n".toByteArray())
+        out.write("Connection: close\r\n\r\n".toByteArray())
+        out.write(bytes)
+        out.flush()
     }
 
     private fun renderTrace(): String {
