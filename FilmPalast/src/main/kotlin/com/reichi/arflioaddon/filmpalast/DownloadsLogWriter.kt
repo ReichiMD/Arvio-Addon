@@ -80,8 +80,11 @@ object DownloadsLogWriter {
 
     private fun writeViaMediaStore(context: Context, fileName: String, content: String, mimeType: String) {
         val resolver = context.contentResolver
-        val collection = MediaStore.Downloads.EXTERNAL_URI
-            ?: MediaStore.Files.getContentUri("external")
+        // MediaStore.Downloads.EXTERNAL_URI is only available from API 29 and may be
+        // absent from older compile SDKs; MediaStore.Files.getContentUri("external")
+        // works universally and, combined with RELATIVE_PATH=Downloads on API 29+,
+        // lands the file in the public Downloads folder.
+        val collection = MediaStore.Files.getContentUri("external")
 
         // Try to find an existing item with the same name in Downloads and overwrite it.
         val existing = findExistingUri(resolver, collection, fileName)
