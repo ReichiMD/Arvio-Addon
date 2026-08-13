@@ -4,6 +4,7 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import kotlin.concurrent.thread
@@ -30,7 +31,11 @@ object DebugServer {
         running = true
         serverThread = thread(start = true, name = "ArvioAddon-DebugServer", isDaemon = true) {
             try {
-                val server = ServerSocket(PORT)
+                // Bind explicitly to loopback (127.0.0.1). Binding to the wildcard
+                // address can be blocked by Android's network security config on some
+                // devices; loopback is always allowed and is all we need since the user
+                // opens http://localhost:8420 on the same device.
+                val server = ServerSocket(PORT, 50, InetAddress.getByName("127.0.0.1"))
                 DebugLog.t(TAG, "listening on http://localhost:$PORT")
                 while (running) {
                     val client = try { server.accept() } catch (e: Exception) {
