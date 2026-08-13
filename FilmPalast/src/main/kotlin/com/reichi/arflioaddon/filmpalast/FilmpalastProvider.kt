@@ -123,7 +123,7 @@ class FilmpalastProvider : TmdbProvider() {
         return if (isTv) {
             buildSeriesResponse(matches, meta) ?: debugLoadResponse()
         } else {
-            buildMovieResponse(matches.first(), meta)
+            buildMovieResponse(matches.first(), meta) ?: debugLoadResponse()
         }
     }
 
