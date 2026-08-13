@@ -49,7 +49,7 @@ class FilmpalastProvider : TmdbProvider() {
     override val useMetaLoadResponse = false
 
     private val dbg = "Filmpalast"
-    private val pluginVersion = 6
+    private val pluginVersion = 7
 
     override val mainPage = mainPageOf(
         "" to "Neu",
@@ -81,15 +81,27 @@ class FilmpalastProvider : TmdbProvider() {
      */
     override suspend fun load(url: String): LoadResponse? {
         DebugLog.t(dbg, "load() called with url=$url")
+        return try {
+            loadInternal(url)
+        } catch (e: Throwable) {
+            DebugLog.e(dbg, "load() threw ${e.javaClass.simpleName}: ${e.message}")
+            // Never return null on failure: a null LoadResponse makes ARVIO skip loadLinks
+            // entirely, which would hide all diagnostics. Return a debug response instead so
+            // loadLinks runs and the trace surfaces as sources in ARVIO's picker.
+            debugLoadResponse()
+        }
+    }
+
+    private suspend fun loadInternal(url: String): LoadResponse {
         val (tmdbId, isTv) = parseTmdbInput(url) ?: run {
-            DebugLog.w(dbg, "load: could not parse TMDB input from '$url' -> returning null")
-            return null
+            DebugLog.w(dbg, "load: could not parse TMDB input from '$url'")
+            return debugLoadResponse()
         }
         DebugLog.t(dbg, "load: parsed tmdbId=$tmdbId isTv=$isTv")
 
         val meta = fetchTmdbMeta(tmdbId, isTv) ?: run {
-            DebugLog.e(dbg, "load: TMDB metadata fetch failed for tmdbId=$tmdbId isTv=$isTv -> returning null")
-            return null
+            DebugLog.e(dbg, "load: TMDB metadata fetch failed for tmdbId=$tmdbId isTv=$isTv")
+            return debugLoadResponse()
         }
         val title = meta.displayTitle
         val year = meta.year
@@ -104,14 +116,27 @@ class FilmpalastProvider : TmdbProvider() {
         DebugLog.t(dbg, "load: after matchResults -> ${matches.size} matches (isTv=$isTv)")
         matches.take(15).forEach { DebugLog.t(dbg, "  match: ${it.title} | s=${it.season} e=${it.episode} | ${it.url}") }
         if (matches.isEmpty()) {
-            DebugLog.w(dbg, "load: no matches -> returning null (ARVIO will report 'both load() paths failed'/'no sources')")
-            return null
+            DebugLog.w(dbg, "load: no matches -> returning debug response")
+            return debugLoadResponse()
         }
 
         return if (isTv) {
-            buildSeriesResponse(matches, meta)
+            buildSeriesResponse(matches, meta) ?: debugLoadResponse()
         } else {
             buildMovieResponse(matches.first(), meta)
+        }
+    }
+
+    /**
+     * A minimal MovieLoadResponse whose dataUrl is a marker string. ARVIO's extractData
+     * returns dataUrl for MovieLoadResponse, so loadLinks gets called with "ARVIO_DEBUG",
+     * which triggers the debug-source emission so the trace becomes visible in ARVIO.
+     */
+    private fun debugLoadResponse(): LoadResponse {
+        DebugLog.t(dbg, "load: returning debug LoadResponse (dataUrl=ARVIO_DEBUG)")
+        return newMovieLoadResponse("Filmpalast (Diagnose)", mainUrl, TvType.Movie, "ARVIO_DEBUG") {
+            this.year = null
+            this.plot = "Diagnose-Antwort — siehe ArvioAddon-Debug-Quellen"
         }
     }
 
