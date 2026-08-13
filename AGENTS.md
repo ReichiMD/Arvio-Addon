@@ -3,10 +3,46 @@
 Dieses Repo baut ein **Cloudstream3-kompatibles Plugin** für die **ARVIO** Android-TV-App (sideload-APK).
 Ziel: Ventix-Funktionalität (deutsche Web-Scraper + Stalker-VOD) als Plugin in ARVIO laufen lassen – clientseitig, ohne Server.
 
-## Status: Brainstorming abgeschlossen → Implementation steht aus
+## ⭐ AKTUELLER STAND & NÄCHSTE SCHRITTE (Stand 13.08.2026 – für die nächste Session)
 
-Dieses Repo ist aktuell leer. Die nächste Session startet die Implementation.
-Alle Entscheidungen unten sind **verifiziert** (Code von ARVIO + GermanProviders gelesen, nicht geraten).
+**Was fertig ist:** Filmpalast-Plugin als Cloudstream3-`TmdbProvider` implementiert, gebaut, auf `builds`-Branch gepusht, `status=1`, `tvTypes=[Movie,TvSeries]` verifiziert. CI grün. Nutzer hat es in ARVIO 1.9.983 (sideload) installiert. Ein anderes Addon (webstreamr, = Stremio-Addon) liefert Quellen – beweist dass ARVIOs Addon-System läuft.
+
+**Das aktuelle Problem:** Bei der Quellensuche (z.B. Matrix, Silo) zeigt ARVIO **nur webstreamr-Quellen, NICHT Filmpalast**. Der Filmpalast-Scraper wird entweder gar nicht aufgerufen ODER `load()`/`loadLinks()` schlägt fehl. **Die genaue Ursache ist OHNE Logcat vom Gerät nicht eindeutig zu trennen.** Python-E2E-Simulation läuft durch; filmpalast.to + TMDB sind per HTTP erreichbar (kein Blocking verifiziert). Also vermutlich ein Kotlin/Jsoup-Parsing-Problem in `load()`.
+
+### NÄCHSTER SCHRITT (Prio 1): Logcat vom Gerät besorgen
+ARVIO hat **keine Log-Datei-Exportfunktion** und schreibt **keine App-Logs in Dateien** (verifiziert im gesamten ARVIO-Quellcode – nur IPTV-Listen, APK-Downloads, Telegram-Init-Log, Crashlytics-Crashes werden in Dateien abgelegt, keine Scraper-Logs). Scraper-Logs (`Log.d/w` in `ExternalExtensionRunner.kt`) gehen **nur an Androids Logcat-Kernel-Buffer** (im RAM, flüchtig, ohne Root nicht direkt auslesbar). Möglichkeiten für den Nutzer:
+- **Option A – LADB-App (beste ohne PC/Root):** App "LADB – Local ADB Shell" aus Play Store (~2-3 €), startet lokalen ADB-Server auf dem Handy. Dort `logcat | grep -iE "ExtExt|Plugin|TmdbProvider Filmpalast"`.
+- **Option B – Bug Report:** Android-Einstellungen → Entwickleroptionen → Fehlerbericht (unhandlich, riesiger ZIP, Timing-tricky).
+- **Option C – PC+USB+adb (am einfachsten zu filtern):** `adb logcat | grep -iE "ExtExt|Plugin|Filmpalast"`.
+- **Option D – nur mit Root:** Logcat-Reader-App. Ohne Root seit Android 4.1 nur eigene App-Logs.
+- **WICHTIG:** Der ARVIO-integrierte "Test Scraper"-Button ist NICHT in der UI aktiv (siehe "Recherche: ARVIO Test-Funktion" unten).
+- **Was im Logcat gesucht wird:** Zeilen wie `TmdbProvider Filmpalast: both load() paths failed` (load schlägt fehl), `TmdbProvider Filmpalast: 0 links collected` (loadLinks findet nichts), oder gar kein `Filmpalast`-Eintrag (Scraper wird nicht aufgerufen).
+
+### NÄCHSTER SCHRITT (Prio 2): Je nach Logcat-Ergebnis
+- **Falls load() fehlschlägt:** Jsoup-Selektoren in `FilmpalastProvider.kt` (collectHosterLinks, matchResults, buildMovieResponse, buildSeriesResponse) gegen reales Filmpalast-HTML verifizieren. Logging/Exceptions in load() sichtbar machen.
+- **Falls Scraper nicht aufgerufen wird:** Plugin-Download prüfen (DexClassLoader-Fehler?), manifestEnabled/enabled prüfen.
+- **Falls loadLinks 0 Links:** Hoster-Rotation von Filmpalast prüfen, generischen Fallback verbessern.
+- **Strategie-Alternative falls TmdbProvider-Pfad zu fehleranfällig:** GermanProviders Filmpalast ist ein `MainAPI` (search-based) – ARVIO nutzt dafür den `executeSearchBased`-Pfad (titelbasierte Suche statt TMDB-ID). Das ist der gleiche Scraper der dort funktioniert. Erwägen, auf `MainAPI` statt `TmdbProvider` zu wechseln.
+
+### Wichtige Dateien & Referenzen
+- **Filmpalast-Code:** `/workspace/project/Arvio-Addon/FilmPalast/src/main/kotlin/com/reichi/arflioaddon/filmpalast/` – `FilmpalastProvider.kt` (load/loadLinks), `FilmpalastPlugin.kt`, `FilmpalastExtractors.kt`
+- **ARVIO-Referenz:** `/tmp/arvio_ref` (frisch geclonet von `ProdigyV21/ARVIO`, ARVIO 1.9.983). Schlüssel-Dateien:
+  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/PluginManager.kt` – `executeScrapers` (Zeile 625), `enabledScrapers` (271), `testScraper` (863), `executeScraperWithSingleFlight` (714)
+  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/ExternalExtensionRunner.kt` – `execute` (60), `executeInternal` (342), `executeTmdbProvider` (367), `executeTmdbProviderWithDiagnostics` (137), `extractData` (738), `executeSearchBased` (473)
+  - `app/src/main/kotlin/com/arflix/tv/domain/model/Plugin.kt` – `ScraperInfo` (77), `supportsType` (92)
+  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/TvTypeExtensions.kt` – `tvTypeFromString`, `toNuvioType`
+- **GermanProviders-Referenz:** `Bnyro/GermanProviders` (geklot nach `/tmp/german-providers` falls vorhanden, sonst neu klonen). Filmpalast dort = `MainAPI` (search-based), die funktionierende Vorlage.
+- **Builds-Branch:** `.cs3`-Hash `sha256-321f7fa4b9f2b53d4e4c5ee5e2d203e26bf5fbf57a68b3b8fc524bee6dd78bc9`, `status=1`, `internalName=FilmPalast`
+- **Letzte Commits:** `8aa09d3` (AGENTS.md Recherche-Doku), `2a60f48`, `b6e3c1b` (hoster extraction fix)
+- **cloudstream3 library:** v4.7.0 (`com.github.recloudstream.cloudstream:library-android:v4.7.0`). Built-in Extractoren: `Voe()`, `Firestream()`, `FileMoonSx()`, `Supervideo()`, `VidHidePro()` + ~270 andere via `installGlobal()`.
+
+### ARVIO-Scraper-Aufruf-Pfad (verifiziert, entscheidend fürs Debugging)
+1. `executeScrapers(tmdbId, mediaType, season, episode)` → filtert `enabledScrapers` nach `supportsType(mediaType)`
+2. `executeScraperWithSingleFlight` → `executeScraper` → `executeExternalDexScraper` → `externalExtensionRunner.execute`
+3. `execute` → `executeInternal` → **wenn `api is TmdbProvider`:** `executeTmdbProvider` (echter Pfad), **sonst:** `executeSearchBased`
+4. `executeTmdbProvider`: ruft `api.load("""{"id":$tmdbIdInt,"type":"$type"}""")` → bei null fallback `api.load("https://www.themoviedb.org/<type>/<id>")` → `extractData(loadResponse)` → `api.loadLinks(data)`
+5. `extractData`: `MovieLoadResponse`→`dataUrl`, `TvSeriesLoadResponse`→`findEpisode(...).data`, `AnimeLoadResponse`→Episode-Liste
+6. **Inkonsistenz:** `executeTmdbProviderWithDiagnostics` (Test-Pfad) ruft `loadLinks` mit `TmdbLink(...).toJson()` direkt auf (ohne `load()`) – ein ANDERER data-Vertrag. Mein `loadLinks` ist auf den `load()`-Pfad ausgelegt (`{"links":[...]}` oder `http`-URL). Falls ARVIO den Test-Button aktiviert, muss `loadLinks` auch TmdbLink-JSON verarbeiten.
 
 ---
 
@@ -35,10 +71,8 @@ Der Nutzer installiert das Plugin so in ARVIO (verifizierter Flow):
 4. ARVIO lädt `repo.json` → folgt `pluginLists` → lädt `plugins.json`
 5. Plugin-Einträge einschalten → ARVIO lädt `.cs3`-Datei (kompilierter Code)
 
-### Bekannter Bug (Stand Aug 2026): Add-Repo-Dialog auf Handy
-Der "Add Repository"-Dialog in ARVIO hat `width(520.dp)` – breiter als Handy-Hochformat (~390dp). Buttons können abgeschnitten/inaktiv wirken.
-- **Workaround:** Querformat, oder Tastatur vorher schließen, oder Tablet nutzen.
-- Wird vermutlich von ARVIO gefixt (aktives Projekt, 18 Releases in 5 Monaten).
+### Bekannter Bug: Add-Repo-Dialog/Plugin-Settings auf Handy (GEFIXT in 1.9.983)
+Der "Add Repository"-Dialog + Plugin-Settings-Screen nutzten TV-only `androidx.tv.material3.Surface`-Buttons, die auf Touch-Geräten (Handy/Tablet) nicht reagierten. **Behoben in ARVIO Issue #502** ("fix(mobile): resolve touch issues in plugins settings") – `PluginScreen.kt` hat jetzt `LocalDeviceType.current.isTouchDevice()` mit separatem Mobile-Layout. **Fix ist in 1.9.983 enthalten** (verifiziert). Nutzer hat das Plugin erfolgreich über ein Cloud-Profil auf dem Handy installiert.
 
 ---
 
@@ -362,4 +396,5 @@ JDK 17+ und Android SDK 35 nötig. Im Env: `JAVA_HOME` + `ANDROID_HOME` (oder `l
 
 ## Versionshistorie dieses Addons
 
-- **v1 (Proof-of-Concept):** Filmpalast-Plugin als TmdbProvider. Baut & kompiliert. Noch nicht in ARVIO endgerät-getestet.
+- **v1 (Proof-of-Concept):** Filmpalast-Plugin als TmdbProvider. Baut & kompiliert. Noch nicht in ARVIO endgeraet-getestet.
+- **v1.1 (Aug 2026, Commits b6e3c1b bis 8aa09d3):** Hoster-Extraktion gefixt (loadLinks respektiert loadExtractor-Return; Voe1 entfernt; generischer Fallback fuer unbekannte Hostnamen); endgeraet-getestet in ARVIO 1.9.983 (sideload) von Nutzer. Plugin laedt, ist sichtbar & aktivierbar. **Aber:** bei Quellensuche (Matrix/Silo) zeigt ARVIO nur webstreamr-Quellen, nicht Filmpalast - Root-Cause offen, Logcat vom Geraet noetig (siehe "AKTUELLER STAND" ganz oben). AGENTS.md umfassend mit ARVIO-Scraper-Pfad, Touch-Bug-Fix #502, Test-Funktion-Status und Logcat-Optionen dokumentiert.
