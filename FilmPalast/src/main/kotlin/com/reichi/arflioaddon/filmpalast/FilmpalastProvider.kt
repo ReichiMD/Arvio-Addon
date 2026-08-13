@@ -49,6 +49,7 @@ class FilmpalastProvider : TmdbProvider() {
     override val useMetaLoadResponse = false
 
     private val dbg = "Filmpalast"
+    private val pluginVersion = 6
 
     override val mainPage = mainPageOf(
         "" to "Neu",
@@ -331,7 +332,7 @@ class FilmpalastProvider : TmdbProvider() {
         isCasting: Boolean,
         subtitleCallback: (com.lagradost.cloudstream3.SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
+    ): Boolean {
         DebugLog.t(dbg, "loadLinks() called with data=${data.take(300)}")
         // Emit the trace accumulated so far (during load()) as diagnostic "sources" so the
         // user can read what happened directly in ARVIO's source picker — no logcat/PC needed.
@@ -364,7 +365,7 @@ class FilmpalastProvider : TmdbProvider() {
         if (links.isEmpty()) {
             DebugLog.w(dbg, "loadLinks: 0 links -> no real sources (debug sources already emitted above)")
             emitTraceAsSources(callback)
-            return
+            return false
         }
 
         var any = false
@@ -393,6 +394,7 @@ class FilmpalastProvider : TmdbProvider() {
         DebugLog.t(dbg, "loadLinks: DONE, any=$any (any=true means at least one source emitted)")
         // Final summary as a diagnostic source so the user sees the outcome too.
         emitTraceAsSources(callback)
+        return any
     }
 
     /**
@@ -403,8 +405,32 @@ class FilmpalastProvider : TmdbProvider() {
      * purpose is to be visible.
      */
     private fun emitTraceAsSources(callback: (ExtractorLink) -> Unit) {
+        // First: a version banner so the user can confirm in ARVIO which plugin build is
+        // actually loaded (ARVIO doesn't show the plugin version number in its UI).
+        callback.invoke(
+            ExtractorLink(
+                source = "ArvioAddon-Debug",
+                name = "PLUGIN v$pluginVersion loaded — Filmpalast Arvio-Addon",
+                url = "https://arvio-addon.invalid/debug/version",
+                referer = mainUrl,
+                quality = Qualities.Unknown.value,
+                type = ExtractorLinkType.VIDEO
+            )
+        )
         val snap = DebugLog.snapshot()
-        if (snap.isEmpty()) return
+        if (snap.isEmpty()) {
+            callback.invoke(
+                ExtractorLink(
+                    source = "ArvioAddon-Debug",
+                    name = "[trace empty] loadLinks reached but no trace entries from load()",
+                    url = "https://arvio-addon.invalid/debug/empty",
+                    referer = mainUrl,
+                    quality = Qualities.Unknown.value,
+                    type = ExtractorLinkType.VIDEO
+                )
+            )
+            return
+        }
         snap.take(40).forEachIndexed { idx, e ->
             val text = DebugLog.format(e).take(140)
             callback.invoke(
