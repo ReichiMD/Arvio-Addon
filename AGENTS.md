@@ -314,6 +314,17 @@ Der cloudstream-gradle-plugin-Default ist `status = 3` ("Beta only"). **Das bric
 - Folge: Plugin sichtbar in der Liste, aber Toggle speichert nicht → Scraper läuft nicht → keine Quellen.
 - **Fix:** Im Modul-`build.gradle.kts` IMMER `status = 1` setzen (wie GermanProviders: alle 21 Plugins `status=1`). Nie Default `3` lassen.
 
+### ⚠️ Hoster-Extraktion: built-in cloudstream3-Extractoren nutzen, nicht re-registrieren (verifiziert)
+Filmpalast rotiert Hostnamen pro Episode/Load. Verifizierte Hostnamen (Aug 2026):
+- **Built-in in cloudstream3** (ARVIO lädt sie via `ExternalExtractorRegistry.installGlobal()` automatisch): `voe.sx` (Voe), `firestream.to` (Firestream), `filemoon.sx` (FileMoonSx), `supervideo.cc` (Supervideo), `vidhide.com` (VidHidePro).
+- **NICHT built-in** (Filmpalast-spezifisch, eigene Extractor-Aliase nötig): `ryderjet.com`, `abstream.to`.
+- **Obskur / API-basiert** (kein statischer Extractor möglich): `vidaraa.cc`, `vidsonic.net`, `odysseusa.cc`, `MoneyGalactic.com` (JWPlayer mit `t.streaming_url` aus API-Call – generischer Fallback findet nur sometimes direkte URLs).
+
+**Fehler, der "no sources" verursachte (behoben in b6e3c1b):**
+1. `loadLinks` setzte `any=true`, sobald `loadExtractor` *aufgerufen* wurde – ignorierte den Rückgabewert. Wenn alle `loadExtractor` `false` zurückgaben (kein passender Extractor), blieb `any` trotzdem `true` → irreführend. Fix: `any` nur auf `true` wenn `loadExtractor` true ODER generischer Fallback findet URL.
+2. `Voe1()` registriert – `Voe1.mainUrl = "https://donaldlineelse.com"` (rotierender VOE-Mirror), matched **nicht** auf `voe.sx`-Links. Built-in `Voe()` (mainUrl=`voe.sx`) matched korrekt. Fix: `Voe1`/`FileMoonSx` nicht mehr re-registrieren (built-in reicht).
+3. **Generischer Fallback** (`genericResolve`): fetcht Embed-Seite, sucht nach direkten mp4/m3u8-URLs (Regex). Best-Effort für obskure JWPlayer-Hoster; fängt nicht alle (vidaraa braucht API-Call), aber fängt z.B. firestream-Video-Pfade.
+
 ### ⚠️ "Keine Addons/Streams"-Meldung = ARVIO-Bug, nicht Plugin-Fehler (verifiziert im ARVIO-Code)
 Selbst bei korrekt aktiviertem Cloudstream-Scraper zeigt ARVIO oft "keine Streaming-Addons eingerichtet". Ursache ist eine ARVIO-seitige Logiklücke:
 - `StreamRepository.getStreamAddons` (StreamRepository.kt:1440): `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` → **nur Stremio-Addons** kommen in die Stream-Auswahl.
