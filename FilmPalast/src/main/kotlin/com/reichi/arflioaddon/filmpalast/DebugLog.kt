@@ -27,6 +27,7 @@ object DebugLog {
     private val entries = ArrayList<Entry>(256)
     private val lock = Any()
     private var logFile: File? = null
+    private var markerFile: File? = null
     private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.GERMANY)
 
     data class Entry(val time: Long, val tag: String, val level: Level, val message: String)
@@ -39,6 +40,20 @@ object DebugLog {
             val dir = File(base, "arvio-addon-logs")
             if (!dir.exists()) dir.mkdirs()
             logFile = File(dir, "filmpalast-trace.log")
+            // Write a startup marker immediately so the user can confirm the plugin
+            // loaded at all, even if no search has been triggered yet.
+            markerFile = File(dir, "PLUGIN_LOADED.txt")
+            try {
+                markerFile?.writeText(
+                    "Arvio Filmpalast plugin loaded at ${java.text.SimpleDateFormat(
+                        "yyyy-MM-dd HH:mm:ss", java.util.Locale.GERMANY
+                    ).format(java.util.Date())}\n" +
+                        "App-specific dir: ${base.absolutePath}\n" +
+                        "If this file exists, plugin.load() ran. The trace file " +
+                        "filmpalast-trace.log only gets entries after a source search.\n"
+                )
+            } catch (_: Exception) {}
+            add(Level.TRACE, "DebugLog", "init ok, log dir=${base.absolutePath}")
         } catch (e: Exception) {
             logFile = null
         }
@@ -59,7 +74,9 @@ object DebugLog {
             if (entries.size > MAX_ENTRIES) entries.removeAt(0)
             logFile?.let { f ->
                 try {
+                    // append + flush so entries survive even if the process is killed
                     f.appendText(format(entry) + "\n")
+                    f.setReadable(true, false)
                 } catch (_: Exception) {
                 }
             }
