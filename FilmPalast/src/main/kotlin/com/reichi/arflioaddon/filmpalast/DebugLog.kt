@@ -53,6 +53,9 @@ object DebugLog {
                         "filmpalast-trace.log only gets entries after a source search.\n"
                 )
             } catch (_: Exception) {}
+            // Also mirror everything into the PUBLIC Downloads folder so the user can
+            // read it with any file manager on Android 13+ (no permission needed).
+            DownloadsLogWriter.init(context)
             add(Level.TRACE, "DebugLog", "init ok, log dir=${base.absolutePath}")
         } catch (e: Exception) {
             logFile = null
@@ -80,6 +83,8 @@ object DebugLog {
                 } catch (_: Exception) {
                 }
             }
+            // Mirror the full trace to the public Downloads folder (throttled inside).
+            DownloadsLogWriter.flush(entries.map { format(it) })
         }
         // also surface to logcat so ADB users see it too
         when (level) {
