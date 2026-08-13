@@ -14,8 +14,12 @@ cloudstream {
      * 1: Ok
      * 2: Slow
      * 3: Beta only
+     *
+     * ARVIO sets manifestEnabled = (plugin.status == 1). With status != 1 the
+     * PluginDataStore.setScraperEnabled() silently refuses to persist an enable,
+     * so the scraper never runs. GermanProviders uses status = 1 for all plugins.
      */
-    status = 3 // Beta only - proof of concept
+    status = 1
 
     tvTypes = listOf("TvSeries", "Movie")
 

@@ -306,7 +306,22 @@ TmdbProvider ist der zuverlässige Pfad. GermanProviders' Scraper sind alles *se
 - **Apple-TV+-Serien (Silo):** deutsche Scraper haben solche Titel u.U. nicht oder zeitverzögert. TMDB-Titel passt, aber Filmpalast muss die Serie im Katalog haben.
 - **TMDB-API-Key:** fest codiert (öffentlich bekannter Cloudstream-Key). Für Produktion ggf. eigener Key.
 - **Hoster-Dead:** Filmpalast-Hosterdomains rotieren; Extractor-Mapping muss ggf. nachjustiert werden. Neue Domains via `registerExtractorAPI` hinzufügen.
-- **Status 3 (Beta only):** bewusst als PoC gesetzt – ARVIO blendet Beta-Plugins nicht automatisch ein, Nutzer muss explizit aktivieren.
+
+### ⚠️ status-Wert MUSS 1 sein (verifiziert im ARVIO-Code)
+Der cloudstream-gradle-plugin-Default ist `status = 3` ("Beta only"). **Das bricht ARVIO.**
+- `PluginManager.downloadDexExtensions` (PluginManager.kt:1079): `manifestEnabled = plugin.status == 1`
+- `PluginDataStore.setScraperEnabled` (PluginDataStore.kt:152): `if (enabled && !scraper.manifestEnabled) return` → speichert das Enable **nicht**, wenn `manifestEnabled=false`.
+- Folge: Plugin sichtbar in der Liste, aber Toggle speichert nicht → Scraper läuft nicht → keine Quellen.
+- **Fix:** Im Modul-`build.gradle.kts` IMMER `status = 1` setzen (wie GermanProviders: alle 21 Plugins `status=1`). Nie Default `3` lassen.
+
+### ⚠️ "Keine Addons/Streams"-Meldung = ARVIO-Bug, nicht Plugin-Fehler (verifiziert im ARVIO-Code)
+Selbst bei korrekt aktiviertem Cloudstream-Scraper zeigt ARVIO oft "keine Streaming-Addons eingerichtet". Ursache ist eine ARVIO-seitige Logiklücke:
+- `StreamRepository.getStreamAddons` (StreamRepository.kt:1440): `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` → **nur Stremio-Addons** kommen in die Stream-Auswahl.
+- `DetailsViewModel` berechnet `hasStreamingAddons` aus `streamRepository.installedAddons.count { it.isVodStreamingAddon() }` (DetailsViewModel.kt:1633) → zählt **nur Stremio-Addons**, nicht Cloudstream-Scraper.
+- Cloudstream-Scraper sind eine **getrennte Liste** (`PluginManager.scrapers`), nicht in `installedAddons` → werden für `hasStreamingAddons` nicht gezählt.
+- **Aber:** `DetailsViewModel` (DetailsViewModel.kt:1516) ruft `pluginManager.executeScrapersStreaming()` separat auf → Cloudstream-Scraper **laufen im Hintergrund** und mergen Streams in `streams`. Nur die *Meldung* ist falsch, nicht das Scraping.
+- **Workaround:** Zusätzlich ein (Dummy-)Stremio-Addon aktivieren → `addonCount > 0` → `hasStreamingAddons=true` → Meldung verschwindet. Scraper-Ergebnisse erscheinen dann in der Liste.
+- **ARVIO-seitiger Fix nötig:** `getStreamAddons`/`hasStreamingAddons` sollten auch EXTERNAL_DEX-Scraper zählen. Lohnt als GitHub-Issue.
 
 ### Build (lokal)
 JDK 17+ und Android SDK 35 nötig. Im Env: `JAVA_HOME` + `ANDROID_HOME` (oder `local.properties` mit `sdk.dir`).
