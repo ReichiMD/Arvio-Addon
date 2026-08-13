@@ -1,0 +1,8 @@
+{
+  "name": "Arvio Addon v126",
+  "description": "Deutsche Web-Scraper + Stalker VOD für ARVIO (Cloudstream3-Plugins)",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/builds/plugins.json"
+  ]
+}

@@ -1,0 +1,105 @@
+[
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=https://aniworld.to&sz=%size%",
+        "fileHash": "sha256-8aa69bb531d18557876dacb154a5b34a32d9a6fc6ef2a07176df8448f44e303f",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ReichiMD/Arvio-Addon",
+        "fileSize": 1525697,
+        "status": 1,
+        "language": "de",
+        "authors": [
+            "ReichiMD"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 2,
+        "internalName": "Aniworld",
+        "description": "AniWorld.to - Anime (Arvio-Addon, TmdbProvider)",
+        "url": "https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/builds/Aniworld.cs3",
+        "name": "Aniworld"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=https://filmpalast.to&sz=%size%",
+        "fileHash": "sha256-1d8e853d92c366ade37212080977497f7f8645673b2ba1bcbbf85ed735f977cc",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ReichiMD/Arvio-Addon",
+        "fileSize": 1502515,
+        "status": 1,
+        "language": "de",
+        "authors": [
+            "ReichiMD"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "version": 40,
+        "internalName": "FilmPalast",
+        "description": "Filmpalast.to - Filme & Serien (Ventix-Arvio-Addon, TmdbProvider)",
+        "url": "https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/builds/FilmPalast.cs3",
+        "name": "FilmPalast"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=https://kinoger.com&sz=%size%",
+        "fileHash": "sha256-7dc00bf3d2efc6dbd847c02c112db17adb2b26065e8cde7ef8199a583570a2f0",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ReichiMD/Arvio-Addon",
+        "fileSize": 1493428,
+        "status": 1,
+        "language": "de",
+        "authors": [
+            "ReichiMD"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 13,
+        "internalName": "Kinoger",
+        "description": "Kinoger.com - Filme & Serien (Ventix-Arvio-Addon, TmdbProvider)",
+        "url": "https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/builds/Kinoger.cs3",
+        "name": "Kinoger"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=https://serienstream.to&sz=%size%",
+        "fileHash": "sha256-be81f75904c5604882b33c07c10de0fc9009441a1d810bdfb0cd3f78cd613dc5",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ReichiMD/Arvio-Addon",
+        "fileSize": 1526140,
+        "status": 1,
+        "language": "de",
+        "authors": [
+            "ReichiMD"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 64,
+        "internalName": "Serienstream",
+        "description": "Serienstream.to - Serien (Ventix-Arvio-Addon, TmdbProvider)",
+        "url": "https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/builds/Serienstream.cs3",
+        "name": "Serienstream"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=https://vavoo.to&sz=%size%",
+        "fileHash": "sha256-ef30c51d984d9864ce4cce4c322ecc14a2fca20a0442ddb00fbddf113ab926fb",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ReichiMD/Arvio-Addon",
+        "fileSize": 1498635,
+        "status": 1,
+        "language": "de",
+        "authors": [
+            "ReichiMD"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 10,
+        "internalName": "Vavoo",
+        "description": "Vavoo - Filme & Serien (Ventix-Arvio-Addon, TmdbProvider, API-basiert)",
+        "url": "https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/builds/Vavoo.cs3",
+        "name": "Vavoo"
+    }
+]
