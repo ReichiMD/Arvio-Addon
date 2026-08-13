@@ -325,7 +325,25 @@ Filmpalast rotiert Hostnamen pro Episode/Load. Verifizierte Hostnamen (Aug 2026)
 2. `Voe1()` registriert – `Voe1.mainUrl = "https://donaldlineelse.com"` (rotierender VOE-Mirror), matched **nicht** auf `voe.sx`-Links. Built-in `Voe()` (mainUrl=`voe.sx`) matched korrekt. Fix: `Voe1`/`FileMoonSx` nicht mehr re-registrieren (built-in reicht).
 3. **Generischer Fallback** (`genericResolve`): fetcht Embed-Seite, sucht nach direkten mp4/m3u8-URLs (Regex). Best-Effort für obskure JWPlayer-Hoster; fängt nicht alle (vidaraa braucht API-Call), aber fängt z.B. firestream-Video-Pfade.
 
-### ⚠️ "Keine Addons/Streams"-Meldung = ARVIO-Bug, nicht Plugin-Fehler (verifiziert im ARVIO-Code)
+### Recherche: ARVIO Test-Funktion & Log-Möglichkeit (Aug 2026, ARVIO 1.9.983)
+**ARVIO hat KEINE Log-Datei-Exportfunktion.** `DiagnosticsManager` ist nur für Sentry/Crashlytics-Reporting, keine In-App-Log-Anzeige. Der einzige Weg an die Scraper-Logs zu kommen ist **Logcat** (`adb logcat` über USB am PC).
+- ARVIO hat im Code eine **"Test Scraper"-Funktion** (`PluginManager.testScraper()` → `executeWithDiagnostics()`), die mit The Matrix (TMDB 603) testet und `TestDiagnostics` mit Einzelschritten zurückgibt (TMDB-Metadaten, search-Ergebnisse, HTTP-Requests, loadLinks, "Missing extractors: ..."). **ABER: der "Test"-Button ist in `PluginScreen.kt` NICHT in die UI eingebaut** – Strings (`plugin_test_btn`, `plugin_diagnostics_expand`) und ViewModel-Logik existieren, aber kein Compose-Button ruft `PluginUiEvent.TestScraper` auf. Halbfertige ARVIO-Funktion (wie Stalker-VOD-UI).
+- **WICHTIGE INKONSISTENZ:** `executeTmdbProviderWithDiagnostics` (Test-Pfad) ruft `loadLinks` mit `TmdbLink(...).toJson()` direkt auf (OHNE `load()`), während `executeTmdbProvider` (echte Suche) erst `api.load({"id":...,"type":...})` aufruft und `extractData()` das `dataUrl`/`episode.data` extrahiert. Mein `loadLinks` ist auf den load()-Pfad ausgelegt (`{"links":[...]}` oder `http`-URL), würde also im Test-Pfad leer laufen. Falls ARVIO den Test-Button irgendwann aktiviert, muss mein `loadLinks` auch TmdbLink-JSON verarbeiten.
+
+### Recherche: Touch-Bug auf Handy/Tablet (ARVIO Issue #502)
+**Bestätigt und (teilweise) behoben in ARVIO 1.9.983.** ARVIO Issue #502 "fix(mobile): resolve touch issues and unify button styling in plugins settings":
+- Ursache: Plugin-Settings-Screen + Add-Repo-Dialog nutzten TV-only `androidx.tv.material3.Surface`-Buttons, die auf Touch-Geräten nicht reagierten.
+- Fix: `PluginScreen.kt` hat jetzt `LocalDeviceType.current.isTouchDevice()` → separates Mobile-Layout mit touch-friendly Compose-Box-Buttons. **In 1.9.983 enthalten** (verifiziert: `isTouchDevice` existiert in `PluginScreen.kt`).
+- Falls der Nutzer noch eine ältere Version als 1.9.983 hat, sollte er updaten. Der Fix erklärt, warum der Nutzer es über Cloud-Profil auf dem Handy zum Laufen brachte.
+
+### Recherche: "nur webstreamr-Quellen, nicht Filmpalast" – mögliche Ursachen (Aug 2026)
+Da webstreamr (Stremio-Addon, serverseitig) Quellen liefert, mein Filmpalast-Scraper (Cloudstream-DEX) aber nicht, sind die Scraper-Logs nötig. Mögliche Ursachen (in absteigender Wahrscheinlichkeit):
+1. **Scraper wird aufgerufen, aber `load()` schlägt fehl** → `loadResponse` null → `executeTmdbProvider` "both load() paths failed" → emptyList. Könnte ein Kotlin-spezifisches Problem sein (Jsoup-Selektor-Unterschied zu Python-Regex, oder Exception in `fetchTmdbMeta`/`searchFilmpalast`).
+2. **Scraper ist nicht in `enabledScrapers`** – Plugin-Download fehlgeschlagen, oder `manifestEnabled` false, oder Toggle aus. (Weniger wahrscheinlich, da `status=1` verifiziert und Plugin sichtbar ist.)
+3. **`loadLinks` findet Hoster aber `loadExtractor` liefert 0 Links** – Filmpalast rotiert Hostnamen; wenn nur nicht-built-in-Hoster (vidaraa.cc etc.) online, fällt alles durch. (Mein generischer Fallback fängt nur direkte mp4/m3u8.)
+- **Ohne Logcat nicht eindeutig trennbar.** Logcat-Filter die helfen: `ExtExtractorRegistry`, `ExternalExtensionRunner`, `PluginManager`, `TmdbProvider Filmpalast`, `ExtExtRunner`.
+
+
 Selbst bei korrekt aktiviertem Cloudstream-Scraper zeigt ARVIO oft "keine Streaming-Addons eingerichtet". Ursache ist eine ARVIO-seitige Logiklücke:
 - `StreamRepository.getStreamAddons` (StreamRepository.kt:1440): `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` → **nur Stremio-Addons** kommen in die Stream-Auswahl.
 - `DetailsViewModel` berechnet `hasStreamingAddons` aus `streamRepository.installedAddons.count { it.isVodStreamingAddon() }` (DetailsViewModel.kt:1633) → zählt **nur Stremio-Addons**, nicht Cloudstream-Scraper.
