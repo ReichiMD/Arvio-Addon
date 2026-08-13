@@ -210,3 +210,112 @@ Arvio-Addon/
 ## Versionshistorie dieses Addons
 
 (noch keine – Repo ist leer)
+
+---
+
+## Recherche: ARVIO-Plugin-Integration (Stand Aug 2026, ARVIO v1.9.983)
+
+Verifiziert im ARVIO-Quellcode (`ProdigyV21/ARVIO` @ v1.9.983, geklont nach `/tmp/arvio_ref`).
+Recherche anlässlich zweier Nutzer-Probleme beim Testen von GermanProviders als Cloudstream3-Plugin in ARVIO.
+
+### Problem 1: Plugin-Einrichtung funktioniert nur auf TV, nicht auf Handy/Tablet
+
+**Beobachtung (Nutzer):** Add-Repository / Plugin-Aktivierung ging auf Handy & Tablet nicht; erst ein ARVIO-Cloud-Profil (auf TV erstellt, aufs Handy synchronisiert) brachte die Plugins aufs Handy. TV funktionierte direkt.
+
+**Rechercheergebnis:**
+- ARVIO hat ein Layout-Force-Feature ("Force TV, Tablet, or Phone layout") UND Auto-Detect für TV-Modus bei Geräten ohne Touchscreen (CHANGELOG v1.9.3). Die UI wird je Formfaktor unterschiedlich gerendert.
+- Der Plugin-Bereich wurde in v1.9.983 neu gebaut: CHANGELOG-Eintrag "redesigned plugin settings for TV and mobile. Contributor: @Himanth-reddy via #466" – d.h. die mobile Plugin-UI ist **sehr neu** (Juli 2026).
+- Begleitend in v1.9.983: "Fixed sideload production-plugin routing, extractor unloading, **mobile routing**, and TV focus limits" (#466) – ein mobiler Routing-Fix wurde *explizit* für diese Version gebraucht. Das deutet darauf hin, dass mobile Plugin-Pfade vorher fehlerhaft waren.
+- Ein **bekannter, älterer Bug** (AGENTS.md bereits notiert): Add-Repo-Dialog `width(520.dp)` zu breit für Handy-Hochformat (~390dp) → Buttons abgeschnitten/inaktiv im Hochformat.
+- Vergleichs-Befund aus dem Nuvio-Ökosystem (Schwester-App, gleiche Plugin-Architektur): NuvioMobile Issue #1190 – *"If Cloudstream Plugin Repositories are loaded in the Plugins list in the Mobile app, they get removed from Plugins list in the TV app"* (closed as not planned). Cloudstream-Plugin-Listen zwischen Mobile- und TV-UI synchron halten ist **branchenweit ein Problem**, nicht ARVIO-spezifisch.
+
+**Fazit Problem 1:** Sehr wahrscheinlich ein **ARVIO-seitiger Bug in der (neuen) mobilen Plugin-UI** – entweder Routing (in v1.9.983 gerade erst gefixt, evtl. nicht vollständig) oder der bekannte `width(520.dp)`-Dialog-Bug. Dass der Cloud-Sync-Workaround funktioniert, bestätigt: Die Plugin-Daten selbst sind korrekt; nur die mobile Einrichtungspath-UI ist defekt. Keine andere Nutzerberichte als direktes Duplikat gefunden, aber die CHANGELOG-Historie (mobiler Plugin-Routing-Fix in der *aktuellen* Version) zeigt, dass ARVIO genau diese Klasse von Bug gerade behebt.
+
+**Workarounds für Nutzer:** Querformat beim Add-Repo; oder Plugin-Konfiguration auf TV vornehmen + ARVIO-Cloud-Sync aufs Handy (funktioniert laut Nutzer bereits); oder `web.arvio.tv` (Web-App, vollständige ARVIO-UI im Browser, laut CHANGELOG mit TV-D-pad-Navigation).
+
+### Problem 2: Aktivierte Provider erscheinen nicht bei Quellensuche ("kein Add-on eingerichtet / keine Quellen")
+
+**Beobachtung (Nutzer):** In den Plugin-Einstellungen Provider (z.B. Einschalten) aktiviert → auf eine Silo-Episode gegangen → "nach Quellen gesucht" → Meldung "kein Add-on eingerichtet, keine Quellen gefunden".
+
+**Verifizierte Ursache im ARVIO-Code:** ARVIO hat **zwei komplett getrennte Quell-Auflösungspfade**, und Cloudstream3-Plugins (.cs3) laufen über den Pfad, der die "kein Add-on"-Meldung **nicht steuert**:
+
+1. **Stremio-Addon-Pfad** (`StreamRepository` + `AddonRuntimeAggregator`): Hier laufen klassische Stremio-kompatible Addons (HTTP `stream/movie/<imdbId>.json`), Home-Server (Jellyfin/Plex/Emby) und HTTP-Local-Scrapers. Die UI-Variable `hasStreamingAddons` (die "No Streaming Addons" / "kein Add-on eingerichtet" anzeigt) wird **ausschließlich** aus `streamRepository.installedAddons.count { it.isVodStreamingAddon() }` berechnet (`DetailsViewModel.kt` Z. 1600/1633/1650/1689). `isVodStreamingAddon()` prüft nur `isEnabled && type != SUBTITLE && !sportsOnly` – das sind Stremio-Addons, **keine Cloudstream-Scraper**. Filter `getStreamAddons()` (`StreamRepository.kt` Z. 1440) wirft sogar hart raus: `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` – und `RuntimeKind` kennt nur `STREMIO`/`TELEGRAM`, keinen Cloudstream/EXTERNAL_DEX-Wert (`Models.kt` Z. 305).
+
+2. **Cloudstream-Plugin-Pfad** (`PluginManager` + `ExternalExtensionRunner`, sideload-only): Aktivierte `.cs3`-Scraper werden in `DetailsViewModel.loadStreams()` über `pluginManager.executeScrapersStreaming(...)` in einem **parallelen Job** (`pluginScraperJob`, Z. 1510–1552) ausgeführt. Ergebnisse mergen sich asynchron in `streams`. Dieser Pfad startet **nur**, wenn `dataStore.pluginsEnabled` true ist UND `enabledScrapers` (nach `supportsType(mediaType)`) nicht leer ist (`PluginManager.kt` Z. 631–640, 681).
+
+**Warum trotzdem "kein Add-on"-Meldung + keine Quellen bei Silo:** Weil `hasStreamingAddons` Stremio-Addons zählt. Hat der Nutzer **kein einziges** Stremio-Addon installiert (nur Cloudstream-Plugins), ist `hasStreamingAddons=false` → UI zeigt "No Streaming Addons / kein Add-on eingerichtet" an. Die Meldung ist in diesem Fall **irreführend**: Die Cloudstream-Scraper suchen im Hintergrund trotzdem, finden aber für "Silo" vermutlich nichts (siehe Problem 2b), und die UI bleibt bei der "Setup Required"-Meldung stehen, obwohl die Plugins aktiv sind.
+
+**Problem 2b – warum die Cloudstream-Scraper für "Silo" trotzdem 0 Quellen liefern (verifiziert):**
+GermanProviders-Plugins (Filmpalast, Serienstream, AniWorld etc.) sind **keine** `TmdbProvider` (sie überschreiben nicht `load()` für TMDB-JSON), sondern **search-basierte** `MainAPI`-Provider. ARVIOs `ExternalExtensionRunner.executeSearchBased()` (Z. 473–620) macht für search-basierte Provider:
+1. TMDB-Enrichment holen → `localizedTitle` + `year` + alt-Titel
+2. `api.search(title)` aufrufen + bei Trefferlosigkeit Retry mit vereinfachtem Titel und parallelen Alt-Titeln
+3. `findBestMatch()` (Ähnlichkeits-Score) über Suchergebnisse → `api.load(bestMatch.url)` → `extractData()` → `api.loadLinks()`
+
+Scheitern kann es an **mehreren Stellen**:
+- **Sprache:** Silo ist eine Apple TV+-Serie. Deutsche Scraper wie Filmpalast/Serienstream listen "Silo" u.U. nur unter deutschem Titel oder garnicht (Apple-TV+-Originals sind seltener auf deutschen Scraper-Seiten als Netflix/Prime). TMDB `localizedTitle` für Silo DE = "Silo" – passt, aber die Scraper-Seite muss die Serie auch im Katalog haben.
+- **`findBestMatch`-Mismatch:** Wenn der Scraper "Silo" z.B. als "Silo - Season 1" oder mit Jahr-Abweichung zurückgibt, fällt der Similarity-Score unter die Schwelle → `return emptyList()` (Z. 567). Das ist ein **häufiges** Cloudstream-Problem bei ARVIO, weil ARVIO eigenes Title-Matching macht statt die Provider-`load()` direkt mit der Scraper-eigenen URL zu füttern.
+- **Season/Episode-Mapping:** `extractData(loadResponse, mediaType, season, episode)` baut das `data`-JSON, das `loadLinks()` erwartet. Bei Serien muss `load()` eine `TvSeriesLoadResponse` liefern, aus der ARVIO die Episoden-URL extrahiert. GermanProviders' `load()`-Implementierungen sind für Cloudstream3-App geschrieben; ARVIO ruft sie leicht anders auf → kann `data=null` geben → `return emptyList()` (Z. 590).
+- **Host-Dead / Bot-Schutz:** Deutsche Scraper-Seiten blockieren oft. ARVIO fängt `hostUnreachable` ab und skippt (Z. 552). Da ARVIO clientseitig läuft (Gerät-IP), sollte das seltener sein als beim serverseitigen Stremio-Addon – aber möglich.
+
+**Fazit Problem 2:** Zwei Dinge überlagern sich:
+- (a) **ARVIO-UI-Bug/Designschwäche:** Die "kein Add-on eingerichtet"-Meldung wird nur aus dem Stremio-Addon-Pfad gespeist und ignoriert aktivierte Cloudstream-Plugins vollständig. Solange kein Stremio-Addon aktiv ist, zeigt die UI "Setup Required", **selbst wenn** Cloudstream-Scraper im Hintergrund laufen. Das ist eine ARVIO-seitige Logiklücke, nicht des Addons Schuld.
+- (b) **Scraper-Matching:** Selbst wenn die Cloudstream-Scraper laufen, liefern sie für bestimmte Titel (wie Silo) oft 0 Treffer wegen ARVIOs eigenem Title-Matching / `findBestMatch` / Episode-Mapping, das nicht 1:1 der Cloudstream3-App entspricht.
+
+CHANGELOG-Belege, dass ARVIO dieses Themenfeld aktiv bearbeitet:
+- v1.9.983: "Added compatibility for Nuvio-style JavaScript scraper plugins and redesigned plugin settings for TV and mobile" (#466) + "Fixed sideload production-plugin routing, extractor unloading, mobile routing, and TV focus limits" (#466)
+- v1.9.92: "Improved FlixStreams/anime addon matching and fallback stream lookup for episode sources" + "Fixed configured add-ons occasionally failing to appear in the source list until a later retry"
+- v1.8.2: "Source selector shows setup instructions instead of generic 'No sources found' when no addons are installed" + "When no streaming addons are configured, the app now shows a friendly setup guide instead of a playback error"
+
+**Handlungsempfehlung (für unser Addon / Nutzer):**
+1. **Für saubere UI-Anzeige:** Zusätzlich zu den Cloudstream-Plugins **mindestens ein** Stremio-Addon (auch ein inaktives/dummy) installieren, damit `hasStreamingAddons=true` wird und die Meldung verschwindet. Das ist ein Workaround für ARVIOs Logiklücke (a).
+2. **Für echte Quellen bei Serien wie Silo:** Eigenes ARVIO-Addon bauen (Ziel dieses Repos) – aber dabei darauf achten, dass die `MainAPI`-Implementierung robustes `search()` + `load()` + `loadLinks()` bietet, das ARVIOs `findBestMatch`-basiertem Aufruffluss standhält. Ideal: Provider als `TmdbProvider` implementieren (dann nimmt ARVIO den direkteren `executeTmdbProvider`-Pfad ohne fragiles Title-Matching). Das ist eine **Konsequenz für die Modul-1-Architektur** dieses Addons.
+3. **GitHub-Issue bei ARVIO erwägen:** (a) ist klar ein ARVIO-Bug ("hasStreamingAddons ignoriert aktivierte Cloudstream-Scraper"). Lohnt sich als Issue zu melden, da ARVIO aktiv ist (18 Releases in 5 Monaten) und #466 genau dieses Gebiet gerade anfasst.
+
+---
+
+## Implementation: Filmpalast-Plugin als TmdbProvider (Proof-of-Concept)
+
+**Status: gebaut und kompiliert.** `FilmPalast/build/FilmPalast.cs3` (≈23 KB) + `build/plugins.json` werden lokal via `./gradlew make makePluginsJson` erzeugt; CI (`.github/workflows/build.yml`) pusht beides auf den `builds`-Branch.
+
+### Architektur-Entscheidung (verbindlich für alle Modul-1-Scraper)
+**Alle Provider als `TmdbProvider` implementieren**, nicht als plain `MainAPI`. Begründung (siehe oben "Recherche"): ARVIO hat zwei Dispatch-Pfade in `ExternalExtensionRunner.execute()`:
+- `executeTmdbProvider` (wenn `api is TmdbProvider`): ruft `api.load("{\"id\":<tmdbId>,\"type\":\"movie\"|\"tv\"}")` direkt auf → kein fragiles `findBestMatch`-Title-Matching.
+- `executeSearchBased` (sonst): sucht Titel, matcht via Similarity-Score, mappt Season/Episode → häufig 0 Treffer bei Serien.
+
+TmdbProvider ist der zuverlässige Pfad. GermanProviders' Scraper sind alles *search-based* (kein TmdbProvider) → das ist mit ein Grund, warum sie in ARVIO bei Serien oft leer bleiben.
+
+### TmdbProvider-Vertrag (verifiziert am cloudstream3-Source `TmdbProvider.kt`)
+- ARVIO ruft `load("{\"id\":<tmdbId>,\"type\":...}")`; Fallback `load("https://www.themoviedb.org/<type>/<id>")`. Beide Formen müssen `parseTmdbInput` akzeptieren.
+- `load()` muss zurückgeben: `MovieLoadResponse` (Filme, `dataUrl`=JSON) ODER `TvSeriesLoadResponse` mit `Episode`-Liste (Serien, `episode.data`=URL).
+- `loadLinks(data, ...)`: für Filme ist `data` das JSON aus `dataUrl`; für Serien ist `data` die Episoden-URL aus `episode.data`.
+- `useMetaLoadResponse = false` (wir bauen die LoadResponse selbst, nicht über TMDB-Meta-Provider).
+
+### Filmpalast-Seitenstruktur (live verifiziert, Stand Aug 2026)
+- Suche `/search/title/<query>`: listet Serien **pro Episode** (`/stream/silo-s03e06`), Filme als einzelne Seite. Keine Serien-Stammseite mit Staffeln.
+- Stream-Seite `/stream/<slug>`: Hoster-Links in `ul.currentStreamLinks a.iconPlay` mit `data-player-url` (primär) bzw. `href` (fallback).
+- Gesehene Hoster: firestream.to, vidaraa.cc, voe.sx, vidsonic.net → gemappt auf `Voe1`, `FileMoonSx`, `VidHidePro` (Ryderjet), `Supervideo` (AbstreamTo).
+
+### Filmpalast-spezifische `load()`-Logik
+1. TMDB-Meta holen (`api.themoviedb.org/3`, de-DE) → `displayTitle` + `year`.
+2. Filmpalast-Suche nach `displayTitle`.
+3. Treffer matchen (normalisierter Titel-Vergleich, Typ movie/tv). Serie `"Silo S03E06"` → Basisname `"Silo"` wird gegen TMDB-Titel gematcht.
+4. Serie: alle Episoden sammeln → `TvSeriesLoadResponse` (Season/Episode aus Titel geparst). Film: `MovieLoadResponse` mit `dataUrl=JSON{links:[...]}`.
+5. `loadLinks`: Film→JSON-Links; Serie→Episoden-URL fetchen + Host-Links sammeln → `loadExtractor()` pro registriertem Hoster.
+
+### Bekannte Vorbehalte (Proof-of-Concept)
+- **Apple-TV+-Serien (Silo):** deutsche Scraper haben solche Titel u.U. nicht oder zeitverzögert. TMDB-Titel passt, aber Filmpalast muss die Serie im Katalog haben.
+- **TMDB-API-Key:** fest codiert (öffentlich bekannter Cloudstream-Key). Für Produktion ggf. eigener Key.
+- **Hoster-Dead:** Filmpalast-Hosterdomains rotieren; Extractor-Mapping muss ggf. nachjustiert werden. Neue Domains via `registerExtractorAPI` hinzufügen.
+- **Status 3 (Beta only):** bewusst als PoC gesetzt – ARVIO blendet Beta-Plugins nicht automatisch ein, Nutzer muss explizit aktivieren.
+
+### Build (lokal)
+JDK 17+ und Android SDK 35 nötig. Im Env: `JAVA_HOME` + `ANDROID_HOME` (oder `local.properties` mit `sdk.dir`).
+```
+./gradlew make makePluginsJson
+# -> FilmPalast/build/FilmPalast.cs3
+# -> build/plugins.json
+```
+
+## Versionshistorie dieses Addons
+
+- **v1 (Proof-of-Concept):** Filmpalast-Plugin als TmdbProvider. Baut & kompiliert. Noch nicht in ARVIO endgerät-getestet.
