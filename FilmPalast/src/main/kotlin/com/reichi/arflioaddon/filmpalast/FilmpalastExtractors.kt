@@ -1,13 +1,12 @@
 package com.reichi.arflioaddon.filmpalast
 
-import com.lagradost.cloudstream3.extractors.FileMoonSx
 import com.lagradost.cloudstream3.extractors.Supervideo
 import com.lagradost.cloudstream3.extractors.VidHidePro
-import com.lagradost.cloudstream3.extractors.Voe1
 
 /**
- * Custom hoster extractor aliases used by Filmpalast.
- * Each maps a Filmpalast hoster domain onto a known cloudstream3 extractor base class.
+ * Custom hoster extractor aliases used by Filmpalast that are NOT in cloudstream3's
+ * built-in extractor list. Domains like voe.sx, firestream.to, filemoon.sx are built-in
+ * and matched automatically; only Filmpalast-specific aliases live here.
  */
 class Ryderjet : VidHidePro() {
     override var name = "Ryderjet"

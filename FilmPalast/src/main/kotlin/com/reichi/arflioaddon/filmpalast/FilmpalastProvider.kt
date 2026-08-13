@@ -21,6 +21,8 @@ import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
@@ -261,6 +263,12 @@ class FilmpalastProvider : TmdbProvider() {
      * `data` is either:
      *  - a MovieLoadResponse.dataUrl = JSON {"links":[...]} (movie path), or
      *  - an Episode.data = the Filmpalast stream page URL (series path).
+     *
+     * For each hoster link we first try cloudstream3's loadExtractor (matches built-in
+     * extractors by domain: Voe, Firestream, FileMoonSx, Supervideo, VidHidePro, ...).
+     * If no registered extractor handles the domain (Filmpalast rotates obscure hosters
+     * like vidaraa.cc, vidsonic.net, jabturfembitter.com), we fall back to a generic
+     * page-scrape that looks for direct mp4/m3u8 URLs in the embed page.
      */
     override suspend fun loadLinks(
         data: String,
@@ -273,7 +281,6 @@ class FilmpalastProvider : TmdbProvider() {
                 try { parseJson<LoadData>(data).links } catch (_: Exception) { emptyList() }
             }
             data.startsWith("http") -> {
-                // Series: fetch the episode stream page and collect hoster links.
                 val doc = app.get(data).document.select("#content")
                 collectHosterLinks(doc)
             }
@@ -285,10 +292,78 @@ class FilmpalastProvider : TmdbProvider() {
         for (link in links) {
             val fixed = fixUrlNull(link) ?: continue
             try {
-                loadExtractor(fixed, "$mainUrl/", subtitleCallback, callback)
-                any = true
-            } catch (_: Exception) { /* skip broken hoster */ }
+                val matched = loadExtractor(fixed, "$mainUrl/", subtitleCallback, callback)
+                if (matched) {
+                    any = true
+                } else {
+                    // No registered extractor for this domain: generic fallback.
+                    any = genericResolve(fixed, "$mainUrl/", callback) || any
+                }
+            } catch (_: Exception) {
+                any = genericResolve(fixed, "$mainUrl/", callback) || any
+            }
         }
         return any
     }
+
+    /**
+     * Best-effort generic resolver for hoster embed pages that no cloudstream3 extractor
+     * covers. Fetches the embed page and scans for direct video URLs (mp4, m3u8) in
+     * common patterns: JSON sources arrays, hls.js player config, source tags.
+     */
+    private suspend fun genericResolve(
+        url: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
+            val res = app.get(
+                url,
+                headers = mapOf("Referer" to referer, "User-Agent" to mobileUA)
+            )
+            val text = res.text
+            val base = url.substringBeforeLast("/")
+            var found = false
+
+            // 1. Direct m3u8 URLs
+            Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""").findAll(text).forEach { m ->
+                emitLink("Generic", m.groupValues[1], callback)
+                found = true
+            }
+            // 2. Direct mp4 URLs
+            Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)""").findAll(text).forEach { m ->
+                emitLink("Generic", m.groupValues[1], callback)
+                found = true
+            }
+            // 3. Relative m3u8/mp4 paths resolved against base
+            Regex("""["'(]((?:/[^"')\s]+|\.\./[^"')\s]+|[^"')\s]+\.(?:m3u8|mp4))["')]""").findAll(text).forEach { m ->
+                val p = m.groupValues[1]
+                if (p.endsWith(".m3u8") || p.endsWith(".mp4")) {
+                    val abs = if (p.startsWith("http")) p else if (p.startsWith("/")) url.substringBefore("/").dropLastWhile { it != '/' } + p else "$base/$p"
+                    emitLink("Generic", abs, callback)
+                    found = true
+                }
+            }
+            found
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun emitLink(source: String, url: String, callback: (ExtractorLink) -> Unit) {
+        val isM3u8 = url.contains(".m3u8")
+        callback.invoke(
+            ExtractorLink(
+                source = source,
+                name = source,
+                url = url,
+                referer = mainUrl,
+                quality = Qualities.Unknown.value,
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            )
+        )
+    }
+
+    private val mobileUA =
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 }
