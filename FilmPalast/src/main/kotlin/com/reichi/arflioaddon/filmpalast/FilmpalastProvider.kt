@@ -48,6 +48,8 @@ class FilmpalastProvider : TmdbProvider() {
 
     override val useMetaLoadResponse = false
 
+    private val dbg = "Filmpalast"
+
     override val mainPage = mainPageOf(
         "" to "Neu",
         "/movies/top" to "Filme",
@@ -77,16 +79,33 @@ class FilmpalastProvider : TmdbProvider() {
      * fetch TMDB metadata (title/year), search Filmpalast, and build the right LoadResponse.
      */
     override suspend fun load(url: String): LoadResponse? {
-        val (tmdbId, isTv) = parseTmdbInput(url) ?: return null
+        DebugLog.t(dbg, "load() called with url=$url")
+        val (tmdbId, isTv) = parseTmdbInput(url) ?: run {
+            DebugLog.w(dbg, "load: could not parse TMDB input from '$url' -> returning null")
+            return null
+        }
+        DebugLog.t(dbg, "load: parsed tmdbId=$tmdbId isTv=$isTv")
 
-        val meta = fetchTmdbMeta(tmdbId, isTv) ?: return null
+        val meta = fetchTmdbMeta(tmdbId, isTv) ?: run {
+            DebugLog.e(dbg, "load: TMDB metadata fetch failed for tmdbId=$tmdbId isTv=$isTv -> returning null")
+            return null
+        }
         val title = meta.displayTitle
         val year = meta.year
+        DebugLog.t(dbg, "load: TMDB meta -> title='$title' year=$year")
 
         // Filmpalast search returns episode URLs for series and movie pages for movies.
         val searchResults = searchFilmpalast(title)
+        DebugLog.t(dbg, "load: Filmpalast search('$title') returned ${searchResults.size} results")
+        searchResults.take(15).forEach { DebugLog.t(dbg, "  search result: ${it.title} | type=${it.type} s=${it.season} e=${it.episode} | ${it.url}") }
+
         val matches = matchResults(searchResults, title, year, isTv)
-        if (matches.isEmpty()) return null
+        DebugLog.t(dbg, "load: after matchResults -> ${matches.size} matches (isTv=$isTv)")
+        matches.take(15).forEach { DebugLog.t(dbg, "  match: ${it.title} | s=${it.season} e=${it.episode} | ${it.url}") }
+        if (matches.isEmpty()) {
+            DebugLog.w(dbg, "load: no matches -> returning null (ARVIO will report 'both load() paths failed'/'no sources')")
+            return null
+        }
 
         return if (isTv) {
             buildSeriesResponse(matches, meta)
@@ -137,11 +156,15 @@ class FilmpalastProvider : TmdbProvider() {
 
     private suspend fun fetchTmdbMeta(tmdbId: Int, isTv: Boolean): TmdbMeta? {
         val path = if (isTv) "/tv/$tmdbId" else "/movie/$tmdbId"
+        val full = "$tmdbApiUrl$path"
         return try {
-            parseJson<TmdbMeta>(
-                app.get("$tmdbApiUrl$path", params = mapOf("api_key" to tmdbApiKey, "language" to "de-DE")).text
-            )
-        } catch (_: Exception) { null }
+            val res = app.get(full, params = mapOf("api_key" to tmdbApiKey, "language" to "de-DE"))
+            DebugLog.t(dbg, "fetchTmdbMeta: GET $full -> ${res.code}")
+            parseJson<TmdbMeta>(res.text)
+        } catch (e: Exception) {
+            DebugLog.e(dbg, "fetchTmdbMeta: request threw ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
     }
 
     // ---- Filmpalast search & match ----
@@ -182,8 +205,21 @@ class FilmpalastProvider : TmdbProvider() {
     }
 
     private suspend fun searchFilmpalast(query: String): List<FilmpalastEntry> {
-        val document = app.get("$mainUrl/search/title/${query.encode()}").document
-        return document.select("#content article.liste, #content .glowliste").mapNotNull { it.toSearchEntry() }
+        val searchUrl = "$mainUrl/search/title/${query.encode()}"
+        return try {
+            val res = app.get(searchUrl)
+            DebugLog.t(dbg, "searchFilmpalast: GET $searchUrl -> ${res.code}")
+            val document = res.document
+            val selected = document.select("#content article.liste, #content .glowliste")
+            DebugLog.t(dbg, "searchFilmpalast: CSS selector matched ${selected.size} elements")
+            if (selected.isEmpty()) {
+                DebugLog.w(dbg, "searchFilmpalast: 0 elements matched. Page title/h2: ${document.select("title").text()} | first 300 chars: ${document.body().text().take(300)}")
+            }
+            selected.mapNotNull { it.toSearchEntry() }
+        } catch (e: Exception) {
+            DebugLog.e(dbg, "searchFilmpalast: GET threw ${e.javaClass.simpleName}: ${e.message}")
+            emptyList()
+        }
     }
 
     private fun String.encode(): String =
@@ -214,40 +250,60 @@ class FilmpalastProvider : TmdbProvider() {
     }
 
     private suspend fun buildMovieResponse(entry: FilmpalastEntry, meta: TmdbMeta): LoadResponse? {
-        val doc = app.get(entry.url).document.select("#content")
-        val detailTitle = doc.select("h2.rb.bgDark").text().ifEmpty { meta.displayTitle }
-        val imagePath = doc.select(".detail.rb img.cover2").attr("src")
-        val description = doc.select("span[itemprop=description]").text()
-        val links = collectHosterLinks(doc)
+        return try {
+            DebugLog.t(dbg, "buildMovieResponse: GET ${entry.url}")
+            val res = app.get(entry.url)
+            DebugLog.t(dbg, "buildMovieResponse: -> ${res.code}")
+            val doc = res.document.select("#content")
+            val detailTitle = doc.select("h2.rb.bgDark").text().ifEmpty { meta.displayTitle }
+            val imagePath = doc.select(".detail.rb img.cover2").attr("src")
+            val description = doc.select("span[itemprop=description]").text()
+            val links = collectHosterLinks(doc)
+            DebugLog.t(dbg, "buildMovieResponse: collected ${links.size} hoster links")
+            links.take(20).forEach { DebugLog.t(dbg, "  hoster link: $it") }
 
-        return newMovieLoadResponse(detailTitle, entry.url, TvType.Movie, LoadData(links).toJson()) {
-            this.posterUrl = fixUrl(imagePath)
-            this.plot = description
-            this.year = meta.year
+            newMovieLoadResponse(detailTitle, entry.url, TvType.Movie, LoadData(links).toJson()) {
+                this.posterUrl = fixUrl(imagePath)
+                this.plot = description
+                this.year = meta.year
+            }
+        } catch (e: Exception) {
+            DebugLog.e(dbg, "buildMovieResponse: threw ${e.javaClass.simpleName}: ${e.message}")
+            null
         }
     }
     private suspend fun buildSeriesResponse(
         episodes: List<FilmpalastEntry>,
         meta: TmdbMeta
     ): LoadResponse? {
-        // Group by season/episode. Filmpalast lists episodes individually; each entry already
-        // has season/episode parsed from its title.
-        val sorted = episodes.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
-            .distinctBy { it.season to it.episode }
+        return try {
+            // Group by season/episode. Filmpalast lists episodes individually; each entry already
+            // has season/episode parsed from its title.
+            val sorted = episodes.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+                .distinctBy { it.season to it.episode }
 
-        val epList: List<Episode> = sorted.mapIndexed { _, e ->
-            // dataUrl carries the Filmpalast stream URL; loadLinks resolves it.
-            newEpisode(e.url) {
-                this.name = e.title
-                this.season = e.season
-                this.episode = e.episode
+            val epList: List<Episode> = sorted.mapIndexed { _, e ->
+                // dataUrl carries the Filmpalast stream URL; loadLinks resolves it.
+                newEpisode(e.url) {
+                    this.name = e.title
+                    this.season = e.season
+                    this.episode = e.episode
+                }
             }
-        }
-        if (epList.isEmpty()) return null
+            DebugLog.t(dbg, "buildSeriesResponse: built ${epList.size} episodes (seasons: ${epList.mapNotNull { it.season }.distinct()})")
+            epList.take(20).forEach { DebugLog.t(dbg, "  episode: S${it.season}E${it.episode} ${it.name} -> ${it.data}") }
+            if (epList.isEmpty()) {
+                DebugLog.w(dbg, "buildSeriesResponse: empty episode list -> null")
+                return null
+            }
 
-        return newTvSeriesLoadResponse(meta.displayTitle, mainUrl, TvType.TvSeries, epList) {
-            this.year = meta.year
-            this.plot = ""
+            newTvSeriesLoadResponse(meta.displayTitle, mainUrl, TvType.TvSeries, epList) {
+                this.year = meta.year
+                this.plot = ""
+            }
+        } catch (e: Exception) {
+            DebugLog.e(dbg, "buildSeriesResponse: threw ${e.javaClass.simpleName}: ${e.message}")
+            null
         }
     }
 
@@ -276,33 +332,60 @@ class FilmpalastProvider : TmdbProvider() {
         subtitleCallback: (com.lagradost.cloudstream3.SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        DebugLog.t(dbg, "loadLinks() called with data=${data.take(300)}")
         val links: List<String> = when {
             data.trimStart().startsWith("{") -> {
-                try { parseJson<LoadData>(data).links } catch (_: Exception) { emptyList() }
+                try { parseJson<LoadData>(data).links } catch (e: Exception) {
+                    DebugLog.e(dbg, "loadLinks: could not parse movie LoadData JSON: ${e.message}")
+                    emptyList()
+                }
             }
             data.startsWith("http") -> {
-                val doc = app.get(data).document.select("#content")
-                collectHosterLinks(doc)
+                try {
+                    DebugLog.t(dbg, "loadLinks: series path, fetching episode page $data")
+                    val res = app.get(data)
+                    DebugLog.t(dbg, "loadLinks: episode page -> ${res.code}")
+                    collectHosterLinks(res.document.select("#content"))
+                } catch (e: Exception) {
+                    DebugLog.e(dbg, "loadLinks: fetching episode page threw ${e.javaClass.simpleName}: ${e.message}")
+                    emptyList()
+                }
             }
-            else -> emptyList()
+            else -> {
+                DebugLog.w(dbg, "loadLinks: data is neither JSON nor http URL -> empty. data='$data'")
+                emptyList()
+            }
         }
-        if (links.isEmpty()) return false
+        DebugLog.t(dbg, "loadLinks: resolved ${links.size} hoster links to try")
+        if (links.isEmpty()) {
+            DebugLog.w(dbg, "loadLinks: 0 links -> returning false (no sources)")
+            return false
+        }
 
         var any = false
         for (link in links) {
-            val fixed = fixUrlNull(link) ?: continue
+            val fixed = fixUrlNull(link)
+            if (fixed == null) {
+                DebugLog.w(dbg, "loadLinks: fixUrlNull null for '$link' -> skip")
+                continue
+            }
             try {
                 val matched = loadExtractor(fixed, "$mainUrl/", subtitleCallback, callback)
+                DebugLog.t(dbg, "loadLinks: loadExtractor('$fixed') -> matched=$matched")
                 if (matched) {
                     any = true
                 } else {
                     // No registered extractor for this domain: generic fallback.
-                    any = genericResolve(fixed, "$mainUrl/", callback) || any
+                    val fallback = genericResolve(fixed, "$mainUrl/", callback)
+                    DebugLog.t(dbg, "loadLinks: genericResolve('$fixed') -> found=$fallback")
+                    any = fallback || any
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                DebugLog.w(dbg, "loadLinks: loadExtractor('$fixed') threw ${e.javaClass.simpleName}: ${e.message} -> trying generic")
                 any = genericResolve(fixed, "$mainUrl/", callback) || any
             }
         }
+        DebugLog.t(dbg, "loadLinks: DONE, any=$any (any=true means at least one source emitted)")
         return any
     }
 
@@ -344,8 +427,10 @@ class FilmpalastProvider : TmdbProvider() {
                     found = true
                 }
             }
+            DebugLog.t(dbg, "genericResolve: GET $url -> ${res.code}, len=${text.length}, found=$found")
             found
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            DebugLog.w(dbg, "genericResolve: GET $url threw ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }

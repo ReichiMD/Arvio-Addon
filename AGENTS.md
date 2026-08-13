@@ -7,7 +7,16 @@ Ziel: Ventix-Funktionalität (deutsche Web-Scraper + Stalker-VOD) als Plugin in 
 
 **Was fertig ist:** Filmpalast-Plugin als Cloudstream3-`TmdbProvider` implementiert, gebaut, auf `builds`-Branch gepusht, `status=1`, `tvTypes=[Movie,TvSeries]` verifiziert. CI grün. Nutzer hat es in ARVIO 1.9.983 (sideload) installiert. Ein anderes Addon (webstreamr, = Stremio-Addon) liefert Quellen – beweist dass ARVIOs Addon-System läuft.
 
-**Das aktuelle Problem:** Bei der Quellensuche (z.B. Matrix, Silo) zeigt ARVIO **nur webstreamr-Quellen, NICHT Filmpalast**. Der Filmpalast-Scraper wird entweder gar nicht aufgerufen ODER `load()`/`loadLinks()` schlägt fehl. **Die genaue Ursache ist OHNE Logcat vom Gerät nicht eindeutig zu trennen.** Python-E2E-Simulation läuft durch; filmpalast.to + TMDB sind per HTTP erreichbar (kein Blocking verifiziert). Also vermutlich ein Kotlin/Jsoup-Parsing-Problem in `load()`.
+**v1.2 (13.08.2026): Selbst-Diagnose-Modus eingebaut.** Da ein generelles "Logcat auslesen"-Plugin in Android unmöglich ist (ohne `READ_LOGS`, das nur debuggablen/system-signierten Apps gewährt wird – sideload-APK ist ein Release-Build), wurde stattdessen der **eigene Scraper-Code instrumentiert** + ein **lokal auslesbarer HTTP-Server** eingebaut:
+- `DebugLog.kt` – Trace-Logger (in-memory Ring-Buffer 2000 Einträge + Spiegelung in Datei `Android/data/com.arflix.tv/files/arvio-addon-logs/filmpalast-trace.log`, keine Permission nötig).
+- `DebugServer.kt` – roher `ServerSocket` auf `localhost:8420` (keine externe Library, bindet nur loopback). Routen: `/` (HTML-Trace, auto-refresh 3s), `/raw` (plain text), `/clear` (löschen).
+- `FilmpalastProvider.kt` – `load()`/`loadLinks()`/`buildMovie/SeriesResponse`/`fetchTmdbMeta`/`searchFilmpalast`/`genericResolve` vollständig mit Trace-Aufrufen ummantelt (jeder HTTP-Status, jede Treffer-Liste, jeder Match-Entscheid, jeder `loadExtractor`-Returnwert, jeder Exception).
+- Start in `FilmpalastPlugin.load()` (Plugin läuft im ARVIO-Prozess → erbt INTERNET-Permission).
+- Plugin-Version auf 2 gebumpt.
+- **Wie man das Log liest:** Auf dem Handy (wo ARVIO läuft) im Browser `http://localhost:8420/` öffnen → live-Trace. Siehe "Schritt-für-Schritt: Diagnose-Log auslesen" unten.
+- **Was das Log beantwortet:** (a) ob ARVIO den Scraper überhaupt aufruft (kein Trace-Eintrag nach einer Suche = ARVIO ruft uns nicht an → ARVIO-Seite-Problem), (b) wo genau in `load()`/`loadLinks()` es scheitert (TMDB-Fetch, Filmpalast-Suche, Match, Hoster-Extraktion). Das ersetzt Logcat für unsere Zwecke.
+
+**Das aktuelle Problem:** Bei der Quellensuche (z.B. Matrix, Silo) zeigt ARVIO **nur webstreamr-Quellen, NICHT Filmpalast**. Der Filmpalast-Scraper wird entweder gar nicht aufgerufen ODER `load()`/`loadLinks()` schlägt fehl. **Mit v1.2 können wir das nun ohne Logcat vom Gerät klären** – das Diagnose-Log auf `localhost:8420` zeigt direkt, ob/wie der Scraper läuft.
 
 ### NÄCHSTER SCHRITT (Prio 1): Logcat vom Gerät besorgen
 ARVIO hat **keine Log-Datei-Exportfunktion** und schreibt **keine App-Logs in Dateien** (verifiziert im gesamten ARVIO-Quellcode – nur IPTV-Listen, APK-Downloads, Telegram-Init-Log, Crashlytics-Crashes werden in Dateien abgelegt, keine Scraper-Logs). Scraper-Logs (`Log.d/w` in `ExternalExtensionRunner.kt`) gehen **nur an Androids Logcat-Kernel-Buffer** (im RAM, flüchtig, ohne Root nicht direkt auslesbar). Möglichkeiten für den Nutzer:
@@ -394,7 +403,29 @@ JDK 17+ und Android SDK 35 nötig. Im Env: `JAVA_HOME` + `ANDROID_HOME` (oder `l
 # -> build/plugins.json
 ```
 
+## Schritt-für-Schritt: Diagnose-Log auslesen (v1.2+)
+
+Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trace und stellt ihn über einen lokalen HTTP-Server auf `http://localhost:8420/` bereit. So liest du das Log:
+
+1. **Neues Plugin in ARVIO laden.** ARVIO-Einstellungen → Plugins & Extensions → Filmpalast aktualisieren/einschalten. Ab v1.2 startet beim Laden des Plugins automatisch der Diagnose-Server (im ARVIO-Prozess, nur loopback).
+2. **Quellensuche auslösen** (das, was bisher leer blieb): Öffne in ARVIO z.B. "Matrix" (Film) oder "Silo" (Serie) → "nach Quellen suchen". Das triggert ARVIOs Aufruf von `load()`/`loadLinks()` und erzeugt Trace-Einträge.
+3. **Log im Handy-Browser ansehen:** Öffne einen Browser auf **demselben Gerät**, auf dem ARVIO läuft (Chrome/Firefox), und gehe zu `http://localhost:8420/`.
+   - Die Seite aktualisiert sich automatisch alle 3 Sekunden.
+   - `http://localhost:8420/raw` → reiner Text (zum Kopieren).
+   - `http://localhost:8420/clear` → Trace löschen (vor einer neuen Suche).
+4. **Trace lesen / interpretieren:**
+   - **Gar kein Trace-Eintrag** nach einer Suche → ARVIO ruft den Scraper nicht auf (ARVIO-Seite: `manifestEnabled`/`enabledScrapers`/`supportsType`). Der Diagnose-Server selbst sollte aber beim Plugin-Laden "listening on http://localhost:8420" geloggt haben – taucht das nicht auf, lief das Plugin gar nicht.
+   - `load: could not parse TMDB input` → ARVIO ruft `load()` mit einem Format auf, das wir nicht erwarten.
+   - `fetchTmdbMeta: request threw ...` → TMDB-Erreichbarkeit/Key-Problem.
+   - `searchFilmpalast: CSS selector matched 0 elements` → Filmpalast-Seitenstruktur hat sich geändert (Jsoup-Selektor veraltet) ODER Bot-Schutz/403.
+   - `load: after matchResults -> 0 matches` → Suche liefert Treffer, aber `matchResults` filtert alle raus (Titel-Normalisierung zu streng).
+   - `loadLinks: 0 links -> returning false` → `collectHosterLinks` findet nichts (Selektor/`data-player-url`-Attribut geändert).
+   - `loadExtractor('...') -> matched=false` für ALLE Links → keine built-in Extractoren für die aktuellen Hoster-Domains.
+5. **Log für mich aufheben:** Entweder den `/raw`-Text kopieren und in der nächsten Session einfügen, ODER die gespiegelte Datei `Android/data/com.arflix.tv/files/arvio-addon-logs/filmpalast-trace.log` (ab Android 13 evtl. nur über ADB erreichbar).
+6. **Falls der Browser die Seite nicht lädt:** Server läuft nur, solange der ARVIO-Prozess lebt. ARVIO zwischendrin nicht beenden. Alternativ via ADB: `adb forward tcp:8420 tcp:8420` dann am PC `curl http://localhost:8420/raw`.
+
 ## Versionshistorie dieses Addons
 
 - **v1 (Proof-of-Concept):** Filmpalast-Plugin als TmdbProvider. Baut & kompiliert. Noch nicht in ARVIO endgeraet-getestet.
 - **v1.1 (Aug 2026, Commits b6e3c1b bis 8aa09d3):** Hoster-Extraktion gefixt (loadLinks respektiert loadExtractor-Return; Voe1 entfernt; generischer Fallback fuer unbekannte Hostnamen); endgeraet-getestet in ARVIO 1.9.983 (sideload) von Nutzer. Plugin laedt, ist sichtbar & aktivierbar. **Aber:** bei Quellensuche (Matrix/Silo) zeigt ARVIO nur webstreamr-Quellen, nicht Filmpalast - Root-Cause offen, Logcat vom Geraet noetig (siehe "AKTUELLER STAND" ganz oben). AGENTS.md umfassend mit ARVIO-Scraper-Pfad, Touch-Bug-Fix #502, Test-Funktion-Status und Logcat-Optionen dokumentiert.
+- **v1.2 (13.08.2026):** Selbst-Diagnose-Modus statt Logcat. `DebugLog.kt` + `DebugServer.kt` (lokaler HTTP-Server `localhost:8420`), `FilmpalastProvider` vollständig instrumentiert, Version auf 2 gebumpt. Ersetzt Logcat-Zugang fuer unseren eigenen Scraper-Code. Siehe "Schritt-fuer-Schritt: Diagnose-Log auslesen".

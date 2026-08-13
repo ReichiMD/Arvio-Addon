@@ -7,6 +7,12 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class FilmpalastPlugin : Plugin() {
     override fun load(context: Context) {
+        // Self-diagnosis: initialize the trace logger and start a local HTTP server on
+        // http://localhost:8420 so the user can read scraper logs in the device browser.
+        // See DebugLog.kt / DebugServer.kt.
+        DebugLog.init(context)
+        DebugServer.start()
+
         registerMainAPI(FilmpalastProvider())
 
         // Custom hoster aliases not covered by cloudstream3's built-in extractors.
