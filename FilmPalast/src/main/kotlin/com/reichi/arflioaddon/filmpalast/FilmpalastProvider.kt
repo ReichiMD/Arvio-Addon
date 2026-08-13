@@ -132,7 +132,7 @@ class FilmpalastProvider : TmdbProvider() {
      * returns dataUrl for MovieLoadResponse, so loadLinks gets called with "ARVIO_DEBUG",
      * which triggers the debug-source emission so the trace becomes visible in ARVIO.
      */
-    private fun debugLoadResponse(): LoadResponse {
+    private suspend fun debugLoadResponse(): LoadResponse {
         DebugLog.t(dbg, "load: returning debug LoadResponse (dataUrl=ARVIO_DEBUG)")
         return newMovieLoadResponse("Filmpalast (Diagnose)", mainUrl, TvType.Movie, "ARVIO_DEBUG") {
             this.year = null
