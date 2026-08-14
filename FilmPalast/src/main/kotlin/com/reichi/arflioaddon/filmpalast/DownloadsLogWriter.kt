@@ -139,7 +139,7 @@ object DownloadsLogWriter {
 private fun writeTextJava(file: File, text: String) {
     val out = java.io.FileOutputStream(file)
     try {
-        out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        out.write(text.toByteArray(Charsets.UTF_8))
     } finally {
         out.close()
     }
@@ -148,7 +148,7 @@ private fun writeTextJava(file: File, text: String) {
 private fun writeAndClose(os: OutputStream?, content: String) {
     if (os == null) return
     try {
-        os.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        os.write(content.toByteArray(Charsets.UTF_8))
     } finally {
         os.close()
     }

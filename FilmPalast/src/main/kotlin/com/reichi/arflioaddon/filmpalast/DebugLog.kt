@@ -127,7 +127,7 @@ object DebugLog {
 private fun File.writeTextJava(text: String) {
     val out = java.io.FileOutputStream(this)
     try {
-        out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        out.write(text.toByteArray(Charsets.UTF_8))
     } finally {
         out.close()
     }
@@ -136,7 +136,7 @@ private fun File.writeTextJava(text: String) {
 private fun File.appendTextJava(text: String) {
     val out = java.io.FileOutputStream(this, true)
     try {
-        out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        out.write(text.toByteArray(Charsets.UTF_8))
     } finally {
         out.close()
     }

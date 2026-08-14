@@ -91,14 +91,16 @@ object DebugServer {
             }
             else -> "text/html; charset=utf-8" to htmlPage(renderTrace(), autoRefresh = true)
         }
-        // Plain java String.getBytes(UTF_8) — NOT kotlin.text.toByteArray (same risk as
-        // kotlin/io/FilesKt: ARVIO's shrunk classloader may not expose the stdlib class).
+        // String.toByteArray(UTF_8) is the kotlin.text extension (StringsKt) — a core
+        // stdlib class ARVIO itself depends on heavily for HTTP string encoding, so it is
+        // reliably present at runtime. (kotlin/io/FilesKt was NOT present — that's the bug
+        // we fixed.) All diagnostic code is wrapped in try/catch(Throwable) regardless.
         val utf8 = java.nio.charset.StandardCharsets.UTF_8
-        val bytes = body.getBytes(utf8)
-        out.write("HTTP/1.1 200 OK\r\n".getBytes(utf8))
-        out.write("Content-Type: $contentType\r\n".getBytes(utf8))
-        out.write("Content-Length: ${bytes.size}\r\n".getBytes(utf8))
-        out.write("Connection: close\r\n\r\n".getBytes(utf8))
+        val bytes = body.toByteArray(utf8)
+        out.write("HTTP/1.1 200 OK\r\n".toByteArray(utf8))
+        out.write("Content-Type: $contentType\r\n".toByteArray(utf8))
+        out.write("Content-Length: ${bytes.size}\r\n".toByteArray(utf8))
+        out.write("Connection: close\r\n\r\n".toByteArray(utf8))
         out.write(bytes)
         out.flush()
     }
