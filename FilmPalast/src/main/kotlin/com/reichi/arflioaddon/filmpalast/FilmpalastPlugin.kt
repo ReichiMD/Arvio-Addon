@@ -7,11 +7,16 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class FilmpalastPlugin : Plugin() {
     override fun load(context: Context) {
-        // Self-diagnosis: initialize the trace logger and start a local HTTP server on
-        // http://localhost:8420 so the user can read scraper logs in the device browser.
-        // See DebugLog.kt / DebugServer.kt.
-        DebugLog.init(context)
-        DebugServer.start()
+        // Self-diagnosis is best-effort: a failure here MUST NOT prevent the scraper from
+        // registering. ARVIO loads .cs3 via DexClassLoader with a shrunk kotlin-stdlib
+        // parent classloader, so any kotlin-stdlib extension we touch in the diagnostic
+        // path could throw NoClassDefFoundError (an Error) and abort load(). Wrap it.
+        try {
+            DebugLog.init(context)
+            DebugServer.start()
+        } catch (t: Throwable) {
+            android.util.Log.e("ArvioAddon[FilmpalastPlugin]", "diagnostic init failed (non-fatal): ${t.javaClass.simpleName}: ${t.message}")
+        }
 
         registerMainAPI(FilmpalastProvider())
 

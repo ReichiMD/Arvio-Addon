@@ -7,7 +7,6 @@ import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
-import kotlin.concurrent.thread
 
 /**
  * Tiny local HTTP server that serves the DebugLog trace so the user can read it in a
@@ -29,7 +28,10 @@ object DebugServer {
     fun start() {
         if (running) return
         running = true
-        serverThread = thread(start = true, name = "ArvioAddon-DebugServer", isDaemon = true) {
+        // Plain java.lang.Thread — NOT kotlin.concurrent.thread (ARVIO's release APK may
+        // shrink unused kotlin-stdlib classes; a NoClassDefFoundError here would abort
+        // plugin.load()). See DebugLog.kt.
+        val t = Thread {
             try {
                 // Bind explicitly to loopback (127.0.0.1). Binding to the wildcard
                 // address can be blocked by Android's network security config on some
@@ -50,10 +52,14 @@ object DebugServer {
                 running = false
             }
         }
+        t.isDaemon = true
+        t.name = "ArvioAddon-DebugServer"
+        t.start()
+        serverThread = t
     }
 
     private fun handle(client: Socket) {
-        thread(start = true, isDaemon = true) {
+        val t = Thread {
             try {
                 processRequest(client)
             } catch (e: Exception) {
@@ -62,6 +68,8 @@ object DebugServer {
                 try { client.close() } catch (_: Exception) {}
             }
         }
+        t.isDaemon = true
+        t.start()
     }
 
     private fun processRequest(client: Socket) {
@@ -83,11 +91,14 @@ object DebugServer {
             }
             else -> "text/html; charset=utf-8" to htmlPage(renderTrace(), autoRefresh = true)
         }
-        val bytes = body.toByteArray()
-        out.write("HTTP/1.1 200 OK\r\n".toByteArray())
-        out.write("Content-Type: $contentType\r\n".toByteArray())
-        out.write("Content-Length: ${bytes.size}\r\n".toByteArray())
-        out.write("Connection: close\r\n\r\n".toByteArray())
+        // Plain java String.getBytes(UTF_8) — NOT kotlin.text.toByteArray (same risk as
+        // kotlin/io/FilesKt: ARVIO's shrunk classloader may not expose the stdlib class).
+        val utf8 = java.nio.charset.StandardCharsets.UTF_8
+        val bytes = body.getBytes(utf8)
+        out.write("HTTP/1.1 200 OK\r\n".getBytes(utf8))
+        out.write("Content-Type: $contentType\r\n".getBytes(utf8))
+        out.write("Content-Length: ${bytes.size}\r\n".getBytes(utf8))
+        out.write("Connection: close\r\n\r\n".getBytes(utf8))
         out.write(bytes)
         out.flush()
     }

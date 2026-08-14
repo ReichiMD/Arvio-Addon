@@ -1,50 +1,147 @@
-# AGENTS.md â Ventix Arvio Addon
+# AGENTS.md ГўВҖВ“ Ventix Arvio Addon
 
-Dieses Repo baut ein **Cloudstream3-kompatibles Plugin** fÃ¼r die **ARVIO** Android-TV-App (sideload-APK).
-Ziel: Ventix-FunktionalitÃ¤t (deutsche Web-Scraper + Stalker-VOD) als Plugin in ARVIO laufen lassen â clientseitig, ohne Server.
+Dieses Repo baut ein **Cloudstream3-kompatibles Plugin** fГғВјr die **ARVIO** Android-TV-App (sideload-APK).
+Ziel: Ventix-FunktionalitГғВӨt (deutsche Web-Scraper + Stalker-VOD) als Plugin in ARVIO laufen lassen ГўВҖВ“ clientseitig, ohne Server.
 
-## â­ AKTUELLER STAND & NÃCHSTE SCHRITTE (Stand 13.08.2026 â fÃ¼r die nÃ¤chste Session)
+## ГўВӯВҗ AKTUELLER STAND & NГғВ„CHSTE SCHRITTE (Stand 14.08.2026 ГўВҖВ“ LOGCAT-ERKENNTNIS)
 
-### ENTSCHEIDENDE ERKENNTNIS DIESER SESSION: ARVIO ruft .cs3-Plugins auf dem GerÃ¤t GAR NICHT auf
+### ENTSCHEIDENDE ERKENNTNIS (14.08.2026, Logcat via USB+adb auf Pixel 7): Die .cs3-Dateien werden NIE heruntergeladen
+**Root-Cause gefunden und verifiziert im Logcat + ARVIO-Source.** Das Problem ist NICHT, dass ARVIO den Scraper nicht aufruft ГўВҖВ“ ARVIO ruft ihn auf, findet aber keine Datei.
+
+**Logcat-Befund (arvio-log.txt, arvio-log2.txt, Pixel 7, ARVIO 1.9.983 sideload):**
+```
+D PluginManager: Streaming execution of 18 scrapers for movie:603   <-- Scraper-Pfad wird durchlaufen (Matrix, TMDB 603) ГўВңВ“
+D PluginManager: Executing DEX scraper: FilmPalast                    <-- ARVIO will jeden Scraper ausfГғВјhren ГўВңВ“
+E ExtExtensionLoader: DEX file not found for <repoId>:FilmPalast: /data/user/0/com.arvio.tv/files/cs_extensions/<repoId>_FilmPalast.cs3  ГўВңВ— DATEI FEHLT
+E ExtExtensionRunner: No API loaded for scraper: <repoId>:FilmPalast  ГўВңВ—
+D PluginManager: DEX scraper FilmPalast returned 0 results             ГўВңВ—
+```
+- Passiert bei ALLEN 18 Scrapern (FilmPalast, HDFilme, Kinoger, ARD, Discovery, Arte, KinoKing, EinschaltenIn, HuhuTo, PlutoTV, Megakino, Serienstream, Netzkino, SpiegelTV, Moflix, Xcine, Welt) ГўВҖВ“ unserem UND GermanProviders. BestГғВӨtigt: ARVIO-seitiges Problem.
+- `ExtExtensionLoader: ensureExtractorsLoaded: scanned 0 .cs3 files, registered 0 extractors` ГўВҶВ’ `cs_extensions`-Ordner komplett LEER.
+- WebStreamr (Stremio-Addon) funktioniert (3 streams, 757ms/322ms) ГўВҶВ’ Stremio-Pfad lГғВӨuft, nur .cs3-Pfad kaputt.
+- **KEIN einziger Download-Versuch im Log.** Kein "Downloading", keine HTTP-Request zu raw.githubusercontent.com, kein "Failed to download extension: HTTP ...", kein "Downloaded extension". ARVIO hat die Scraper-Metadaten (Name/ID/URL aus plugins.json) in der Datenbank, aber die .cs3-Datei nie heruntergeladen.
+
+**Warum der Download nie stattfindet (verifiziert im ARVIO-Source @ v1.9.983):**
+- `PluginManager.addRepository()` (PluginManager.kt:426) ruft `downloadDexExtensions(repo.id, parseResult.plugins)` auf ГўВҶВ’ das lГғВӨdt die .cs3-Dateien herunter (parallel via `downloadExtension`).
+- **ABER: Der Nutzer fГғВјgt Repos via Cloud-Sync hinzu, nicht via Add-Repository-Dialog!** `CloudSyncRepository.applyCloudPayload()` (CloudSyncRepository.kt:1721-1731) macht beim Restore nur:
+  - `pluginDataStore.saveRepositories(repos)` (nur Metadaten in DB)
+  - `pluginDataStore.saveScrapers(scrapers)` (nur Metadaten in DB ГўВҖВ“ inkl. URL, aber KEIN Download!)
+  - `pluginDataStore.setPluginsEnabled(...)` (global an)
+  - **KEIN Aufruf von `downloadDexExtensions`!** Cloud-Sync synchronisiert Scraper-Metadaten, aber NICHT die .cs3-Dateien.
+- Folge: Scraper erscheint in der Liste (Metadaten da), Toggle speichert (manifestEnabled=true, status=1), ARVIO versucht AusfГғВјhrung ("Executing DEX scraper") ГўВҖВ“ aber `cs_extensions/` ist leer ГўВҶВ’ "DEX file not found" ГўВҶВ’ "No API loaded" ГўВҶВ’ 0 results.
+- Das erklГғВӨrt, warum es auf TV UND Handy identisch ist: Cloud-Sync kopiert nur Metadaten, die .cs3-Downloads werden pro-GerГғВӨt nur bei direktem `addRepository`/`refreshExternalRepository` getriggert ГўВҖВ“ und der Nutzer hat (vermutlich wegen des Touch-Bugs frГғВјher) alles ГғВјber Cloud-Profil gemacht, nie direkt auf dem GerГғВӨt.
+
+**NГғВ„CHSTER SCHRITT (Prio 1): Repo auf dem GerГғВӨt DIREKT hinzufГғВјgen (nicht Cloud-Sync), dabei Logcat mitlaufen lassen**
+Ziel: sehen, ob `downloadDexExtensions`ГўВҶВ’`downloadExtension` ГғВјberhaupt aufgerufen wird und ob der Download fehlschlГғВӨgt (HTTP 404/403/Timeout) oder ob ARVIO den Download gar nicht erst triggert.
+1. `adb logcat -c` (Puffer leeren).
+2. Am Pixel 7 in ARVIO: Repos LГғВ–SCHEN (beide: Arvio-Addon + GermanProviders).
+3. Am Pixel 7 in ARVIO: **Add Repository** DIREKT auf dem GerГғВӨt ГўВҶВ’ Repo-URL eingeben (`https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`) ГўВҶВ’ hinzufГғВјgen. WICHTIG: nicht ГғВјber Cloud-Sync/Profil, sondern direkt den Add-Repo-Dialog auf dem GerГғВӨt nutzen.
+4. Warten, bis ARVIO "Repository hinzugefГғВјgt" meldet (sollte .cs3 downloaden).
+5. Scraper einschalten.
+6. `adb logcat -d | grep -iE "download|ExtExtension|PluginManager|cs3|HTTP|Failed|extension"` ГўВҶВ’ Output kopieren. Worauf achten:
+   - `Downloaded extension <id>: <bytes> bytes -> ...` ГўВҶВ’ Download ERFOLGREICH (Problem gelГғВ¶st!).
+   - `Failed to download extension <id>: HTTP 404` / `HTTP 403` ГўВҶВ’ URL falsch/blocked (unsere plugins.json URL prГғВјfen).
+   - `Error downloading extension <id>: ...` ГўВҶВ’ Exception (Netzwerk/SSL/Timeout).
+   - Gar kein Download-Log ГўВҶВ’ `addRepository` wird nicht wie erwartet durchlaufen (Routing-Problem).
+7. Falls Download klappt: Quellensuche (Matrix) auslГғВ¶sen ГўВҶВ’ prГғВјfen, ob jetzt Filmpalast-Quellen kommen.
+8. Falls Download fehlschlГғВӨgt: unsere `plugins.json`/`.cs3`-URL im builds-Branch prГғВјfen (raw.githubusercontent.com erreichbar? Datei da? status=1?).
+
+**Prio 2 (danach): Am TV dasselbe** ГўВҖВ“ TV per USB ans Laptop, gleicher `adb logcat`-Flow. Da der TV das primГғВӨre ZielgerГғВӨt ist, muss der Download dort auch direkt (Add Repository) getriggert werden, nicht ГғВјber Cloud-Sync. LADB-App scheiterte am Pairing (siehe unten)ГўВҶВ’ TV braucht USB-Verbindung zum Laptop (dazu ggf. lГғВӨngeres USB-Kabel am TV oder USB-Port am TV nutzen).
+
+**Prio 3: GitHub-Issue bei ARVIO** ГўВҖВ“ Cloud-Sync-Restore lГғВӨdt .cs3-Dateien nicht herunter (`saveScrapers` ohne `downloadDexExtensions`). Das ist ein klarer ARVIO-Bug: Wer Plugins via Cloud-Sync auf ein neues GerГғВӨt ГғВјbernimmt, hat leere Scraper. Skizze siehe unten (Prio 2 im alten Stand). AI-Disclosure beachten.
+
+### ENTSCHEIDENDE ERKENNTNIS #2 (14.08.2026, TV-Logcat TCL C7K via WLAN-ADB): Download klappt DIREKT am TV, aber plugin.load() crasht an kotlin/io/FilesKt
+Nach dem Fix des Cloud-Sync-Problems (Repo direkt am TV hinzugefuegt, NICHT Cloud-Sync) klappt der .cs3-Download:
+```
+D PluginManager: URL ends in .json - trying external format first: https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json
+D ExtExtensionLoader: Downloaded extension 06513e3e...:FilmPalast: 45272 bytes -> .../cs_extensions/..._FilmPalast.cs3
+D PluginManager: Downloaded DEX extension: FilmPalast (45272 bytes)
+D ExtExtractorRegistry: Registered extractor: Abstream (https://abstream.to)
+D ExtExtensionLoader: ensureExtractorsLoaded: scanned 1 .cs3 files, registered 2 extractors
+```
+ABER plugin.load() schlaegt fehl (Root-Cause #2 gefunden):
+```
+D ExtExtensionLoader: Loading plugin class from manifest: com.reichi.arflioaddon.filmpalast.FilmpalastPlugin
+W ExtExtensionLoader: plugin.load() MISSING CLASS: Failed (0 APIs so far)
+W ExtExtensionLoader: java.lang.NoClassDefFoundError: Failed resolution of: Lkotlin/io/FilesKt;
+W ExtExtensionLoader:    at com.reichi.arflioaddon.filmpalast.DebugLog.init(DebugLog.kt:47)
+W ExtExtensionLoader:    at com.reichi.arflioaddon.filmpalast.FilmpalastPlugin.load(FilmpalastPlugin.kt:13)
+```
+Erklaerung: ARVIO laedt .cs3 via DexClassLoader mit ARVIOs (release-build, R8-geshrinktem) Classloader als Parent. Unsere DebugLog.init() rief `markerFile?.writeText(...)` auf - eine Kotlin-stdlib-Extension aus kotlin/io/FilesKt. ARVIOs Release-APK shrinkt ungenutzte kotlin-stdlib-Klassen weg, also ist kotlin/io/FilesKt im Parent-Classloader NICHT vorhanden -> NoClassDefFoundError. Da NoClassDefFoundError ein Error (keine Exception) ist, wurde er vom `catch (e: Exception)` NICHT gefangen und killte plugin.load() -> "0 APIs so far" -> "No API loaded" -> 0 Quellen. GermanProviders-Plugins nutzen keine kotlin.io File-Erweiterungen im load()-Pfad, deshalb wuerden sie (wenn heruntergeladen) laufen - wir aber nicht.
+
+### FIX #2 (14.08.2026, v9): kotlin-stdlib-Erweiterungen aus dem load()-Pfad entfernt
+Alle Kotlin-stdlib-IO-Erweiterungen durch reines java.io/java.lang ersetzt (kein Risiko mehr, dass ARVIOs geshrinkter Classloader die stdlib-Klasse nicht bereitstellt):
+- DebugLog.kt: writeText()->writeTextJava() (java.io.FileOutputStream), appendText()->appendTextJava(). Catch-Bloecke von Exception auf Throwable geaendert (faengt nun auch NoClassDefFoundError). Hilfsfunktionen nutzen String.getBytes(StandardCharsets.UTF_8) statt toByteArray() und try/finally statt .use {} (CloseableKt koennte ebenfalls fehlen).
+- DownloadsLogWriter.kt: writeText()->writeTextJava(); MediaStore-Pfad .use {}/.toByteArray()->writeAndClose()/truncateAndClose() (java.io, try/finally). Cursor .use {}->try/finally.
+- DebugServer.kt: kotlin.concurrent.thread{}->java.lang.Thread (mit .isDaemon/.name/.start()); String.toByteArray()->String.getBytes(StandardCharsets.UTF_8).
+- FilmpalastPlugin.kt: load() umschliesst DebugLog.init+DebugServer.start in `try { } catch (t: Throwable)` (best-effort - ein Diagnose-Fehler killt nie mehr den Scraper). registerMainAPI/registerExtractorAPI laufen immer.
+- FilmpalastProvider/FilmpalastExtractors nutzen KEINE kotlin-stdlib-IO-Erweiterungen (verifiziert) - Scraper-Pfad ist sicher.
+- Version auf 9 gebumpt. CI baut beim Push auf main automatisch die neue FilmPalast.cs3 und pusht auf builds.
+
+### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #2)
+**Prio 1 - v9 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
+1. v9 bauen lassen (CI nach Commit auf main). Warten bis builds-Branch aktualisiert (neue FilmPalast.cs3 Version 9).
+2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v9.
+3. `adb logcat -c`, Scraper einschalten, Matrix-Quellensuche ausloesen, 15 s warten.
+4. `adb logcat -d | grep -iE "Filmpalast|ExtExtension|PluginManager|No API|MISSING|load|loadLinks|Tmdb|result|ArvioAddon"` -> pruefen:
+   - plugin.load() erfolgreich: KEIN "MISSING CLASS"/"0 APIs so far"; stattdessen "API loaded"/Scraper laeuft. -> dann pruefen, ob load()/loadLinks Quellen liefern.
+   - Falls ein ANDERER NoClassDefFoundError auftaucht (andere kotlin-stdlib-Klasse, z.B. kotlinx.coroutines/kotlin.collections): notieren - dann muessen wir mehr stdlib-Referenzen eliminieren oder R8-Keep-Regeln pruefen.
+   - Falls load() laeuft aber "0 links collected": Jsoup-Selektoren/Hoster-Extraktion debuggen (naechste Ebene).
+
+**Prio 2 - GitHub-Issue bei ARVIO (zwei klare Bugs):**
+1. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (CloudSyncRepository.applyCloudPayload macht nur saveScrapers ohne downloadDexExtensions). Wer Plugins via Cloud-Sync auf ein neues Geraet uebernimmt, hat leere Scraper ("DEX file not found"). Skizze: ".cs3/Cloudstream3 plugins restored via Cloud Sync show in list but return no sources: saveScrapers() stores metadata but never downloads the .cs3 (no downloadDexExtensions call) - cs_extensions/ stays empty". Verweis auf #459/#273.
+2. Touch-Bug im Add-Repo-Dialog auf Handy (trotz #502-Fix in 1.9.983): Abbrechen/Bestaetigen nicht tippbar nach URL-Eingabe.
+AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]" einfuegen. NOCH NICHT geoeffnet - erst nach v9-TV-Test entscheiden.
+
+### ADB-over-WLAN beim TCL C7K (verifizierter Weg, Session 14.08.)
+USB-Kabel-ADB funktioniert bei TVs praktisch nie (TV-USB-Buchsen sind Host-Modus fuer Sticks, nicht Client fuer ADB). Weg = WLAN-ADB.
+Vorgehen: Entwickleroptionen aktivieren (Build 7x OK) -> USB-Debugging AN -> Network/Wireless Debugging AN -> TV-IP aus Netzwerk-Einstellungen notieren -> `adb connect <TV-IP>:5555` (direkt) ODER `adb pair <IP>:<port>` + 6-stelliger Code, dann `adb connect <IP>:5555` (Android 13+ Pairing-Flow). TV & Laptop im selben WLAN.
+TV-Logcat (arvio-tv-log.txt) bestaetigte: Download + Linkage-Fehler sichtbar -> WLAN-ADB am TCL C7K funktioniert.
+
+### Handy-UI-Bug (Pixel 7, 14.08.)
+Auf dem Pixel 7 laesst sich nach URL-Eingabe im Add-Repo-Dialog weder Abbrechen noch Bestaetigen tippen (Touch-Bug, trotz ARVIO #502-Fix in 1.9.983). Daher: Diagnose komplett am TV machen. Handy nur, falls TV-ADB nicht klappen wuerde (was aber nun klappt).
+
+### ГғВңBERSCHRIEBENER ALTER STAND (13.08.2026 ГўВҖВ“ vor Logcat, als Referenz behalten)
+FrГғВјhere Annahme war "ARVIO ruft .cs3-Plugins GAR NICHT auf". **KORRIGIERT durch Logcat:** ARVIO ruft sie sehr wohl auf ("Executing DEX scraper"), aber die .cs3-Dateien fehlen auf dem GerГғВӨt ("DEX file not found"), weil Cloud-Sync sie nie herunterlГғВӨdt. Die Diagnose-Plugins v6ГўВҖВ“v8 erschienen deshalb nie ГўВҖВ“ nicht weil ARVIO die Klasse nicht instanziiert, sondern weil es gar keine Datei zum Laden gibt. Der Rest der alten Beweislage (GermanProviders ebenfalls leer, WebStreamr funktioniert, GitHub-Issues #459/#273) bleibt gГғВјltig und wird durch den neuen Befund ergГғВӨnzt (Cloud-Sync-Problem erklГғВӨrt, warum es bei Nutzern auftritt, die Profil-basiert syncen).
 
 **Beweislage (verifiziert, Stand 13.08.2026):**
-- Nutzer hat ARVIO 1.9.983 **sideload** auf Android-TV. Plugin-Bereich sichtbar (â sideload bestÃ¤tigt). Toggle bei Filmpalast AN, global alles aktiviert.
-- Bei Quellensuche (Matrix, mehrere Filme & Serien) zeigt ARVIO **nur webstreamr-Quellen (Stremio-Addon), NIEMALS Filmpalast** â Ã¼ber alle Plugin-Versionen v2âv8 hinweg, Ã¼ber mehrere Neu-Installationen hinweg (Scraper-IDs Ã¤nderten sich jeweils: eOf699f8â2421c4b6âneu â bestÃ¤tigt frischer Download).
-- **GermanProviders-Test (Bnyro/GermanProviders):** Nutzer installierte das bewÃ¤hrte, anderswo funktionierende `.cs3`-Repo, aktivierte alle Scraper â **auch dort KEINE Streams**. Das beweist: Es ist **NICHT unser Plugin**, sondern ARVIOs Cloudstream-`.cs3`-Pfad liefert auf dem GerÃ¤t bei **jedem** Plugin nichts. Webstreamr funktioniert, weil es ein **Stremio-Addon** (vÃ¶llig anderer ARVIO-Code-Pfad) ist.
-- **GitHub-Issue-Recherche** (`ProdigyV21/ARVIO`): Andere Nutzer berichten **exakt dasselbe Symptom** â Plugin installiert, in Liste sichtbar, Toggle an, aber keine Quellen:
-  - **#459** "Nuvio JS scraper repository installs but returns no sources" (closed, ohne Ã¶ffentliche LÃ¶sung)
+- Nutzer hat ARVIO 1.9.983 **sideload** auf Android-TV. Plugin-Bereich sichtbar (ГўВҶВ’ sideload bestГғВӨtigt). Toggle bei Filmpalast AN, global alles aktiviert.
+- Bei Quellensuche (Matrix, mehrere Filme & Serien) zeigt ARVIO **nur webstreamr-Quellen (Stremio-Addon), NIEMALS Filmpalast** ГўВҖВ“ ГғВјber alle Plugin-Versionen v2ГўВҖВ“v8 hinweg, ГғВјber mehrere Neu-Installationen hinweg (Scraper-IDs ГғВӨnderten sich jeweils: eOf699f8ГўВҶВ’2421c4b6ГўВҶВ’neu ГўВҶВ’ bestГғВӨtigt frischer Download).
+- **GermanProviders-Test (Bnyro/GermanProviders):** Nutzer installierte das bewГғВӨhrte, anderswo funktionierende `.cs3`-Repo, aktivierte alle Scraper ГўВҶВ’ **auch dort KEINE Streams**. Das beweist: Es ist **NICHT unser Plugin**, sondern ARVIOs Cloudstream-`.cs3`-Pfad liefert auf dem GerГғВӨt bei **jedem** Plugin nichts. Webstreamr funktioniert, weil es ein **Stremio-Addon** (vГғВ¶llig anderer ARVIO-Code-Pfad) ist.
+- **GitHub-Issue-Recherche** (`ProdigyV21/ARVIO`): Andere Nutzer berichten **exakt dasselbe Symptom** ГўВҖВ“ Plugin installiert, in Liste sichtbar, Toggle an, aber keine Quellen:
+  - **#459** "Nuvio JS scraper repository installs but returns no sources" (closed, ohne ГғВ¶ffentliche LГғВ¶sung)
   - **#273** "I'm able to add nuvio plugin but not showing any video links" (closed; Dev @Himanth-reddy: "it should be working")
   - **#500** "unable to install the plugin" (open)
-  - **#491** "plugins & extensions section shows addons not plugins" (gelÃ¶st â "next update")
-  - v1.9.983-Changelog: "Added compatibility for **Nuvio-style JavaScript** scraper plugins" + "Fixed sideload **production-plugin routing**, extractor unloading, mobile routing". â DEX/`.cs3`-Pfad wurde gerade erst angefasst und lÃ¤uft offensichtlich **nicht zuverlÃ¤ssig**.
-- **Library verifiziert vorhanden:** ARVIOs APK (`classes3.dex`/`classes4.dex`) enthÃ¤lt `com/lagradost/cloudstream3/metaproviders/TmdbProvider`, `MainAPI`, `plugins/Plugin`. Die Library fehlt also nicht.
-- **ARVIO-Timeouts verifiziert:** `SCRAPER_TIMEOUT_MS=120_000`, `LOADLINKS_TIMEOUT_MS=60_000`, `EXECUTION_TIMEOUT_MS=120_000`. Unsere Per-Call-Timeouts (8s) sind weit drunter â kann nicht Ursache sein.
+  - **#491** "plugins & extensions section shows addons not plugins" (gelГғВ¶st ГўВҶВ’ "next update")
+  - v1.9.983-Changelog: "Added compatibility for **Nuvio-style JavaScript** scraper plugins" + "Fixed sideload **production-plugin routing**, extractor unloading, mobile routing". ГўВҶВ’ DEX/`.cs3`-Pfad wurde gerade erst angefasst und lГғВӨuft offensichtlich **nicht zuverlГғВӨssig**.
+- **Library verifiziert vorhanden:** ARVIOs APK (`classes3.dex`/`classes4.dex`) enthГғВӨlt `com/lagradost/cloudstream3/metaproviders/TmdbProvider`, `MainAPI`, `plugins/Plugin`. Die Library fehlt also nicht.
+- **ARVIO-Timeouts verifiziert:** `SCRAPER_TIMEOUT_MS=120_000`, `LOADLINKS_TIMEOUT_MS=60_000`, `EXECUTION_TIMEOUT_MS=120_000`. Unsere Per-Call-Timeouts (8s) sind weit drunter ГўВҶВ’ kann nicht Ursache sein.
 
-### Warum die In-Plugin-Diagnose (v6âv8) trotzdem leer blieb
-v6âv8 sind so gebaut, dass **sobald ARVIO `loadLinks()` auch nur einmal aufruft**, die Diagnose als Pseudo-Quellen in ARVIOs Quellenauswahl erscheinen MÃSSEN (`emitTraceAsSources` + PLUGIN vN loaded"-Banner + `load()` gibt nie `null` zurÃ¼ck + Per-Call-Netzwerk-Timeouts). Da **keine einzige** ArvioAddon-Debug-Quelle erschien, lÃ¤uft unser Code **nie** â ARVIO instanziiert unsere Plugin-Klasse nicht (oder verwirft sie still). Das ist exakt die Fehlerklasse, die **nur im Logcat** sichtbar wird ("No API loaded for scraper", "MISSING CLASS", "plugin.load() linkage error", "No @CloudstreamPlugin class found").
+### Warum die In-Plugin-Diagnose (v6ГўВҖВ“v8) trotzdem leer blieb
+v6ГўВҖВ“v8 sind so gebaut, dass **sobald ARVIO `loadLinks()` auch nur einmal aufruft**, die Diagnose als Pseudo-Quellen in ARVIOs Quellenauswahl erscheinen MГғВңSSEN (`emitTraceAsSources` + В„PLUGIN vN loaded"-Banner + `load()` gibt nie `null` zurГғВјck + Per-Call-Netzwerk-Timeouts). Da **keine einzige** ArvioAddon-Debug-Quelle erschien, lГғВӨuft unser Code **nie** ГўВҶВ’ ARVIO instanziiert unsere Plugin-Klasse nicht (oder verwirft sie still). Das ist exakt die Fehlerklasse, die **nur im Logcat** sichtbar wird ("No API loaded for scraper", "MISSING CLASS", "plugin.load() linkage error", "No @CloudstreamPlugin class found").
 
-### â ï¸ LIMITS EINES DIAGNOSE-PLUGINS (Antwort auf die Frage "kÃ¶nnen wir das Log Ã¼ber ein Plugin bekommen?")
-**Teilweise ja, aber nicht fÃ¼r das aktuelle Problem.** Ein Plugin kann sich selbst protokollieren und das sogar in ARVIO als Quellen sichtbar machen (gebaut in v6âv8). **Aber** das funktioniert nur, **sobald ARVIO den Plugin-Code lÃ¤dt und aufruft**. Genau da hakt es: ARVIO lÃ¤dt/instanziiert die `.cs3`-Klasse auf dem GerÃ¤t nicht. FÃ¼r "lÃ¤dt ARVIO mein Plugin Ã¼berhaupt?" gibt es **kein plugin-basiertes Werkzeug** â dafÃ¼r braucht man ARVIOs eigene Logs (Logcat). Datei-/MediaStore-/HTTP-Server-AnsÃ¤tze (v3âv5) scheiterten ebenfalls, weil unser Code nie lÃ¤uft (keine Datei wird erzeugt).
+### ГўВҡ ГҜВёВҸ LIMITS EINES DIAGNOSE-PLUGINS (Antwort auf die Frage "kГғВ¶nnen wir das Log ГғВјber ein Plugin bekommen?")
+**Teilweise ja, aber nicht fГғВјr das aktuelle Problem.** Ein Plugin kann sich selbst protokollieren und das sogar in ARVIO als Quellen sichtbar machen (gebaut in v6ГўВҖВ“v8). **Aber** das funktioniert nur, **sobald ARVIO den Plugin-Code lГғВӨdt und aufruft**. Genau da hakt es: ARVIO lГғВӨdt/instanziiert die `.cs3`-Klasse auf dem GerГғВӨt nicht. FГғВјr "lГғВӨdt ARVIO mein Plugin ГғВјberhaupt?" gibt es **kein plugin-basiertes Werkzeug** ГўВҖВ“ dafГғВјr braucht man ARVIOs eigene Logs (Logcat). Datei-/MediaStore-/HTTP-Server-AnsГғВӨtze (v3ГўВҖВ“v5) scheiterten ebenfalls, weil unser Code nie lГғВӨuft (keine Datei wird erzeugt).
 
-### NÃCHSTER SCHRITT (Prio 1, VORAB gemacht mit Nutzer abgesprochen): MIT LAPTOP / PC WEITERMACHEN
-Nutzer kommt nÃ¤chste Session **mit Laptop**. Dann ist **Logcat via USB+adb** mÃ¶glich (die einzig zuverlÃ¤ssige Methode; LADB-App auf dem GerÃ¤t scheiterte am Pairing). Konkrete Schritte fÃ¼r die nÃ¤chste Session:
+### NГғВ„CHSTER SCHRITT (Prio 1, VORAB gemacht mit Nutzer abgesprochen): MIT LAPTOP / PC WEITERMACHEN
+Nutzer kommt nГғВӨchste Session **mit Laptop**. Dann ist **Logcat via USB+adb** mГғВ¶glich (die einzig zuverlГғВӨssige Methode; LADB-App auf dem GerГғВӨt scheiterte am Pairing). Konkrete Schritte fГғВјr die nГғВӨchste Session:
 1. Laptop: Android platform-tools (Mini-SDK, ~10 MB, keine Installation) von https://developer.android.com/tools/releases/platform-tools laden, entpacken.
-2. GerÃ¤t per USB an den Laptop, im GerÃ¤t "USB-Debugging erlauben" bestÃ¤tigen.
-3. Im platform-tools-Ordner Terminal Ã¶ffnen (Adressleiste `cmd` + Enter).
+2. GerГғВӨt per USB an den Laptop, im GerГғВӨt "USB-Debugging erlauben" bestГғВӨtigen.
+3. Im platform-tools-Ordner Terminal ГғВ¶ffnen (Adressleiste `cmd` + Enter).
 4. `adb logcat -c` (Buffer leeren).
-5. In ARVIO: Filmpalast aus/an + Quellensuche auslÃ¶sen (z.B. Matrix). 15 s warten.
-6. `adb logcat -d | grep -iE "ExtExt|ExternalExtension|PluginManager|Filmpalast|ArvioAddon|No API loaded|MISSING CLASS|CloudstreamPlugin|linkage error"` â Output kopieren.
+5. In ARVIO: Filmpalast aus/an + Quellensuche auslГғВ¶sen (z.B. Matrix). 15 s warten.
+6. `adb logcat -d | grep -iE "ExtExt|ExternalExtension|PluginManager|Filmpalast|ArvioAddon|No API loaded|MISSING CLASS|CloudstreamPlugin|linkage error"` ГўВҶВ’ Output kopieren.
 7. **Was gesucht wird (entscheidend):**
-   - `No API loaded for scraper: <id>` â ARVIO konnte keine MainAPI instanziieren (Klassen-Fehler).
-   - `No @CloudstreamPlugin class found in <id>` â unsere Plugin-Klasse wurde nicht gefunden.
-   - `plugin.load() linkage error` / `MISSING CLASS: ...` â eine Referenz lÃ¤sst sich zur Laufzeit nicht auflÃ¶sen.
-   - `TmdbProvider Filmpalast: both load() paths failed` / `0 links collected` â Scraper lÃ¤uft, aber load/loadLinks scheitert.
-   - Ãberhaupt kein `Filmpalast`/`ExtExt`-Eintrag â Scraper wird Ã¼berhaupt nicht aufgerufen (Enable-/Routing-Problem).
-- Je nach Befund: load()-Fehler â Jsoup-Selektoren/Logging fixen; Scraper nicht aufgerufen â Download/DexClassLoader/manifestEnabled prÃ¼fen.
+   - `No API loaded for scraper: <id>` ГўВҶВ’ ARVIO konnte keine MainAPI instanziieren (Klassen-Fehler).
+   - `No @CloudstreamPlugin class found in <id>` ГўВҶВ’ unsere Plugin-Klasse wurde nicht gefunden.
+   - `plugin.load() linkage error` / `MISSING CLASS: ...` ГўВҶВ’ eine Referenz lГғВӨsst sich zur Laufzeit nicht auflГғВ¶sen.
+   - `TmdbProvider Filmpalast: both load() paths failed` / `0 links collected` ГўВҶВ’ Scraper lГғВӨuft, aber load/loadLinks scheitert.
+   - ГғВңberhaupt kein `Filmpalast`/`ExtExt`-Eintrag ГўВҶВ’ Scraper wird ГғВјberhaupt nicht aufgerufen (Enable-/Routing-Problem).
+- Je nach Befund: load()-Fehler ГўВҶВ’ Jsoup-Selektoren/Logging fixen; Scraper nicht aufgerufen ГўВҶВ’ Download/DexClassLoader/manifestEnabled prГғВјfen.
 
-### NÃCHSTER SCHRITT (Prio 2): GitHub-Issue bei ARVIO Ã¶ffnen (parallel zu Prio 1)
-Da der GermanProviders-Test beweist, dass es ein ARVIO-seitiges Problem mit dem `.cs3`-Pfad ist (nicht unseres), lohnt ein Issue bei den sehr aktiven ARVIO-Devs. **Noch NICHT geÃ¶ffnet** â in der nÃ¤chsten Session entscheiden, ob nach dem Logcat-Befund. Betreff/Inhalt-Skizze: ".cs3/Cloudstream3 plugins install and appear in list, but return no sources on sideload (GermanProviders AND custom TmdbProvider both empty; Stremio addons work)". Verweis auf #459/#273. **AI-Disclosure-Pflicht:** Falls Issue/MR-Kommentar erstellt wird, Hinweis "created by an AI agent (OpenHands) on behalf of [user]" einfÃ¼gen.
-- Vor dem Issue benÃ¶tigte Infos vom Nutzer: genaue ARVIO-Version (1.9.983?), sideload bestÃ¤tigt, GerÃ¤t/Android-Version.
+### NГғВ„CHSTER SCHRITT (Prio 2): GitHub-Issue bei ARVIO ГғВ¶ffnen (parallel zu Prio 1)
+Da der GermanProviders-Test beweist, dass es ein ARVIO-seitiges Problem mit dem `.cs3`-Pfad ist (nicht unseres), lohnt ein Issue bei den sehr aktiven ARVIO-Devs. **Noch NICHT geГғВ¶ffnet** ГўВҖВ“ in der nГғВӨchsten Session entscheiden, ob nach dem Logcat-Befund. Betreff/Inhalt-Skizze: ".cs3/Cloudstream3 plugins install and appear in list, but return no sources on sideload (GermanProviders AND custom TmdbProvider both empty; Stremio addons work)". Verweis auf #459/#273. **AI-Disclosure-Pflicht:** Falls Issue/MR-Kommentar erstellt wird, Hinweis "created by an AI agent (OpenHands) on behalf of [user]" einfГғВјgen.
+- Vor dem Issue benГғВ¶tigte Infos vom Nutzer: genaue ARVIO-Version (1.9.983?), sideload bestГғВӨtigt, GerГғВӨt/Android-Version.
 
 ### ENTSCHEIDUNG NUTZER (14.08.2026): GitHub-Issue bei ARVIO professionell vorbereiten
 Nutzer mÃ¶chte das GitHub-Issue bei ARVIO **professionell** einreichen (Vorbild: ARVIO Issue #537), ggf. sogar mit eigenem Fix-PR. Bis zur nÃ¤chsten Session sollen **alle dafÃ¼r nÃ¶tigen Informationen gesammelt und hier gespeichert** werden, damit eine andere Session das Issue ausarbeiten kann. **Status der Issue-ErÃ¶ffnung: NOCH NICHT Ã¶ffnen** â erst nach Logcat-Befund (Prio 1). Diese Sektion ist die Checkliste fÃ¼r die Vorbereitung.
@@ -112,71 +209,71 @@ Der professionellste Weg (so machen es `Himanth-reddy`/GSSoC-Teilnehmer, deren P
 - **v4** (2248...): File-based trace + PLUGIN_LOADED.txt Marker in Android/data.
 - **v5** (9673...): MediaStore API schreibt in public Download/arvio-addon-logs/ (Fix: `MediaStore.Files.getContentUri` statt `Downloads.EXTERNAL_URI`).
 - **v6**: Diagnose als Pseudo-Quellen in ARVIOs Quellenauswahl (`emitTraceAsSources`); `loadLinks` Return-Type-Fix (Boolean in v4.7.0).
-- **v7**: `load()` gibt **nie null** zurÃ¼ck (debug MovieLoadResponse dataUrl="ARVIO_DEBUG") â `loadLinks` wird garantiert aufgerufen.
-- **v8** (aktuell): Per-Call-Netzwerk-Timeouts (`withTimeoutOrNull(8s)` fÃ¼r TMDB + Filmpalast-Suche) damit `load()` nicht das Gesamt-Timeout frisst.
+- **v7**: `load()` gibt **nie null** zurГғВјck (debug MovieLoadResponse dataUrl="ARVIO_DEBUG") ГўВҶВ’ `loadLinks` wird garantiert aufgerufen.
+- **v8** (aktuell): Per-Call-Netzwerk-Timeouts (`withTimeoutOrNull(8s)` fГғВјr TMDB + Filmpalast-Suche) damit `load()` nicht das Gesamt-Timeout frisst.
 - Letzter Commit auf `main`: `ca9f81f` (v8). Builds-Version: 8.
 
-### Was fertig ist (unverÃ¤ndert gÃ¼ltig)
-Filmpalast-Plugin als Cloudstream3-`TmdbProvider` implementiert, gebaut, auf `builds`-Branch (`status=1`, `tvTypes=[Movie,TvSeries]`). CI grÃ¼n. Nutzer hat v8 in ARVIO 1.9.983 (sideload) installiert. Python-E2E-Simulation lÃ¤uft durch; filmpalast.to + TMDB per HTTP erreichbar. **Das Problem ist rein ARVIO-seitig beim Laden/AusfÃ¼hren von `.cs3`-Plugins.**
+### Was fertig ist (unverГғВӨndert gГғВјltig)
+Filmpalast-Plugin als Cloudstream3-`TmdbProvider` implementiert, gebaut, auf `builds`-Branch (`status=1`, `tvTypes=[Movie,TvSeries]`). CI grГғВјn. Nutzer hat v8 in ARVIO 1.9.983 (sideload) installiert. Python-E2E-Simulation lГғВӨuft durch; filmpalast.to + TMDB per HTTP erreichbar. **Das Problem ist rein ARVIO-seitig beim Laden/AusfГғВјhren von `.cs3`-Plugins.**
 
 ---
 
-### (Veraltet, aber als Referenz behalten) FrÃ¼here Logcat-Optionen ohne PC
-ARVIO hat **keine Log-Datei-Exportfunktion** und schreibt **keine App-Logs in Dateien** (verifiziert im gesamten ARVIO-Quellcode). Scraper-Logs (`Log.d/w` in `ExternalExtensionRunner.kt`) gehen **nur an Androids Logcat-Kernel-Buffer** (flÃ¼chtig, ohne Root nicht direkt auslesbar). Optionen ohne PC:
-- **LADB-App:** scheiterte am Pairing ("no devices/emulators found"); "Pair & shell"-Schalter musste AN sein; 30-s-Pairing-Timer extrem zickig. **FÃ¼r diesen Nutzer nicht praktikabel.**
-- **Bug Report:** Android-Einstellungen â Entwickleroptionen â Fehlerbericht (unhandlich, riesiger ZIP).
+### (Veraltet, aber als Referenz behalten) FrГғВјhere Logcat-Optionen ohne PC
+ARVIO hat **keine Log-Datei-Exportfunktion** und schreibt **keine App-Logs in Dateien** (verifiziert im gesamten ARVIO-Quellcode). Scraper-Logs (`Log.d/w` in `ExternalExtensionRunner.kt`) gehen **nur an Androids Logcat-Kernel-Buffer** (flГғВјchtig, ohne Root nicht direkt auslesbar). Optionen ohne PC:
+- **LADB-App:** scheiterte am Pairing ("no devices/emulators found"); "Pair & shell"-Schalter musste AN sein; 30-s-Pairing-Timer extrem zickig. **FГғВјr diesen Nutzer nicht praktikabel.**
+- **Bug Report:** Android-Einstellungen ГўВҶВ’ Entwickleroptionen ГўВҶВ’ Fehlerbericht (unhandlich, riesiger ZIP).
 - **Nur mit Root:** Logcat-Reader-App.
-- **WICHTIG:** ARVIOs integrierter "Test Scraper"-Button (`PluginManager.testScraper()`/`executeWithDiagnostics`) ist im Code vorhanden, aber in `PluginScreen.kt` **NICHT in die UI eingebaut** (Strings + ViewModel-Logik existieren, kein Compose-Button ruft `PluginUiEvent.TestScraper` auf). Halbfertige ARVIO-Funktion. FÃ¼r uns irrelevant, solange der Scraper ohnehin nie geladen wird.
-â **Fazit: PC+USB+adb ist der Weg.** Siehe Prio 1 oben.
+- **WICHTIG:** ARVIOs integrierter "Test Scraper"-Button (`PluginManager.testScraper()`/`executeWithDiagnostics`) ist im Code vorhanden, aber in `PluginScreen.kt` **NICHT in die UI eingebaut** (Strings + ViewModel-Logik existieren, kein Compose-Button ruft `PluginUiEvent.TestScraper` auf). Halbfertige ARVIO-Funktion. FГғВјr uns irrelevant, solange der Scraper ohnehin nie geladen wird.
+ГўВҶВ’ **Fazit: PC+USB+adb ist der Weg.** Siehe Prio 1 oben.
 
 ---
 
 ### Wichtige Dateien & Referenzen
-- **Filmpalast-Code:** `/workspace/project/Arvio-Addon/FilmPalast/src/main/kotlin/com/reichi/arflioaddon/filmpalast/` â `FilmpalastProvider.kt` (load/loadLinks/diagnose), `FilmpalastPlugin.kt`, `FilmpalastExtractors.kt`, `DebugLog.kt`, `DebugServer.kt`, `DownloadsLogWriter.kt`
-- **ARVIO-Referenz:** `ProdigyV21/ARVIO` @ v1.9.983 (neu klonen nach `/tmp/arvio_ref`, wird nicht persistiert). SchlÃ¼ssel-Dateien:
-  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/PluginManager.kt` â `executeScrapers` (625), `executeScrapersStreaming` (672), `enabledScrapers` (271), `executeExternalDexScraper` (831, mit `SCRAPER_TIMEOUT_MS=120_000` bei 840), `downloadDexExtensions` (1057), `manifestEnabled = plugin.status == 1` (1079), `toggleScraper` (589, lÃ¤dt NICHT neu), `refreshExternalRepository` (566, lÃ¤dt neu)
-  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/ExternalExtensionLoader.kt` â `downloadExtension` (203, DEX read-only fÃ¼r API28+), `loadExtension` (259), `findAndLoadPlugin` (701, liest `manifest.json`-`pluginClassName`), `plugin.load()`-Aufruf (317, fÃ¤ngt Exception+Error), **Fallback-DEX-Scan bei `apis.isEmpty()||extractors.isEmpty()`** (336), `getApi` (420, apiCache)
-  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/ExternalExtensionRunner.kt` â `execute` (60), `executeInternal` (342), `executeTmdbProvider` (367), `executeTmdbLoadLinks` (430, `LOADLINKS_TIMEOUT_MS=60_000` bei 442), `extractData` (738: MovieâdataUrl, TvSeriesâfindEpisode.data), `filterValid` (870: nur http(s)-URLs!), `toLocalScraperResult` (884), `EXECUTION_TIMEOUT_MS=120_000`
-  - `app/src/main/kotlin/com/arflix/tv/domain/model/Plugin.kt` â `ScraperInfo` (77), `supportsType` (92, normalisiert series/tv/animeâtv)
-  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/TvTypeExtensions.kt` â `tvTypeFromString`, `toNuvioType`
-  - `app/src/main/kotlin/com/arflix/tv/ui/screens/details/DetailsViewModel.kt` â `loadStreams` (1405), `pluginScraperJob` (1511, ruft `executeScrapersStreaming`), `hasStreamingAddons` zÃ¤hlt NUR Stremio-Addons (1601/1634/1651/1690) â irrefÃ¼hrende "kein Add-on"-Meldung bei reinen Cloudstream-Plugins
-- **GermanProviders-Referenz:** `Bnyro/GermanProviders` (Repo-URL: `https://raw.githubusercontent.com/Bnyro/GermanProviders/refs/heads/master/repo.json`). Filmpalast dort = `MainAPI` (search-based). **Auf dem GerÃ¤t des Nutzers ebenfalls 0 Quellen** â beweist ARVIO-seitiges `.cs3`-Problem.
-- **Builds-Branch:** v8 verÃ¶ffentlicht, `status=1`, `internalName=FilmPalast`. `plugins.json`+`FilmPalast.cs3` auf `builds`.
-- **cloudstream3 library:** v4.7.0 (`com.github.recloudstream.cloudstream:library-android:v4.7.0`). Built-in Extractoren: `Voe()`, `Firestream()`, `FileMoonSx()`, `Supervideo()`, `VidHidePro()` + ~270 andere via `installGlobal()`. **Wichtig:** `loadLinks` gibt in v4.7.0 `Boolean` zurÃ¼ck (nicht Unit) â Override muss `: Boolean` deklarieren.
+- **Filmpalast-Code:** `/workspace/project/Arvio-Addon/FilmPalast/src/main/kotlin/com/reichi/arflioaddon/filmpalast/` ГўВҖВ“ `FilmpalastProvider.kt` (load/loadLinks/diagnose), `FilmpalastPlugin.kt`, `FilmpalastExtractors.kt`, `DebugLog.kt`, `DebugServer.kt`, `DownloadsLogWriter.kt`
+- **ARVIO-Referenz:** `ProdigyV21/ARVIO` @ v1.9.983 (neu klonen nach `/tmp/arvio_ref`, wird nicht persistiert). SchlГғВјssel-Dateien:
+  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/PluginManager.kt` ГўВҖВ“ `executeScrapers` (625), `executeScrapersStreaming` (672), `enabledScrapers` (271), `executeExternalDexScraper` (831, mit `SCRAPER_TIMEOUT_MS=120_000` bei 840), `downloadDexExtensions` (1057), `manifestEnabled = plugin.status == 1` (1079), `toggleScraper` (589, lГғВӨdt NICHT neu), `refreshExternalRepository` (566, lГғВӨdt neu)
+  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/ExternalExtensionLoader.kt` ГўВҖВ“ `downloadExtension` (203, DEX read-only fГғВјr API28+), `loadExtension` (259), `findAndLoadPlugin` (701, liest `manifest.json`-`pluginClassName`), `plugin.load()`-Aufruf (317, fГғВӨngt Exception+Error), **Fallback-DEX-Scan bei `apis.isEmpty()||extractors.isEmpty()`** (336), `getApi` (420, apiCache)
+  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/ExternalExtensionRunner.kt` ГўВҖВ“ `execute` (60), `executeInternal` (342), `executeTmdbProvider` (367), `executeTmdbLoadLinks` (430, `LOADLINKS_TIMEOUT_MS=60_000` bei 442), `extractData` (738: MovieГўВҶВ’dataUrl, TvSeriesГўВҶВ’findEpisode.data), `filterValid` (870: nur http(s)-URLs!), `toLocalScraperResult` (884), `EXECUTION_TIMEOUT_MS=120_000`
+  - `app/src/main/kotlin/com/arflix/tv/domain/model/Plugin.kt` ГўВҖВ“ `ScraperInfo` (77), `supportsType` (92, normalisiert series/tv/animeГўВҶВ’tv)
+  - `app/src/sideload/kotlin/com/arflix/tv/core/plugin/cloudstream/TvTypeExtensions.kt` ГўВҖВ“ `tvTypeFromString`, `toNuvioType`
+  - `app/src/main/kotlin/com/arflix/tv/ui/screens/details/DetailsViewModel.kt` ГўВҖВ“ `loadStreams` (1405), `pluginScraperJob` (1511, ruft `executeScrapersStreaming`), `hasStreamingAddons` zГғВӨhlt NUR Stremio-Addons (1601/1634/1651/1690) ГўВҶВ’ irrefГғВјhrende "kein Add-on"-Meldung bei reinen Cloudstream-Plugins
+- **GermanProviders-Referenz:** `Bnyro/GermanProviders` (Repo-URL: `https://raw.githubusercontent.com/Bnyro/GermanProviders/refs/heads/master/repo.json`). Filmpalast dort = `MainAPI` (search-based). **Auf dem GerГғВӨt des Nutzers ebenfalls 0 Quellen** ГўВҶВ’ beweist ARVIO-seitiges `.cs3`-Problem.
+- **Builds-Branch:** v8 verГғВ¶ffentlicht, `status=1`, `internalName=FilmPalast`. `plugins.json`+`FilmPalast.cs3` auf `builds`.
+- **cloudstream3 library:** v4.7.0 (`com.github.recloudstream.cloudstream:library-android:v4.7.0`). Built-in Extractoren: `Voe()`, `Firestream()`, `FileMoonSx()`, `Supervideo()`, `VidHidePro()` + ~270 andere via `installGlobal()`. **Wichtig:** `loadLinks` gibt in v4.7.0 `Boolean` zurГғВјck (nicht Unit) ГўВҶВ’ Override muss `: Boolean` deklarieren.
 
-### ARVIO-Scraper-Aufruf-Pfad (verifiziert, entscheidend fÃ¼rs Debugging)
-1. `DetailsViewModel.loadStreams` â `pluginScraperJob` â `pluginManager.executeScrapersStreaming(tmdbId, mediaType, season, episode)`
-2. `executeScrapersStreaming`: prÃ¼ft `pluginsEnabled` + `enabledScrapers.filter{supportsType}`; leer â return; sonst pro Scraper `executeScraperWithSingleFlight` â `executeExternalDexScraper` (mit `SCRAPER_TIMEOUT_MS=120_000`)
-3. `executeExternalDexScraper` â `externalExtensionRunner.execute(scraperId,...)` â `extensionLoader.getApi(scraperId)` (leer â "No API loaded" â emptyList, **still**)
-4. `execute` â `executeInternal` â **wenn `api is TmdbProvider`:** `executeTmdbProvider`; **sonst:** `executeSearchBased`
-5. `executeTmdbProvider`: `api.load("""{"id":$tmdbIdInt,"type":"$type"}""")` â null-fallback `api.load("https://www.themoviedb.org/<type>/<id>")` â `extractData(loadResponse)` â `api.loadLinks(data)`
-6. `extractData`: `MovieLoadResponse`â`dataUrl`, `TvSeriesLoadResponse`â`findEpisode(...).data`
-7. `executeTmdbLoadLinks`: sammelt `ExtractorLink`s via callback, `filterValid` (nur http(s)), `toLocalScraperResult` â erscheinen in ARVIOs Quellenauswahl. **Unsere Debug-Quellen (url=`https://arvio-addon.invalid/...`) passieren filterValid.**
-8. **Inkonsistenz (Test-Pfad):** `executeTmdbProviderWithDiagnostics` ruft `loadLinks` mit `TmdbLink(...).toJson()` direkt auf (ohne `load()`) â anderer data-Vertrag. Unser `loadLinks` ist auf den load()-Pfad ausgelegt. Falls ARVIO den Test-Button aktiviert, muss `loadLinks` auch TmdbLink-JSON verarbeiten.
-9. **WICHTIG fÃ¼r "Quellen aktualisieren":** `toggleScraper` (589) lÃ¤dt die `.cs3` NICHT neu â nur Datenbank-Toggle. Neudownload NUR via `addRepository` oder `refreshExternalRepository`. **Daher: fÃ¼r Plugin-Update immer Repo lÃ¶schen + neu hinzufÃ¼gen** (`https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`).
+### ARVIO-Scraper-Aufruf-Pfad (verifiziert, entscheidend fГғВјrs Debugging)
+1. `DetailsViewModel.loadStreams` ГўВҶВ’ `pluginScraperJob` ГўВҶВ’ `pluginManager.executeScrapersStreaming(tmdbId, mediaType, season, episode)`
+2. `executeScrapersStreaming`: prГғВјft `pluginsEnabled` + `enabledScrapers.filter{supportsType}`; leer ГўВҶВ’ return; sonst pro Scraper `executeScraperWithSingleFlight` ГўВҶВ’ `executeExternalDexScraper` (mit `SCRAPER_TIMEOUT_MS=120_000`)
+3. `executeExternalDexScraper` ГўВҶВ’ `externalExtensionRunner.execute(scraperId,...)` ГўВҶВ’ `extensionLoader.getApi(scraperId)` (leer ГўВҶВ’ "No API loaded" ГўВҶВ’ emptyList, **still**)
+4. `execute` ГўВҶВ’ `executeInternal` ГўВҶВ’ **wenn `api is TmdbProvider`:** `executeTmdbProvider`; **sonst:** `executeSearchBased`
+5. `executeTmdbProvider`: `api.load("""{"id":$tmdbIdInt,"type":"$type"}""")` ГўВҶВ’ null-fallback `api.load("https://www.themoviedb.org/<type>/<id>")` ГўВҶВ’ `extractData(loadResponse)` ГўВҶВ’ `api.loadLinks(data)`
+6. `extractData`: `MovieLoadResponse`ГўВҶВ’`dataUrl`, `TvSeriesLoadResponse`ГўВҶВ’`findEpisode(...).data`
+7. `executeTmdbLoadLinks`: sammelt `ExtractorLink`s via callback, `filterValid` (nur http(s)), `toLocalScraperResult` ГўВҶВ’ erscheinen in ARVIOs Quellenauswahl. **Unsere Debug-Quellen (url=`https://arvio-addon.invalid/...`) passieren filterValid.**
+8. **Inkonsistenz (Test-Pfad):** `executeTmdbProviderWithDiagnostics` ruft `loadLinks` mit `TmdbLink(...).toJson()` direkt auf (ohne `load()`) ГўВҖВ“ anderer data-Vertrag. Unser `loadLinks` ist auf den load()-Pfad ausgelegt. Falls ARVIO den Test-Button aktiviert, muss `loadLinks` auch TmdbLink-JSON verarbeiten.
+9. **WICHTIG fГғВјr "Quellen aktualisieren":** `toggleScraper` (589) lГғВӨdt die `.cs3` NICHT neu ГўВҶВ’ nur Datenbank-Toggle. Neudownload NUR via `addRepository` oder `refreshExternalRepository`. **Daher: fГғВјr Plugin-Update immer Repo lГғВ¶schen + neu hinzufГғВјgen** (`https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`).
 
-### Diagnose-Tooling in unserem Plugin (v8, fÃ¼r die Logcat-Ãra falls Scraper doch lÃ¤uft)
-- `DebugLog.kt`: in-memory Ring-Buffer (2000) + `snapshot()`/`format()` fÃ¼r `emitTraceAsSources`.
-- `emitTraceAsSources(callback)`: emittiert Trace als `ExtractorLink` (source="ArvioAddon-Debug", url=`https://arvio-addon.invalid/debug/<n>`) â sichtbar in ARVIO-Quellenauswahl. Erstes Banner: "PLUGIN vN loaded".
-- `debugLoadResponse()`: `MovieLoadResponse` mit `dataUrl="ARVIO_DEBUG"` â `loadLinks` wird auch bei load()-Fehlern aufgerufen.
+### Diagnose-Tooling in unserem Plugin (v8, fГғВјr die Logcat-ГғВ„ra falls Scraper doch lГғВӨuft)
+- `DebugLog.kt`: in-memory Ring-Buffer (2000) + `snapshot()`/`format()` fГғВјr `emitTraceAsSources`.
+- `emitTraceAsSources(callback)`: emittiert Trace als `ExtractorLink` (source="ArvioAddon-Debug", url=`https://arvio-addon.invalid/debug/<n>`) ГўВҶВ“ sichtbar in ARVIO-Quellenauswahl. Erstes Banner: "PLUGIN vN loaded".
+- `debugLoadResponse()`: `MovieLoadResponse` mit `dataUrl="ARVIO_DEBUG"` ГўВҶВ’ `loadLinks` wird auch bei load()-Fehlern aufgerufen.
 - Per-Call-Timeouts (`NET_TIMEOUT_MS=8000`) um `fetchTmdbMeta`/`searchFilmpalast`.
-- `DebugServer.kt` (127.0.0.1:8420) + `DownloadsLogWriter.kt` (MediaStore) noch vorhanden, aber **nur nutzbar, wenn der Scraper lÃ¤uft** (was aktuell nicht der Fall ist).
+- `DebugServer.kt` (127.0.0.1:8420) + `DownloadsLogWriter.kt` (MediaStore) noch vorhanden, aber **nur nutzbar, wenn der Scraper lГғВӨuft** (was aktuell nicht der Fall ist).
 
 ---
 
 ## Entscheidung: Welcher Plugin-Typ?
 
-**GewÃ¤hlt: Cloudstream3-Plugin (Kotlin/DEX, ".cs3")** â der "mÃ¤chtige" Weg.
+**GewГғВӨhlt: Cloudstream3-Plugin (Kotlin/DEX, ".cs3")** ГўВҖВ“ der "mГғВӨchtige" Weg.
 
 | Grund | Detail |
 |---|---|
-| Eigene Konfig-Seite (Portal-URL/MAC) | Nur Cloudstream3-Plugins kÃ¶nnen UI-Settings haben â nÃ¶tig fÃ¼r Stalker-VOD |
+| Eigene Konfig-Seite (Portal-URL/MAC) | Nur Cloudstream3-Plugins kГғВ¶nnen UI-Settings haben ГўВҶВ’ nГғВ¶tig fГғВјr Stalker-VOD |
 | Eigene Kataloge/Startseiten in ARVIO | Nur Cloudstream3-Plugins liefern eigene Start-Kataloge |
-| Kotlin = gleiche Sprache wie Ventix | Ventix-Scraper (Kotlin) lassen sich **direkt portieren**, nicht nach JS Ã¼bersetzen |
+| Kotlin = gleiche Sprache wie Ventix | Ventix-Scraper (Kotlin) lassen sich **direkt portieren**, nicht nach JS ГғВјbersetzen |
 | Viele Vorlagen | GermanProviders-Repo (Bnyro) ist eine komplette Vorlage mit exakt unseren Scraper-Hostern |
-| Cloudstream3-Ãkosystem | ARVIO nutzt library v4.7.0; apiVersion 1 ist kompatibel |
+| Cloudstream3-ГғВ–kosystem | ARVIO nutzt library v4.7.0; apiVersion 1 ist kompatibel |
 
-**AbgewÃ¤hlt: Nuvio-JS-Plugin** (Weg A) â einfacher, kann aber nur Streams liefern, keine Config-Seite, keine eigenen Kataloge. Da wir Stalker-VOD brauchen (mit Portal/MAC-Eingabe), reicht JS-Plugin nicht.
+**AbgewГғВӨhlt: Nuvio-JS-Plugin** (Weg A) ГўВҖВ“ einfacher, kann aber nur Streams liefern, keine Config-Seite, keine eigenen Kataloge. Da wir Stalker-VOD brauchen (mit Portal/MAC-Eingabe), reicht JS-Plugin nicht.
 
 ---
 
@@ -184,45 +281,45 @@ ARVIO hat **keine Log-Datei-Exportfunktion** und schreibt **keine App-Logs in Da
 
 Der Nutzer installiert das Plugin so in ARVIO (verifizierter Flow):
 1. ARVIO **sideload-APK** installieren (nicht Play-Store-Version!)
-2. Einstellungen â **Plugins & Extensions** (nur in sideload sichtbar)
-3. **Add Repository** â Repo-URL eintragen
-4. ARVIO lÃ¤dt `repo.json` â folgt `pluginLists` â lÃ¤dt `plugins.json`
-5. Plugin-EintrÃ¤ge einschalten â ARVIO lÃ¤dt `.cs3`-Datei (kompilierter Code)
+2. Einstellungen ГўВҶВ’ **Plugins & Extensions** (nur in sideload sichtbar)
+3. **Add Repository** ГўВҶВ’ Repo-URL eintragen
+4. ARVIO lГғВӨdt `repo.json` ГўВҶВ’ folgt `pluginLists` ГўВҶВ’ lГғВӨdt `plugins.json`
+5. Plugin-EintrГғВӨge einschalten ГўВҶВ’ ARVIO lГғВӨdt `.cs3`-Datei (kompilierter Code)
 
 ### Bekannter Bug: Add-Repo-Dialog/Plugin-Settings auf Handy (GEFIXT in 1.9.983)
-Der "Add Repository"-Dialog + Plugin-Settings-Screen nutzten TV-only `androidx.tv.material3.Surface`-Buttons, die auf Touch-GerÃ¤ten (Handy/Tablet) nicht reagierten. **Behoben in ARVIO Issue #502** ("fix(mobile): resolve touch issues in plugins settings") â `PluginScreen.kt` hat jetzt `LocalDeviceType.current.isTouchDevice()` mit separatem Mobile-Layout. **Fix ist in 1.9.983 enthalten** (verifiziert). Nutzer hat das Plugin erfolgreich Ã¼ber ein Cloud-Profil auf dem Handy installiert.
+Der "Add Repository"-Dialog + Plugin-Settings-Screen nutzten TV-only `androidx.tv.material3.Surface`-Buttons, die auf Touch-GerГғВӨten (Handy/Tablet) nicht reagierten. **Behoben in ARVIO Issue #502** ("fix(mobile): resolve touch issues in plugins settings") ГўВҖВ“ `PluginScreen.kt` hat jetzt `LocalDeviceType.current.isTouchDevice()` mit separatem Mobile-Layout. **Fix ist in 1.9.983 enthalten** (verifiziert). Nutzer hat das Plugin erfolgreich ГғВјber ein Cloud-Profil auf dem Handy installiert.
 
 ---
 
-## Was das Plugin kÃ¶nnen muss (Scope)
+## Was das Plugin kГғВ¶nnen muss (Scope)
 
 ### Modul 1: Deutsche Web-Scraper (Filmpalast, Serienstream, HdFilme, Megakino, KinoGer, Netzkino, AniWorld)
-- **Vorlage:** GermanProviders-Repo (Bnyro/GermanProviders) â hat ALL diese Scraper schon als Cloudstream3-Plugins!
-- MÃ¶glichkeit 1: GermanProviders forken + anpassen (wenig Eigenarbeit, abhÃ¤ngig von Upstream)
-- MÃ¶glichkeit 2: Eigenes Plugin schreiben, GermanProviders als Referenz (volle Kontrolle)
+- **Vorlage:** GermanProviders-Repo (Bnyro/GermanProviders) ГўВҖВ“ hat ALL diese Scraper schon als Cloudstream3-Plugins!
+- MГғВ¶glichkeit 1: GermanProviders forken + anpassen (wenig Eigenarbeit, abhГғВӨngig von Upstream)
+- MГғВ¶glichkeit 2: Eigenes Plugin schreiben, GermanProviders als Referenz (volle Kontrolle)
 
-### Modul 2: Stalker-VOD (Filme + Serien Ã¼ber Stalker-Portal)
-- **Das ist die Neuentwicklung** â GermanProviders hat das nicht.
-- ARVIOs eingebaute StalkerApi kennt NUR Live-TV (get_genres, get_all_channels, create_link) â **KEIN VOD, keine Serien**.
+### Modul 2: Stalker-VOD (Filme + Serien ГғВјber Stalker-Portal)
+- **Das ist die Neuentwicklung** ГўВҖВ“ GermanProviders hat das nicht.
+- ARVIOs eingebaute StalkerApi kennt NUR Live-TV (get_genres, get_all_channels, create_link) ГўВҖВ“ **KEIN VOD, keine Serien**.
 - Plugin braucht: eigene Config-Seite (Portal-URL + MAC), VOD-Kategorien, VOD-Liste, createVodLink, Serien/Staffeln/Episoden.
-- Vorlage: Ventix-StalkerApi (17 Methoden) â in Kotlin, direkt portierbar.
+- Vorlage: Ventix-StalkerApi (17 Methoden) ГўВҖВ“ in Kotlin, direkt portierbar.
 
 ### Modul 3: Stalker Live-TV
-- **Nicht bauen** â ARVIO hat das schon eingebaut (obwohl die UI aktuell fehlt, siehe "ARVIO-MÃ¤ngel").
+- **Nicht bauen** ГўВҖВ“ ARVIO hat das schon eingebaut (obwohl die UI aktuell fehlt, siehe "ARVIO-MГғВӨngel").
 
 ---
 
 ## Architektur-Referenz: ARVIOs Plugin-System
 
 ### Plugin-Formate die ARVIO versteht (verifiziert im Code)
-1. **Nuvio-JS-Plugin**: `manifest.json` + `.js`-Dateien mit `getStreams(tmdbId, type, season, episode)`. Engine: QuickJS + Cheerio + CryptoJS. (abgewÃ¤hlt)
-2. **Cloudstream3-Plugin (EXTERNAL_DEX)**: `.cs3`-Datei (kompiliertes DEX). Engine: cloudstream3-library v4.7.0. (**gewÃ¤hlt**)
+1. **Nuvio-JS-Plugin**: `manifest.json` + `.js`-Dateien mit `getStreams(tmdbId, type, season, episode)`. Engine: QuickJS + Cheerio + CryptoJS. (abgewГғВӨhlt)
+2. **Cloudstream3-Plugin (EXTERNAL_DEX)**: `.cs3`-Datei (kompiliertes DEX). Engine: cloudstream3-library v4.7.0. (**gewГғВӨhlt**)
 
 ### ARVIO Repository-Manifest-Format (`repo.json`)
 ```json
 {
   "name": "Ventix Arvio Addon",
-  "description": "Deutsche Scraper + Stalker VOD fÃ¼r ARVIO",
+  "description": "Deutsche Scraper + Stalker VOD fГғВјr ARVIO",
   "manifestVersion": 1,
   "pluginLists": ["https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/<branch>/plugins.json"]
 }
@@ -247,76 +344,76 @@ Der "Add Repository"-Dialog + Plugin-Settings-Screen nutzten TV-only `androidx.t
 ```
 
 ### Cloudstream3-Plugin-Aufbau (pro Plugin-Modul, z.B. Filmpalast)
-- `@CloudstreamPlugin`-annotierte `Plugin`-Klasse â `registerMainAPI(...)` + `registerExtractorAPI(...)`
-- `MainAPI`-Subklasse â `mainUrl`, `name`, `supportedTypes`, `mainPage`, `search()`, `load()`, `loadLinks()`
-- `ExtractorApi`-Subklassen fÃ¼r Hoster (VOE, FileMoon, Supervideo, VidHidePro etc.)
+- `@CloudstreamPlugin`-annotierte `Plugin`-Klasse ГўВҶВ’ `registerMainAPI(...)` + `registerExtractorAPI(...)`
+- `MainAPI`-Subklasse ГўВҶВ’ `mainUrl`, `name`, `supportedTypes`, `mainPage`, `search()`, `load()`, `loadLinks()`
+- `ExtractorApi`-Subklassen fГғВјr Hoster (VOE, FileMoon, Supervideo, VidHidePro etc.)
 
 ---
 
 ## Ventix-Referenz (Quell-Projekt, NICHT in dieses Repo kopieren)
 
 Ventix liegt im Schwester-Repo `ReichiMD/IPTV-App`. Scraper-Quellcode zum Portieren:
-- `app/src/main/java/com/iptv/stalker/data/scraping/` â FilmpalastScraper, HdFilmeScraper, KinogerScraper, MegakinoScraper, SerienstreamScraper, AniWorldScraper, NetzkinoScraper + extractor/
-- `app/src/main/java/com/iptv/stalker/data/api/StalkerApi.kt` â Stalker-Middleware (17 Methoden: handshake, get_profile, get_events, VOD-+Serien-+EPG-Endpoints, createVodLink, getSeasons, M3U-Export)
-- `app/upstream-reference/` â Cloudstream3-Upstream-Referenzen (bereits als Referenz genutzt!)
-- `VideoHostExtractor.kt` â Hoster-Extraktoren (VOE, FileMoon, VidGuard, Veev, Vidsonic, DoodStream etc.)
+- `app/src/main/java/com/iptv/stalker/data/scraping/` ГўВҖВ“ FilmpalastScraper, HdFilmeScraper, KinogerScraper, MegakinoScraper, SerienstreamScraper, AniWorldScraper, NetzkinoScraper + extractor/
+- `app/src/main/java/com/iptv/stalker/data/api/StalkerApi.kt` ГўВҖВ“ Stalker-Middleware (17 Methoden: handshake, get_profile, get_events, VOD-+Serien-+EPG-Endpoints, createVodLink, getSeasons, M3U-Export)
+- `app/upstream-reference/` ГўВҖВ“ Cloudstream3-Upstream-Referenzen (bereits als Referenz genutzt!)
+- `VideoHostExtractor.kt` ГўВҖВ“ Hoster-Extraktoren (VOE, FileMoon, VidGuard, Veev, Vidsonic, DoodStream etc.)
 
-Ventix und ARVIO nutzen BEIDE Cloudstream3-Upstream-Referenzen â das vereinfacht das Portieren.
+Ventix und ARVIO nutzen BEIDE Cloudstream3-Upstream-Referenzen ГўВҖВ“ das vereinfacht das Portieren.
 
 ---
 
 ## GermanProviders-Referenz (Vorlage-Repo, geklont nach /tmp/german-providers)
 
-`Bnyro/GermanProviders` â Cloudstream3-Multi-Provider-Repo, hat bereits 21 fertige Plugins:
+`Bnyro/GermanProviders` ГўВҖВ“ Cloudstream3-Multi-Provider-Repo, hat bereits 21 fertige Plugins:
 ARD, Aniworld, Arte, C3TV, Discovery, EinschaltenIn, **FilmPalast**, HDFilme, HuhuTo, IptvOrg, KinoKing, **Kinoger**, **Megakino**, Moflix, **Netzkino**, PlutoTV, **Serienstream**, Southpark, SpiegelTV, Welt, Xcine.
 
 Installations-URL (Test): `https://raw.githubusercontent.com/Bnyro/GermanProviders/refs/heads/master/repo.json`
-- `builds`-Branch enthÃ¤lt `plugins.json` + fertige `.cs3`-Dateien.
+- `builds`-Branch enthГғВӨlt `plugins.json` + fertige `.cs3`-Dateien.
 - Aufbau: root `build.gradle.kts` (cloudstream3-gradle-plugin `com.github.recloudstream:gradle`), pro Provider ein Modul-Ordner mit `build.gradle.kts` + `src/`.
 - Settings-Gradle: auto-include aller Modul-Ordner.
 
-**Diese Scraper (Filmpalast, Serienstream etc.) sind identisch mit Ventix' Ziel-Set.** GermanProviders ist die primÃ¤re Vorlage fÃ¼r Modul 1.
+**Diese Scraper (Filmpalast, Serienstream etc.) sind identisch mit Ventix' Ziel-Set.** GermanProviders ist die primГғВӨre Vorlage fГғВјr Modul 1.
 
 ---
 
 ## ARVIO-Referenz (geklot nach /tmp/arvio_ref)
 
-`ProdigyV21/ARVIO` â die Ziel-App. Version 1.9.983 (versionCode 306), sehr aktiv.
+`ProdigyV21/ARVIO` ГўВҖВ“ die Ziel-App. Version 1.9.983 (versionCode 306), sehr aktiv.
 
 ### ARVIO Build-Flavors (verifiziert in `app/build.gradle.kts`)
 | Flavor | `FEATURE_PLUGINS_ENABLED` | `SELF_UPDATE_ENABLED` | Plugin-Engine |
 |---|---|---|---|
-| `play` (Play Store) | **false** | false | â abgeschaltet |
-| `sideload` (GitHub-APK) | **true** | true | â voll aktiv |
+| `play` (Play Store) | **false** | false | ГўВқВҢ abgeschaltet |
+| `sideload` (GitHub-APK) | **true** | true | ГўВңВ… voll aktiv |
 
-â **Plugin funktioniert NUR in der sideload-APK**, nicht im Play-Store-Build. Google-Policy verbietet dynamischen Code im Store.
+ГўВҶВ’ **Plugin funktioniert NUR in der sideload-APK**, nicht im Play-Store-Build. Google-Policy verbietet dynamischen Code im Store.
 
 ### ARVIO sideload-Download
 `https://github.com/ProdigyV21/ARVIO/releases/download/v1.9.983/ARVIO-v1.9.983-sideload-release.apk` (135 MB)
 
 ### ARVIO Plugin-Engine (nur in `app/src/sideload/`)
-- `PluginManager.kt` â Repository-Verwaltung, `addRepository()`, Format-Auto-Detection
-- `PluginRuntime.kt` â QuickJS-Engine (fÃ¼r JS-Plugins) + `__native_fetch`, `__cheerio_*`, CryptoJS
-- `cloudstream/ExternalExtensionLoader.kt` â lÃ¤dt `.cs3`-Plugins via DexClassLoader
-- `cloudstream/ExternalExtensionRunner.kt` â fÃ¼hrt `MainAPI.search()`/`load()`/`loadLinks()` aus
-- `cloudstream/ExternalExtractorRegistry.kt` â verwaltet `ExtractorApi`-Extraktoren
-- `cloudstream/ExternalRepoParser.kt` â parsed `repo.json` (erkennt `"pluginLists"`-Key) + `plugins.json`
+- `PluginManager.kt` ГўВҖВ“ Repository-Verwaltung, `addRepository()`, Format-Auto-Detection
+- `PluginRuntime.kt` ГўВҖВ“ QuickJS-Engine (fГғВјr JS-Plugins) + `__native_fetch`, `__cheerio_*`, CryptoJS
+- `cloudstream/ExternalExtensionLoader.kt` ГўВҖВ“ lГғВӨdt `.cs3`-Plugins via DexClassLoader
+- `cloudstream/ExternalExtensionRunner.kt` ГўВҖВ“ fГғВјhrt `MainAPI.search()`/`load()`/`loadLinks()` aus
+- `cloudstream/ExternalExtractorRegistry.kt` ГўВҖВ“ verwaltet `ExtractorApi`-Extraktoren
+- `cloudstream/ExternalRepoParser.kt` ГўВҖВ“ parsed `repo.json` (erkennt `"pluginLists"`-Key) + `plugins.json`
 
-### ARVIO-MÃ¤ngel (Stand Aug 2026, die wir im Plugin adressieren)
-1. **Stalker-VOD fehlt komplett** â StalkerApi kennt nur Live-TV (4 Methoden: handshake, getProfile, getChannels, resolveStreamUrl). Kein VOD, keine Serien, kein EPG fÃ¼r VOD.
-2. **Stalker-Dateneingabe fehlt in der UI** â `saveStalkerConfig()` existiert im SettingsViewModel (Zeile 2280), wird aber von KEINEM UI-Element aufgerufen. Kein Button, kein Dialog. Backend halbfertig, UI fehlt.
-3. **Add-Repo-Dialog Handy-Bug** â `width(520.dp)` zu breit fÃ¼r Hochformat (Workaround: Querformat).
+### ARVIO-MГғВӨngel (Stand Aug 2026, die wir im Plugin adressieren)
+1. **Stalker-VOD fehlt komplett** ГўВҖВ“ StalkerApi kennt nur Live-TV (4 Methoden: handshake, getProfile, getChannels, resolveStreamUrl). Kein VOD, keine Serien, kein EPG fГғВјr VOD.
+2. **Stalker-Dateneingabe fehlt in der UI** ГўВҖВ“ `saveStalkerConfig()` existiert im SettingsViewModel (Zeile 2280), wird aber von KEINEM UI-Element aufgerufen. Kein Button, kein Dialog. Backend halbfertig, UI fehlt.
+3. **Add-Repo-Dialog Handy-Bug** ГўВҖВ“ `width(520.dp)` zu breit fГғВјr Hochformat (Workaround: Querformat).
 
 ---
 
 ## Stremio-Addon-Referenz (paralleles Projekt)
 
-`ReichiMD/Stremio-Addon` â serverseitiges Node.js-Addon (deployed auf Render), Quellen: Vavoo/KinoGer/Filmpalast/MovieBox/VidSrc/Einschalten + MediaFlowProxy.
-- **Problem:** Stremio-Addon (serverseitig) kann manche Streams nicht liefern (z.B. KinoGer 403 â Render-DC-IP blockiert). Ventix (clientseitig) kann das.
-- **Dieses ARVIO-Addon lÃ¶st das:** lÃ¤uft clientseitig in der App â EndgerÃ¤t-IP â kein Bot-Schutz â kein Server, kein Geld.
+`ReichiMD/Stremio-Addon` ГўВҖВ“ serverseitiges Node.js-Addon (deployed auf Render), Quellen: Vavoo/KinoGer/Filmpalast/MovieBox/VidSrc/Einschalten + MediaFlowProxy.
+- **Problem:** Stremio-Addon (serverseitig) kann manche Streams nicht liefern (z.B. KinoGer 403 ГўВҖВ“ Render-DC-IP blockiert). Ventix (clientseitig) kann das.
+- **Dieses ARVIO-Addon lГғВ¶st das:** lГғВӨuft clientseitig in der App ГўВҶВ’ EndgerГғВӨt-IP ГўВҶВ’ kein Bot-Schutz ГўВҶВ’ kein Server, kein Geld.
 - Logik der Scraper ist im Stremio-Addon bereits in JavaScript/TypeScript vorhanden (kann als Referenz dienen, wird aber neu in Kotlin als Cloudstream3-Plugin geschrieben).
 
-`ReichiMD/mediaflow-proxy` â MediaFlowProxy (fest codiert im Stremio-Addon). FÃ¼r ARVIO-Addon nicht nÃ¶tig (clientseitig braucht keinen Proxy).
+`ReichiMD/mediaflow-proxy` ГўВҖВ“ MediaFlowProxy (fest codiert im Stremio-Addon). FГғВјr ARVIO-Addon nicht nГғВ¶tig (clientseitig braucht keinen Proxy).
 
 ---
 
@@ -330,212 +427,212 @@ Installations-URL (Test): `https://raw.githubusercontent.com/Bnyro/GermanProvide
 ### Datei-Struktur (geplant)
 ```
 Arvio-Addon/
-âââ AGENTS.md                          # diese Datei
-âââ README.md                          # (spÃ¤ter)
-âââ build.gradle.kts                   # root, cloudstream3-gradle-plugin
-âââ settings.gradle.kts                # auto-include Module
-âââ repo.json                          # Installations-Manifest fÃ¼r ARVIO
-âââ GermanScraper/                     # Modul 1: deutsche Web-Scraper (oder pro Scraper ein Modul)
-â   âââ build.gradle.kts
-â   âââ src/main/kotlin/.../GermanScraperPlugin.kt + Provider + Extractors
-âââ StalkerVod/                        # Modul 2: Stalker-VOD (Config-Seite + VOD/Serien)
-    âââ build.gradle.kts
-    âââ src/main/kotlin/.../StalkerVodPlugin.kt + StalkerApi + Provider
+ГўВ”ВңГўВ”ВҖГўВ”ВҖ AGENTS.md                          # diese Datei
+ГўВ”ВңГўВ”ВҖГўВ”ВҖ README.md                          # (spГғВӨter)
+ГўВ”ВңГўВ”ВҖГўВ”ВҖ build.gradle.kts                   # root, cloudstream3-gradle-plugin
+ГўВ”ВңГўВ”ВҖГўВ”ВҖ settings.gradle.kts                # auto-include Module
+ГўВ”ВңГўВ”ВҖГўВ”ВҖ repo.json                          # Installations-Manifest fГғВјr ARVIO
+ГўВ”ВңГўВ”ВҖГўВ”ВҖ GermanScraper/                     # Modul 1: deutsche Web-Scraper (oder pro Scraper ein Modul)
+ГўВ”ВӮ   ГўВ”ВңГўВ”ВҖГўВ”ВҖ build.gradle.kts
+ГўВ”ВӮ   ГўВ”В”ГўВ”ВҖГўВ”ВҖ src/main/kotlin/.../GermanScraperPlugin.kt + Provider + Extractors
+ГўВ”В”ГўВ”ВҖГўВ”ВҖ StalkerVod/                        # Modul 2: Stalker-VOD (Config-Seite + VOD/Serien)
+    ГўВ”ВңГўВ”ВҖГўВ”ВҖ build.gradle.kts
+    ГўВ”В”ГўВ”ВҖГўВ”ВҖ src/main/kotlin/.../StalkerVodPlugin.kt + StalkerApi + Provider
 ```
 
 ### branches
-- `main` â Quellcode
-- `builds` â fertige `.cs3`-Dateien + `plugins.json` (von CI gepusht, wie GermanProviders)
+- `main` ГўВҖВ“ Quellcode
+- `builds` ГўВҖВ“ fertige `.cs3`-Dateien + `plugins.json` (von CI gepusht, wie GermanProviders)
 
 ---
 
-## NÃ¤chste Schritte (PrioritÃ¤t)
+## NГғВӨchste Schritte (PrioritГғВӨt)
 
-1. **Proof-of-Concept:** GermanProviders in ARVIO-sideload testen (Button-Bug workaronden) â prÃ¼fen welche Scraper laufen.
+1. **Proof-of-Concept:** GermanProviders in ARVIO-sideload testen (Button-Bug workaronden) ГўВҶВ’ prГғВјfen welche Scraper laufen.
 2. **Repo-Setup:** GermanProviders-Architektur (root build.gradle + Modul-Struktur) hier nachbauen.
 3. **Modul 1 (Web-Scraper):** GermanProviders-Plugins adaptieren ODER eigene Implementierung. Hoster-Extraktoren (VOE, FileMoon etc.) aus Ventix' `VideoHostExtractor` portieren.
-4. **Modul 2 (Stalker-VOD):** Ventix' `StalkerApi.kt` (VOD/Serien-Teil) als Cloudstream3-Provider portieren + Config-Seite fÃ¼r Portal/MAC.
-5. **CI:** GitHub Actions workflow fÃ¼r `.cs3`-Build + `builds`-Branch-Push.
+4. **Modul 2 (Stalker-VOD):** Ventix' `StalkerApi.kt` (VOD/Serien-Teil) als Cloudstream3-Provider portieren + Config-Seite fГғВјr Portal/MAC.
+5. **CI:** GitHub Actions workflow fГғВјr `.cs3`-Build + `builds`-Branch-Push.
 
 ---
 
 ## Versionshistorie dieses Addons
 
-(noch keine â Repo ist leer)
+(noch keine ГўВҖВ“ Repo ist leer)
 
 ---
 
 ## Recherche: ARVIO-Plugin-Integration (Stand Aug 2026, ARVIO v1.9.983)
 
 Verifiziert im ARVIO-Quellcode (`ProdigyV21/ARVIO` @ v1.9.983, geklont nach `/tmp/arvio_ref`).
-Recherche anlÃ¤sslich zweier Nutzer-Probleme beim Testen von GermanProviders als Cloudstream3-Plugin in ARVIO.
+Recherche anlГғВӨsslich zweier Nutzer-Probleme beim Testen von GermanProviders als Cloudstream3-Plugin in ARVIO.
 
 ### Problem 1: Plugin-Einrichtung funktioniert nur auf TV, nicht auf Handy/Tablet
 
 **Beobachtung (Nutzer):** Add-Repository / Plugin-Aktivierung ging auf Handy & Tablet nicht; erst ein ARVIO-Cloud-Profil (auf TV erstellt, aufs Handy synchronisiert) brachte die Plugins aufs Handy. TV funktionierte direkt.
 
 **Rechercheergebnis:**
-- ARVIO hat ein Layout-Force-Feature ("Force TV, Tablet, or Phone layout") UND Auto-Detect fÃ¼r TV-Modus bei GerÃ¤ten ohne Touchscreen (CHANGELOG v1.9.3). Die UI wird je Formfaktor unterschiedlich gerendert.
-- Der Plugin-Bereich wurde in v1.9.983 neu gebaut: CHANGELOG-Eintrag "redesigned plugin settings for TV and mobile. Contributor: @Himanth-reddy via #466" â d.h. die mobile Plugin-UI ist **sehr neu** (Juli 2026).
-- Begleitend in v1.9.983: "Fixed sideload production-plugin routing, extractor unloading, **mobile routing**, and TV focus limits" (#466) â ein mobiler Routing-Fix wurde *explizit* fÃ¼r diese Version gebraucht. Das deutet darauf hin, dass mobile Plugin-Pfade vorher fehlerhaft waren.
-- Ein **bekannter, Ã¤lterer Bug** (AGENTS.md bereits notiert): Add-Repo-Dialog `width(520.dp)` zu breit fÃ¼r Handy-Hochformat (~390dp) â Buttons abgeschnitten/inaktiv im Hochformat.
-- Vergleichs-Befund aus dem Nuvio-Ãkosystem (Schwester-App, gleiche Plugin-Architektur): NuvioMobile Issue #1190 â *"If Cloudstream Plugin Repositories are loaded in the Plugins list in the Mobile app, they get removed from Plugins list in the TV app"* (closed as not planned). Cloudstream-Plugin-Listen zwischen Mobile- und TV-UI synchron halten ist **branchenweit ein Problem**, nicht ARVIO-spezifisch.
+- ARVIO hat ein Layout-Force-Feature ("Force TV, Tablet, or Phone layout") UND Auto-Detect fГғВјr TV-Modus bei GerГғВӨten ohne Touchscreen (CHANGELOG v1.9.3). Die UI wird je Formfaktor unterschiedlich gerendert.
+- Der Plugin-Bereich wurde in v1.9.983 neu gebaut: CHANGELOG-Eintrag "redesigned plugin settings for TV and mobile. Contributor: @Himanth-reddy via #466" ГўВҖВ“ d.h. die mobile Plugin-UI ist **sehr neu** (Juli 2026).
+- Begleitend in v1.9.983: "Fixed sideload production-plugin routing, extractor unloading, **mobile routing**, and TV focus limits" (#466) ГўВҖВ“ ein mobiler Routing-Fix wurde *explizit* fГғВјr diese Version gebraucht. Das deutet darauf hin, dass mobile Plugin-Pfade vorher fehlerhaft waren.
+- Ein **bekannter, ГғВӨlterer Bug** (AGENTS.md bereits notiert): Add-Repo-Dialog `width(520.dp)` zu breit fГғВјr Handy-Hochformat (~390dp) ГўВҶВ’ Buttons abgeschnitten/inaktiv im Hochformat.
+- Vergleichs-Befund aus dem Nuvio-ГғВ–kosystem (Schwester-App, gleiche Plugin-Architektur): NuvioMobile Issue #1190 ГўВҖВ“ *"If Cloudstream Plugin Repositories are loaded in the Plugins list in the Mobile app, they get removed from Plugins list in the TV app"* (closed as not planned). Cloudstream-Plugin-Listen zwischen Mobile- und TV-UI synchron halten ist **branchenweit ein Problem**, nicht ARVIO-spezifisch.
 
-**Fazit Problem 1:** Sehr wahrscheinlich ein **ARVIO-seitiger Bug in der (neuen) mobilen Plugin-UI** â entweder Routing (in v1.9.983 gerade erst gefixt, evtl. nicht vollstÃ¤ndig) oder der bekannte `width(520.dp)`-Dialog-Bug. Dass der Cloud-Sync-Workaround funktioniert, bestÃ¤tigt: Die Plugin-Daten selbst sind korrekt; nur die mobile Einrichtungspath-UI ist defekt. Keine andere Nutzerberichte als direktes Duplikat gefunden, aber die CHANGELOG-Historie (mobiler Plugin-Routing-Fix in der *aktuellen* Version) zeigt, dass ARVIO genau diese Klasse von Bug gerade behebt.
+**Fazit Problem 1:** Sehr wahrscheinlich ein **ARVIO-seitiger Bug in der (neuen) mobilen Plugin-UI** ГўВҖВ“ entweder Routing (in v1.9.983 gerade erst gefixt, evtl. nicht vollstГғВӨndig) oder der bekannte `width(520.dp)`-Dialog-Bug. Dass der Cloud-Sync-Workaround funktioniert, bestГғВӨtigt: Die Plugin-Daten selbst sind korrekt; nur die mobile Einrichtungspath-UI ist defekt. Keine andere Nutzerberichte als direktes Duplikat gefunden, aber die CHANGELOG-Historie (mobiler Plugin-Routing-Fix in der *aktuellen* Version) zeigt, dass ARVIO genau diese Klasse von Bug gerade behebt.
 
-**Workarounds fÃ¼r Nutzer:** Querformat beim Add-Repo; oder Plugin-Konfiguration auf TV vornehmen + ARVIO-Cloud-Sync aufs Handy (funktioniert laut Nutzer bereits); oder `web.arvio.tv` (Web-App, vollstÃ¤ndige ARVIO-UI im Browser, laut CHANGELOG mit TV-D-pad-Navigation).
+**Workarounds fГғВјr Nutzer:** Querformat beim Add-Repo; oder Plugin-Konfiguration auf TV vornehmen + ARVIO-Cloud-Sync aufs Handy (funktioniert laut Nutzer bereits); oder `web.arvio.tv` (Web-App, vollstГғВӨndige ARVIO-UI im Browser, laut CHANGELOG mit TV-D-pad-Navigation).
 
 ### Problem 2: Aktivierte Provider erscheinen nicht bei Quellensuche ("kein Add-on eingerichtet / keine Quellen")
 
-**Beobachtung (Nutzer):** In den Plugin-Einstellungen Provider (z.B. Einschalten) aktiviert â auf eine Silo-Episode gegangen â "nach Quellen gesucht" â Meldung "kein Add-on eingerichtet, keine Quellen gefunden".
+**Beobachtung (Nutzer):** In den Plugin-Einstellungen Provider (z.B. Einschalten) aktiviert ГўВҶВ’ auf eine Silo-Episode gegangen ГўВҶВ’ "nach Quellen gesucht" ГўВҶВ’ Meldung "kein Add-on eingerichtet, keine Quellen gefunden".
 
-**Verifizierte Ursache im ARVIO-Code:** ARVIO hat **zwei komplett getrennte Quell-AuflÃ¶sungspfade**, und Cloudstream3-Plugins (.cs3) laufen Ã¼ber den Pfad, der die "kein Add-on"-Meldung **nicht steuert**:
+**Verifizierte Ursache im ARVIO-Code:** ARVIO hat **zwei komplett getrennte Quell-AuflГғВ¶sungspfade**, und Cloudstream3-Plugins (.cs3) laufen ГғВјber den Pfad, der die "kein Add-on"-Meldung **nicht steuert**:
 
-1. **Stremio-Addon-Pfad** (`StreamRepository` + `AddonRuntimeAggregator`): Hier laufen klassische Stremio-kompatible Addons (HTTP `stream/movie/<imdbId>.json`), Home-Server (Jellyfin/Plex/Emby) und HTTP-Local-Scrapers. Die UI-Variable `hasStreamingAddons` (die "No Streaming Addons" / "kein Add-on eingerichtet" anzeigt) wird **ausschlieÃlich** aus `streamRepository.installedAddons.count { it.isVodStreamingAddon() }` berechnet (`DetailsViewModel.kt` Z. 1600/1633/1650/1689). `isVodStreamingAddon()` prÃ¼ft nur `isEnabled && type != SUBTITLE && !sportsOnly` â das sind Stremio-Addons, **keine Cloudstream-Scraper**. Filter `getStreamAddons()` (`StreamRepository.kt` Z. 1440) wirft sogar hart raus: `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` â und `RuntimeKind` kennt nur `STREMIO`/`TELEGRAM`, keinen Cloudstream/EXTERNAL_DEX-Wert (`Models.kt` Z. 305).
+1. **Stremio-Addon-Pfad** (`StreamRepository` + `AddonRuntimeAggregator`): Hier laufen klassische Stremio-kompatible Addons (HTTP `stream/movie/<imdbId>.json`), Home-Server (Jellyfin/Plex/Emby) und HTTP-Local-Scrapers. Die UI-Variable `hasStreamingAddons` (die "No Streaming Addons" / "kein Add-on eingerichtet" anzeigt) wird **ausschlieГғВҹlich** aus `streamRepository.installedAddons.count { it.isVodStreamingAddon() }` berechnet (`DetailsViewModel.kt` Z. 1600/1633/1650/1689). `isVodStreamingAddon()` prГғВјft nur `isEnabled && type != SUBTITLE && !sportsOnly` ГўВҖВ“ das sind Stremio-Addons, **keine Cloudstream-Scraper**. Filter `getStreamAddons()` (`StreamRepository.kt` Z. 1440) wirft sogar hart raus: `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` ГўВҖВ“ und `RuntimeKind` kennt nur `STREMIO`/`TELEGRAM`, keinen Cloudstream/EXTERNAL_DEX-Wert (`Models.kt` Z. 305).
 
-2. **Cloudstream-Plugin-Pfad** (`PluginManager` + `ExternalExtensionRunner`, sideload-only): Aktivierte `.cs3`-Scraper werden in `DetailsViewModel.loadStreams()` Ã¼ber `pluginManager.executeScrapersStreaming(...)` in einem **parallelen Job** (`pluginScraperJob`, Z. 1510â1552) ausgefÃ¼hrt. Ergebnisse mergen sich asynchron in `streams`. Dieser Pfad startet **nur**, wenn `dataStore.pluginsEnabled` true ist UND `enabledScrapers` (nach `supportsType(mediaType)`) nicht leer ist (`PluginManager.kt` Z. 631â640, 681).
+2. **Cloudstream-Plugin-Pfad** (`PluginManager` + `ExternalExtensionRunner`, sideload-only): Aktivierte `.cs3`-Scraper werden in `DetailsViewModel.loadStreams()` ГғВјber `pluginManager.executeScrapersStreaming(...)` in einem **parallelen Job** (`pluginScraperJob`, Z. 1510ГўВҖВ“1552) ausgefГғВјhrt. Ergebnisse mergen sich asynchron in `streams`. Dieser Pfad startet **nur**, wenn `dataStore.pluginsEnabled` true ist UND `enabledScrapers` (nach `supportsType(mediaType)`) nicht leer ist (`PluginManager.kt` Z. 631ГўВҖВ“640, 681).
 
-**Warum trotzdem "kein Add-on"-Meldung + keine Quellen bei Silo:** Weil `hasStreamingAddons` Stremio-Addons zÃ¤hlt. Hat der Nutzer **kein einziges** Stremio-Addon installiert (nur Cloudstream-Plugins), ist `hasStreamingAddons=false` â UI zeigt "No Streaming Addons / kein Add-on eingerichtet" an. Die Meldung ist in diesem Fall **irrefÃ¼hrend**: Die Cloudstream-Scraper suchen im Hintergrund trotzdem, finden aber fÃ¼r "Silo" vermutlich nichts (siehe Problem 2b), und die UI bleibt bei der "Setup Required"-Meldung stehen, obwohl die Plugins aktiv sind.
+**Warum trotzdem "kein Add-on"-Meldung + keine Quellen bei Silo:** Weil `hasStreamingAddons` Stremio-Addons zГғВӨhlt. Hat der Nutzer **kein einziges** Stremio-Addon installiert (nur Cloudstream-Plugins), ist `hasStreamingAddons=false` ГўВҶВ’ UI zeigt "No Streaming Addons / kein Add-on eingerichtet" an. Die Meldung ist in diesem Fall **irrefГғВјhrend**: Die Cloudstream-Scraper suchen im Hintergrund trotzdem, finden aber fГғВјr "Silo" vermutlich nichts (siehe Problem 2b), und die UI bleibt bei der "Setup Required"-Meldung stehen, obwohl die Plugins aktiv sind.
 
-**Problem 2b â warum die Cloudstream-Scraper fÃ¼r "Silo" trotzdem 0 Quellen liefern (verifiziert):**
-GermanProviders-Plugins (Filmpalast, Serienstream, AniWorld etc.) sind **keine** `TmdbProvider` (sie Ã¼berschreiben nicht `load()` fÃ¼r TMDB-JSON), sondern **search-basierte** `MainAPI`-Provider. ARVIOs `ExternalExtensionRunner.executeSearchBased()` (Z. 473â620) macht fÃ¼r search-basierte Provider:
-1. TMDB-Enrichment holen â `localizedTitle` + `year` + alt-Titel
+**Problem 2b ГўВҖВ“ warum die Cloudstream-Scraper fГғВјr "Silo" trotzdem 0 Quellen liefern (verifiziert):**
+GermanProviders-Plugins (Filmpalast, Serienstream, AniWorld etc.) sind **keine** `TmdbProvider` (sie ГғВјberschreiben nicht `load()` fГғВјr TMDB-JSON), sondern **search-basierte** `MainAPI`-Provider. ARVIOs `ExternalExtensionRunner.executeSearchBased()` (Z. 473ГўВҖВ“620) macht fГғВјr search-basierte Provider:
+1. TMDB-Enrichment holen ГўВҶВ’ `localizedTitle` + `year` + alt-Titel
 2. `api.search(title)` aufrufen + bei Trefferlosigkeit Retry mit vereinfachtem Titel und parallelen Alt-Titeln
-3. `findBestMatch()` (Ãhnlichkeits-Score) Ã¼ber Suchergebnisse â `api.load(bestMatch.url)` â `extractData()` â `api.loadLinks()`
+3. `findBestMatch()` (ГғВ„hnlichkeits-Score) ГғВјber Suchergebnisse ГўВҶВ’ `api.load(bestMatch.url)` ГўВҶВ’ `extractData()` ГўВҶВ’ `api.loadLinks()`
 
 Scheitern kann es an **mehreren Stellen**:
-- **Sprache:** Silo ist eine Apple TV+-Serie. Deutsche Scraper wie Filmpalast/Serienstream listen "Silo" u.U. nur unter deutschem Titel oder garnicht (Apple-TV+-Originals sind seltener auf deutschen Scraper-Seiten als Netflix/Prime). TMDB `localizedTitle` fÃ¼r Silo DE = "Silo" â passt, aber die Scraper-Seite muss die Serie auch im Katalog haben.
-- **`findBestMatch`-Mismatch:** Wenn der Scraper "Silo" z.B. als "Silo - Season 1" oder mit Jahr-Abweichung zurÃ¼ckgibt, fÃ¤llt der Similarity-Score unter die Schwelle â `return emptyList()` (Z. 567). Das ist ein **hÃ¤ufiges** Cloudstream-Problem bei ARVIO, weil ARVIO eigenes Title-Matching macht statt die Provider-`load()` direkt mit der Scraper-eigenen URL zu fÃ¼ttern.
-- **Season/Episode-Mapping:** `extractData(loadResponse, mediaType, season, episode)` baut das `data`-JSON, das `loadLinks()` erwartet. Bei Serien muss `load()` eine `TvSeriesLoadResponse` liefern, aus der ARVIO die Episoden-URL extrahiert. GermanProviders' `load()`-Implementierungen sind fÃ¼r Cloudstream3-App geschrieben; ARVIO ruft sie leicht anders auf â kann `data=null` geben â `return emptyList()` (Z. 590).
-- **Host-Dead / Bot-Schutz:** Deutsche Scraper-Seiten blockieren oft. ARVIO fÃ¤ngt `hostUnreachable` ab und skippt (Z. 552). Da ARVIO clientseitig lÃ¤uft (GerÃ¤t-IP), sollte das seltener sein als beim serverseitigen Stremio-Addon â aber mÃ¶glich.
+- **Sprache:** Silo ist eine Apple TV+-Serie. Deutsche Scraper wie Filmpalast/Serienstream listen "Silo" u.U. nur unter deutschem Titel oder garnicht (Apple-TV+-Originals sind seltener auf deutschen Scraper-Seiten als Netflix/Prime). TMDB `localizedTitle` fГғВјr Silo DE = "Silo" ГўВҖВ“ passt, aber die Scraper-Seite muss die Serie auch im Katalog haben.
+- **`findBestMatch`-Mismatch:** Wenn der Scraper "Silo" z.B. als "Silo - Season 1" oder mit Jahr-Abweichung zurГғВјckgibt, fГғВӨllt der Similarity-Score unter die Schwelle ГўВҶВ’ `return emptyList()` (Z. 567). Das ist ein **hГғВӨufiges** Cloudstream-Problem bei ARVIO, weil ARVIO eigenes Title-Matching macht statt die Provider-`load()` direkt mit der Scraper-eigenen URL zu fГғВјttern.
+- **Season/Episode-Mapping:** `extractData(loadResponse, mediaType, season, episode)` baut das `data`-JSON, das `loadLinks()` erwartet. Bei Serien muss `load()` eine `TvSeriesLoadResponse` liefern, aus der ARVIO die Episoden-URL extrahiert. GermanProviders' `load()`-Implementierungen sind fГғВјr Cloudstream3-App geschrieben; ARVIO ruft sie leicht anders auf ГўВҶВ’ kann `data=null` geben ГўВҶВ’ `return emptyList()` (Z. 590).
+- **Host-Dead / Bot-Schutz:** Deutsche Scraper-Seiten blockieren oft. ARVIO fГғВӨngt `hostUnreachable` ab und skippt (Z. 552). Da ARVIO clientseitig lГғВӨuft (GerГғВӨt-IP), sollte das seltener sein als beim serverseitigen Stremio-Addon ГўВҖВ“ aber mГғВ¶glich.
 
-**Fazit Problem 2:** Zwei Dinge Ã¼berlagern sich:
-- (a) **ARVIO-UI-Bug/DesignschwÃ¤che:** Die "kein Add-on eingerichtet"-Meldung wird nur aus dem Stremio-Addon-Pfad gespeist und ignoriert aktivierte Cloudstream-Plugins vollstÃ¤ndig. Solange kein Stremio-Addon aktiv ist, zeigt die UI "Setup Required", **selbst wenn** Cloudstream-Scraper im Hintergrund laufen. Das ist eine ARVIO-seitige LogiklÃ¼cke, nicht des Addons Schuld.
-- (b) **Scraper-Matching:** Selbst wenn die Cloudstream-Scraper laufen, liefern sie fÃ¼r bestimmte Titel (wie Silo) oft 0 Treffer wegen ARVIOs eigenem Title-Matching / `findBestMatch` / Episode-Mapping, das nicht 1:1 der Cloudstream3-App entspricht.
+**Fazit Problem 2:** Zwei Dinge ГғВјberlagern sich:
+- (a) **ARVIO-UI-Bug/DesignschwГғВӨche:** Die "kein Add-on eingerichtet"-Meldung wird nur aus dem Stremio-Addon-Pfad gespeist und ignoriert aktivierte Cloudstream-Plugins vollstГғВӨndig. Solange kein Stremio-Addon aktiv ist, zeigt die UI "Setup Required", **selbst wenn** Cloudstream-Scraper im Hintergrund laufen. Das ist eine ARVIO-seitige LogiklГғВјcke, nicht des Addons Schuld.
+- (b) **Scraper-Matching:** Selbst wenn die Cloudstream-Scraper laufen, liefern sie fГғВјr bestimmte Titel (wie Silo) oft 0 Treffer wegen ARVIOs eigenem Title-Matching / `findBestMatch` / Episode-Mapping, das nicht 1:1 der Cloudstream3-App entspricht.
 
 CHANGELOG-Belege, dass ARVIO dieses Themenfeld aktiv bearbeitet:
 - v1.9.983: "Added compatibility for Nuvio-style JavaScript scraper plugins and redesigned plugin settings for TV and mobile" (#466) + "Fixed sideload production-plugin routing, extractor unloading, mobile routing, and TV focus limits" (#466)
 - v1.9.92: "Improved FlixStreams/anime addon matching and fallback stream lookup for episode sources" + "Fixed configured add-ons occasionally failing to appear in the source list until a later retry"
 - v1.8.2: "Source selector shows setup instructions instead of generic 'No sources found' when no addons are installed" + "When no streaming addons are configured, the app now shows a friendly setup guide instead of a playback error"
 
-**Handlungsempfehlung (fÃ¼r unser Addon / Nutzer):**
-1. **FÃ¼r saubere UI-Anzeige:** ZusÃ¤tzlich zu den Cloudstream-Plugins **mindestens ein** Stremio-Addon (auch ein inaktives/dummy) installieren, damit `hasStreamingAddons=true` wird und die Meldung verschwindet. Das ist ein Workaround fÃ¼r ARVIOs LogiklÃ¼cke (a).
-2. **FÃ¼r echte Quellen bei Serien wie Silo:** Eigenes ARVIO-Addon bauen (Ziel dieses Repos) â aber dabei darauf achten, dass die `MainAPI`-Implementierung robustes `search()` + `load()` + `loadLinks()` bietet, das ARVIOs `findBestMatch`-basiertem Aufruffluss standhÃ¤lt. Ideal: Provider als `TmdbProvider` implementieren (dann nimmt ARVIO den direkteren `executeTmdbProvider`-Pfad ohne fragiles Title-Matching). Das ist eine **Konsequenz fÃ¼r die Modul-1-Architektur** dieses Addons.
-3. **GitHub-Issue bei ARVIO erwÃ¤gen:** (a) ist klar ein ARVIO-Bug ("hasStreamingAddons ignoriert aktivierte Cloudstream-Scraper"). Lohnt sich als Issue zu melden, da ARVIO aktiv ist (18 Releases in 5 Monaten) und #466 genau dieses Gebiet gerade anfasst.
+**Handlungsempfehlung (fГғВјr unser Addon / Nutzer):**
+1. **FГғВјr saubere UI-Anzeige:** ZusГғВӨtzlich zu den Cloudstream-Plugins **mindestens ein** Stremio-Addon (auch ein inaktives/dummy) installieren, damit `hasStreamingAddons=true` wird und die Meldung verschwindet. Das ist ein Workaround fГғВјr ARVIOs LogiklГғВјcke (a).
+2. **FГғВјr echte Quellen bei Serien wie Silo:** Eigenes ARVIO-Addon bauen (Ziel dieses Repos) ГўВҖВ“ aber dabei darauf achten, dass die `MainAPI`-Implementierung robustes `search()` + `load()` + `loadLinks()` bietet, das ARVIOs `findBestMatch`-basiertem Aufruffluss standhГғВӨlt. Ideal: Provider als `TmdbProvider` implementieren (dann nimmt ARVIO den direkteren `executeTmdbProvider`-Pfad ohne fragiles Title-Matching). Das ist eine **Konsequenz fГғВјr die Modul-1-Architektur** dieses Addons.
+3. **GitHub-Issue bei ARVIO erwГғВӨgen:** (a) ist klar ein ARVIO-Bug ("hasStreamingAddons ignoriert aktivierte Cloudstream-Scraper"). Lohnt sich als Issue zu melden, da ARVIO aktiv ist (18 Releases in 5 Monaten) und #466 genau dieses Gebiet gerade anfasst.
 
 ---
 
 ## Implementation: Filmpalast-Plugin als TmdbProvider (Proof-of-Concept)
 
-**Status: gebaut und kompiliert.** `FilmPalast/build/FilmPalast.cs3` (â23 KB) + `build/plugins.json` werden lokal via `./gradlew make makePluginsJson` erzeugt; CI (`.github/workflows/build.yml`) pusht beides auf den `builds`-Branch.
+**Status: gebaut und kompiliert.** `FilmPalast/build/FilmPalast.cs3` (ГўВүВҲ23 KB) + `build/plugins.json` werden lokal via `./gradlew make makePluginsJson` erzeugt; CI (`.github/workflows/build.yml`) pusht beides auf den `builds`-Branch.
 
-### Architektur-Entscheidung (verbindlich fÃ¼r alle Modul-1-Scraper)
-**Alle Provider als `TmdbProvider` implementieren**, nicht als plain `MainAPI`. BegrÃ¼ndung (siehe oben "Recherche"): ARVIO hat zwei Dispatch-Pfade in `ExternalExtensionRunner.execute()`:
-- `executeTmdbProvider` (wenn `api is TmdbProvider`): ruft `api.load("{\"id\":<tmdbId>,\"type\":\"movie\"|\"tv\"}")` direkt auf â kein fragiles `findBestMatch`-Title-Matching.
-- `executeSearchBased` (sonst): sucht Titel, matcht via Similarity-Score, mappt Season/Episode â hÃ¤ufig 0 Treffer bei Serien.
+### Architektur-Entscheidung (verbindlich fГғВјr alle Modul-1-Scraper)
+**Alle Provider als `TmdbProvider` implementieren**, nicht als plain `MainAPI`. BegrГғВјndung (siehe oben "Recherche"): ARVIO hat zwei Dispatch-Pfade in `ExternalExtensionRunner.execute()`:
+- `executeTmdbProvider` (wenn `api is TmdbProvider`): ruft `api.load("{\"id\":<tmdbId>,\"type\":\"movie\"|\"tv\"}")` direkt auf ГўВҶВ’ kein fragiles `findBestMatch`-Title-Matching.
+- `executeSearchBased` (sonst): sucht Titel, matcht via Similarity-Score, mappt Season/Episode ГўВҶВ’ hГғВӨufig 0 Treffer bei Serien.
 
-TmdbProvider ist der zuverlÃ¤ssige Pfad. GermanProviders' Scraper sind alles *search-based* (kein TmdbProvider) â das ist mit ein Grund, warum sie in ARVIO bei Serien oft leer bleiben.
+TmdbProvider ist der zuverlГғВӨssige Pfad. GermanProviders' Scraper sind alles *search-based* (kein TmdbProvider) ГўВҶВ’ das ist mit ein Grund, warum sie in ARVIO bei Serien oft leer bleiben.
 
 ### TmdbProvider-Vertrag (verifiziert am cloudstream3-Source `TmdbProvider.kt`)
-- ARVIO ruft `load("{\"id\":<tmdbId>,\"type\":...}")`; Fallback `load("https://www.themoviedb.org/<type>/<id>")`. Beide Formen mÃ¼ssen `parseTmdbInput` akzeptieren.
-- `load()` muss zurÃ¼ckgeben: `MovieLoadResponse` (Filme, `dataUrl`=JSON) ODER `TvSeriesLoadResponse` mit `Episode`-Liste (Serien, `episode.data`=URL).
-- `loadLinks(data, ...)`: fÃ¼r Filme ist `data` das JSON aus `dataUrl`; fÃ¼r Serien ist `data` die Episoden-URL aus `episode.data`.
-- `useMetaLoadResponse = false` (wir bauen die LoadResponse selbst, nicht Ã¼ber TMDB-Meta-Provider).
+- ARVIO ruft `load("{\"id\":<tmdbId>,\"type\":...}")`; Fallback `load("https://www.themoviedb.org/<type>/<id>")`. Beide Formen mГғВјssen `parseTmdbInput` akzeptieren.
+- `load()` muss zurГғВјckgeben: `MovieLoadResponse` (Filme, `dataUrl`=JSON) ODER `TvSeriesLoadResponse` mit `Episode`-Liste (Serien, `episode.data`=URL).
+- `loadLinks(data, ...)`: fГғВјr Filme ist `data` das JSON aus `dataUrl`; fГғВјr Serien ist `data` die Episoden-URL aus `episode.data`.
+- `useMetaLoadResponse = false` (wir bauen die LoadResponse selbst, nicht ГғВјber TMDB-Meta-Provider).
 
 ### Filmpalast-Seitenstruktur (live verifiziert, Stand Aug 2026)
 - Suche `/search/title/<query>`: listet Serien **pro Episode** (`/stream/silo-s03e06`), Filme als einzelne Seite. Keine Serien-Stammseite mit Staffeln.
-- Stream-Seite `/stream/<slug>`: Hoster-Links in `ul.currentStreamLinks a.iconPlay` mit `data-player-url` (primÃ¤r) bzw. `href` (fallback).
-- Gesehene Hoster: firestream.to, vidaraa.cc, voe.sx, vidsonic.net â gemappt auf `Voe1`, `FileMoonSx`, `VidHidePro` (Ryderjet), `Supervideo` (AbstreamTo).
+- Stream-Seite `/stream/<slug>`: Hoster-Links in `ul.currentStreamLinks a.iconPlay` mit `data-player-url` (primГғВӨr) bzw. `href` (fallback).
+- Gesehene Hoster: firestream.to, vidaraa.cc, voe.sx, vidsonic.net ГўВҶВ’ gemappt auf `Voe1`, `FileMoonSx`, `VidHidePro` (Ryderjet), `Supervideo` (AbstreamTo).
 
 ### Filmpalast-spezifische `load()`-Logik
-1. TMDB-Meta holen (`api.themoviedb.org/3`, de-DE) â `displayTitle` + `year`.
+1. TMDB-Meta holen (`api.themoviedb.org/3`, de-DE) ГўВҶВ’ `displayTitle` + `year`.
 2. Filmpalast-Suche nach `displayTitle`.
-3. Treffer matchen (normalisierter Titel-Vergleich, Typ movie/tv). Serie `"Silo S03E06"` â Basisname `"Silo"` wird gegen TMDB-Titel gematcht.
-4. Serie: alle Episoden sammeln â `TvSeriesLoadResponse` (Season/Episode aus Titel geparst). Film: `MovieLoadResponse` mit `dataUrl=JSON{links:[...]}`.
-5. `loadLinks`: FilmâJSON-Links; SerieâEpisoden-URL fetchen + Host-Links sammeln â `loadExtractor()` pro registriertem Hoster.
+3. Treffer matchen (normalisierter Titel-Vergleich, Typ movie/tv). Serie `"Silo S03E06"` ГўВҶВ’ Basisname `"Silo"` wird gegen TMDB-Titel gematcht.
+4. Serie: alle Episoden sammeln ГўВҶВ’ `TvSeriesLoadResponse` (Season/Episode aus Titel geparst). Film: `MovieLoadResponse` mit `dataUrl=JSON{links:[...]}`.
+5. `loadLinks`: FilmГўВҶВ’JSON-Links; SerieГўВҶВ’Episoden-URL fetchen + Host-Links sammeln ГўВҶВ’ `loadExtractor()` pro registriertem Hoster.
 
 ### Bekannte Vorbehalte (Proof-of-Concept)
-- **Apple-TV+-Serien (Silo):** deutsche Scraper haben solche Titel u.U. nicht oder zeitverzÃ¶gert. TMDB-Titel passt, aber Filmpalast muss die Serie im Katalog haben.
-- **TMDB-API-Key:** fest codiert (Ã¶ffentlich bekannter Cloudstream-Key). FÃ¼r Produktion ggf. eigener Key.
-- **Hoster-Dead:** Filmpalast-Hosterdomains rotieren; Extractor-Mapping muss ggf. nachjustiert werden. Neue Domains via `registerExtractorAPI` hinzufÃ¼gen.
+- **Apple-TV+-Serien (Silo):** deutsche Scraper haben solche Titel u.U. nicht oder zeitverzГғВ¶gert. TMDB-Titel passt, aber Filmpalast muss die Serie im Katalog haben.
+- **TMDB-API-Key:** fest codiert (ГғВ¶ffentlich bekannter Cloudstream-Key). FГғВјr Produktion ggf. eigener Key.
+- **Hoster-Dead:** Filmpalast-Hosterdomains rotieren; Extractor-Mapping muss ggf. nachjustiert werden. Neue Domains via `registerExtractorAPI` hinzufГғВјgen.
 
-### â ï¸ status-Wert MUSS 1 sein (verifiziert im ARVIO-Code)
+### ГўВҡВ ГҜВёВҸ status-Wert MUSS 1 sein (verifiziert im ARVIO-Code)
 Der cloudstream-gradle-plugin-Default ist `status = 3` ("Beta only"). **Das bricht ARVIO.**
 - `PluginManager.downloadDexExtensions` (PluginManager.kt:1079): `manifestEnabled = plugin.status == 1`
-- `PluginDataStore.setScraperEnabled` (PluginDataStore.kt:152): `if (enabled && !scraper.manifestEnabled) return` â speichert das Enable **nicht**, wenn `manifestEnabled=false`.
-- Folge: Plugin sichtbar in der Liste, aber Toggle speichert nicht â Scraper lÃ¤uft nicht â keine Quellen.
+- `PluginDataStore.setScraperEnabled` (PluginDataStore.kt:152): `if (enabled && !scraper.manifestEnabled) return` ГўВҶВ’ speichert das Enable **nicht**, wenn `manifestEnabled=false`.
+- Folge: Plugin sichtbar in der Liste, aber Toggle speichert nicht ГўВҶВ’ Scraper lГғВӨuft nicht ГўВҶВ’ keine Quellen.
 - **Fix:** Im Modul-`build.gradle.kts` IMMER `status = 1` setzen (wie GermanProviders: alle 21 Plugins `status=1`). Nie Default `3` lassen.
 
-### â ï¸ Hoster-Extraktion: built-in cloudstream3-Extractoren nutzen, nicht re-registrieren (verifiziert)
+### ГўВҡВ ГҜВёВҸ Hoster-Extraktion: built-in cloudstream3-Extractoren nutzen, nicht re-registrieren (verifiziert)
 Filmpalast rotiert Hostnamen pro Episode/Load. Verifizierte Hostnamen (Aug 2026):
-- **Built-in in cloudstream3** (ARVIO lÃ¤dt sie via `ExternalExtractorRegistry.installGlobal()` automatisch): `voe.sx` (Voe), `firestream.to` (Firestream), `filemoon.sx` (FileMoonSx), `supervideo.cc` (Supervideo), `vidhide.com` (VidHidePro).
-- **NICHT built-in** (Filmpalast-spezifisch, eigene Extractor-Aliase nÃ¶tig): `ryderjet.com`, `abstream.to`.
-- **Obskur / API-basiert** (kein statischer Extractor mÃ¶glich): `vidaraa.cc`, `vidsonic.net`, `odysseusa.cc`, `MoneyGalactic.com` (JWPlayer mit `t.streaming_url` aus API-Call â generischer Fallback findet nur sometimes direkte URLs).
+- **Built-in in cloudstream3** (ARVIO lГғВӨdt sie via `ExternalExtractorRegistry.installGlobal()` automatisch): `voe.sx` (Voe), `firestream.to` (Firestream), `filemoon.sx` (FileMoonSx), `supervideo.cc` (Supervideo), `vidhide.com` (VidHidePro).
+- **NICHT built-in** (Filmpalast-spezifisch, eigene Extractor-Aliase nГғВ¶tig): `ryderjet.com`, `abstream.to`.
+- **Obskur / API-basiert** (kein statischer Extractor mГғВ¶glich): `vidaraa.cc`, `vidsonic.net`, `odysseusa.cc`, `MoneyGalactic.com` (JWPlayer mit `t.streaming_url` aus API-Call ГўВҖВ“ generischer Fallback findet nur sometimes direkte URLs).
 
 **Fehler, der "no sources" verursachte (behoben in b6e3c1b):**
-1. `loadLinks` setzte `any=true`, sobald `loadExtractor` *aufgerufen* wurde â ignorierte den RÃ¼ckgabewert. Wenn alle `loadExtractor` `false` zurÃ¼ckgaben (kein passender Extractor), blieb `any` trotzdem `true` â irrefÃ¼hrend. Fix: `any` nur auf `true` wenn `loadExtractor` true ODER generischer Fallback findet URL.
-2. `Voe1()` registriert â `Voe1.mainUrl = "https://donaldlineelse.com"` (rotierender VOE-Mirror), matched **nicht** auf `voe.sx`-Links. Built-in `Voe()` (mainUrl=`voe.sx`) matched korrekt. Fix: `Voe1`/`FileMoonSx` nicht mehr re-registrieren (built-in reicht).
-3. **Generischer Fallback** (`genericResolve`): fetcht Embed-Seite, sucht nach direkten mp4/m3u8-URLs (Regex). Best-Effort fÃ¼r obskure JWPlayer-Hoster; fÃ¤ngt nicht alle (vidaraa braucht API-Call), aber fÃ¤ngt z.B. firestream-Video-Pfade.
+1. `loadLinks` setzte `any=true`, sobald `loadExtractor` *aufgerufen* wurde ГўВҖВ“ ignorierte den RГғВјckgabewert. Wenn alle `loadExtractor` `false` zurГғВјckgaben (kein passender Extractor), blieb `any` trotzdem `true` ГўВҶВ’ irrefГғВјhrend. Fix: `any` nur auf `true` wenn `loadExtractor` true ODER generischer Fallback findet URL.
+2. `Voe1()` registriert ГўВҖВ“ `Voe1.mainUrl = "https://donaldlineelse.com"` (rotierender VOE-Mirror), matched **nicht** auf `voe.sx`-Links. Built-in `Voe()` (mainUrl=`voe.sx`) matched korrekt. Fix: `Voe1`/`FileMoonSx` nicht mehr re-registrieren (built-in reicht).
+3. **Generischer Fallback** (`genericResolve`): fetcht Embed-Seite, sucht nach direkten mp4/m3u8-URLs (Regex). Best-Effort fГғВјr obskure JWPlayer-Hoster; fГғВӨngt nicht alle (vidaraa braucht API-Call), aber fГғВӨngt z.B. firestream-Video-Pfade.
 
-### Recherche: ARVIO Test-Funktion & Log-MÃ¶glichkeit (Aug 2026, ARVIO 1.9.983)
-**ARVIO hat KEINE Log-Datei-Exportfunktion.** `DiagnosticsManager` ist nur fÃ¼r Sentry/Crashlytics-Reporting, keine In-App-Log-Anzeige. Der einzige Weg an die Scraper-Logs zu kommen ist **Logcat** (`adb logcat` Ã¼ber USB am PC).
-- ARVIO hat im Code eine **"Test Scraper"-Funktion** (`PluginManager.testScraper()` â `executeWithDiagnostics()`), die mit The Matrix (TMDB 603) testet und `TestDiagnostics` mit Einzelschritten zurÃ¼ckgibt (TMDB-Metadaten, search-Ergebnisse, HTTP-Requests, loadLinks, "Missing extractors: ..."). **ABER: der "Test"-Button ist in `PluginScreen.kt` NICHT in die UI eingebaut** â Strings (`plugin_test_btn`, `plugin_diagnostics_expand`) und ViewModel-Logik existieren, aber kein Compose-Button ruft `PluginUiEvent.TestScraper` auf. Halbfertige ARVIO-Funktion (wie Stalker-VOD-UI).
-- **WICHTIGE INKONSISTENZ:** `executeTmdbProviderWithDiagnostics` (Test-Pfad) ruft `loadLinks` mit `TmdbLink(...).toJson()` direkt auf (OHNE `load()`), wÃ¤hrend `executeTmdbProvider` (echte Suche) erst `api.load({"id":...,"type":...})` aufruft und `extractData()` das `dataUrl`/`episode.data` extrahiert. Mein `loadLinks` ist auf den load()-Pfad ausgelegt (`{"links":[...]}` oder `http`-URL), wÃ¼rde also im Test-Pfad leer laufen. Falls ARVIO den Test-Button irgendwann aktiviert, muss mein `loadLinks` auch TmdbLink-JSON verarbeiten.
+### Recherche: ARVIO Test-Funktion & Log-MГғВ¶glichkeit (Aug 2026, ARVIO 1.9.983)
+**ARVIO hat KEINE Log-Datei-Exportfunktion.** `DiagnosticsManager` ist nur fГғВјr Sentry/Crashlytics-Reporting, keine In-App-Log-Anzeige. Der einzige Weg an die Scraper-Logs zu kommen ist **Logcat** (`adb logcat` ГғВјber USB am PC).
+- ARVIO hat im Code eine **"Test Scraper"-Funktion** (`PluginManager.testScraper()` ГўВҶВ’ `executeWithDiagnostics()`), die mit The Matrix (TMDB 603) testet und `TestDiagnostics` mit Einzelschritten zurГғВјckgibt (TMDB-Metadaten, search-Ergebnisse, HTTP-Requests, loadLinks, "Missing extractors: ..."). **ABER: der "Test"-Button ist in `PluginScreen.kt` NICHT in die UI eingebaut** ГўВҖВ“ Strings (`plugin_test_btn`, `plugin_diagnostics_expand`) und ViewModel-Logik existieren, aber kein Compose-Button ruft `PluginUiEvent.TestScraper` auf. Halbfertige ARVIO-Funktion (wie Stalker-VOD-UI).
+- **WICHTIGE INKONSISTENZ:** `executeTmdbProviderWithDiagnostics` (Test-Pfad) ruft `loadLinks` mit `TmdbLink(...).toJson()` direkt auf (OHNE `load()`), wГғВӨhrend `executeTmdbProvider` (echte Suche) erst `api.load({"id":...,"type":...})` aufruft und `extractData()` das `dataUrl`/`episode.data` extrahiert. Mein `loadLinks` ist auf den load()-Pfad ausgelegt (`{"links":[...]}` oder `http`-URL), wГғВјrde also im Test-Pfad leer laufen. Falls ARVIO den Test-Button irgendwann aktiviert, muss mein `loadLinks` auch TmdbLink-JSON verarbeiten.
 
 ### Recherche: Touch-Bug auf Handy/Tablet (ARVIO Issue #502)
-**BestÃ¤tigt und (teilweise) behoben in ARVIO 1.9.983.** ARVIO Issue #502 "fix(mobile): resolve touch issues and unify button styling in plugins settings":
-- Ursache: Plugin-Settings-Screen + Add-Repo-Dialog nutzten TV-only `androidx.tv.material3.Surface`-Buttons, die auf Touch-GerÃ¤ten nicht reagierten.
-- Fix: `PluginScreen.kt` hat jetzt `LocalDeviceType.current.isTouchDevice()` â separates Mobile-Layout mit touch-friendly Compose-Box-Buttons. **In 1.9.983 enthalten** (verifiziert: `isTouchDevice` existiert in `PluginScreen.kt`).
-- Falls der Nutzer noch eine Ã¤ltere Version als 1.9.983 hat, sollte er updaten. Der Fix erklÃ¤rt, warum der Nutzer es Ã¼ber Cloud-Profil auf dem Handy zum Laufen brachte.
+**BestГғВӨtigt und (teilweise) behoben in ARVIO 1.9.983.** ARVIO Issue #502 "fix(mobile): resolve touch issues and unify button styling in plugins settings":
+- Ursache: Plugin-Settings-Screen + Add-Repo-Dialog nutzten TV-only `androidx.tv.material3.Surface`-Buttons, die auf Touch-GerГғВӨten nicht reagierten.
+- Fix: `PluginScreen.kt` hat jetzt `LocalDeviceType.current.isTouchDevice()` ГўВҶВ’ separates Mobile-Layout mit touch-friendly Compose-Box-Buttons. **In 1.9.983 enthalten** (verifiziert: `isTouchDevice` existiert in `PluginScreen.kt`).
+- Falls der Nutzer noch eine ГғВӨltere Version als 1.9.983 hat, sollte er updaten. Der Fix erklГғВӨrt, warum der Nutzer es ГғВјber Cloud-Profil auf dem Handy zum Laufen brachte.
 
-### Recherche: "nur webstreamr-Quellen, nicht Filmpalast" â mÃ¶gliche Ursachen (Aug 2026)
-Da webstreamr (Stremio-Addon, serverseitig) Quellen liefert, mein Filmpalast-Scraper (Cloudstream-DEX) aber nicht, sind die Scraper-Logs nÃ¶tig. MÃ¶gliche Ursachen (in absteigender Wahrscheinlichkeit):
-1. **Scraper wird aufgerufen, aber `load()` schlÃ¤gt fehl** â `loadResponse` null â `executeTmdbProvider` "both load() paths failed" â emptyList. KÃ¶nnte ein Kotlin-spezifisches Problem sein (Jsoup-Selektor-Unterschied zu Python-Regex, oder Exception in `fetchTmdbMeta`/`searchFilmpalast`).
-2. **Scraper ist nicht in `enabledScrapers`** â Plugin-Download fehlgeschlagen, oder `manifestEnabled` false, oder Toggle aus. (Weniger wahrscheinlich, da `status=1` verifiziert und Plugin sichtbar ist.)
-3. **`loadLinks` findet Hoster aber `loadExtractor` liefert 0 Links** â Filmpalast rotiert Hostnamen; wenn nur nicht-built-in-Hoster (vidaraa.cc etc.) online, fÃ¤llt alles durch. (Mein generischer Fallback fÃ¤ngt nur direkte mp4/m3u8.)
+### Recherche: "nur webstreamr-Quellen, nicht Filmpalast" ГўВҖВ“ mГғВ¶gliche Ursachen (Aug 2026)
+Da webstreamr (Stremio-Addon, serverseitig) Quellen liefert, mein Filmpalast-Scraper (Cloudstream-DEX) aber nicht, sind die Scraper-Logs nГғВ¶tig. MГғВ¶gliche Ursachen (in absteigender Wahrscheinlichkeit):
+1. **Scraper wird aufgerufen, aber `load()` schlГғВӨgt fehl** ГўВҶВ’ `loadResponse` null ГўВҶВ’ `executeTmdbProvider` "both load() paths failed" ГўВҶВ’ emptyList. KГғВ¶nnte ein Kotlin-spezifisches Problem sein (Jsoup-Selektor-Unterschied zu Python-Regex, oder Exception in `fetchTmdbMeta`/`searchFilmpalast`).
+2. **Scraper ist nicht in `enabledScrapers`** ГўВҖВ“ Plugin-Download fehlgeschlagen, oder `manifestEnabled` false, oder Toggle aus. (Weniger wahrscheinlich, da `status=1` verifiziert und Plugin sichtbar ist.)
+3. **`loadLinks` findet Hoster aber `loadExtractor` liefert 0 Links** ГўВҖВ“ Filmpalast rotiert Hostnamen; wenn nur nicht-built-in-Hoster (vidaraa.cc etc.) online, fГғВӨllt alles durch. (Mein generischer Fallback fГғВӨngt nur direkte mp4/m3u8.)
 - **Ohne Logcat nicht eindeutig trennbar.** Logcat-Filter die helfen: `ExtExtractorRegistry`, `ExternalExtensionRunner`, `PluginManager`, `TmdbProvider Filmpalast`, `ExtExtRunner`.
 
 
-Selbst bei korrekt aktiviertem Cloudstream-Scraper zeigt ARVIO oft "keine Streaming-Addons eingerichtet". Ursache ist eine ARVIO-seitige LogiklÃ¼cke:
-- `StreamRepository.getStreamAddons` (StreamRepository.kt:1440): `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` â **nur Stremio-Addons** kommen in die Stream-Auswahl.
-- `DetailsViewModel` berechnet `hasStreamingAddons` aus `streamRepository.installedAddons.count { it.isVodStreamingAddon() }` (DetailsViewModel.kt:1633) â zÃ¤hlt **nur Stremio-Addons**, nicht Cloudstream-Scraper.
-- Cloudstream-Scraper sind eine **getrennte Liste** (`PluginManager.scrapers`), nicht in `installedAddons` â werden fÃ¼r `hasStreamingAddons` nicht gezÃ¤hlt.
-- **Aber:** `DetailsViewModel` (DetailsViewModel.kt:1516) ruft `pluginManager.executeScrapersStreaming()` separat auf â Cloudstream-Scraper **laufen im Hintergrund** und mergen Streams in `streams`. Nur die *Meldung* ist falsch, nicht das Scraping.
-- **Workaround:** ZusÃ¤tzlich ein (Dummy-)Stremio-Addon aktivieren â `addonCount > 0` â `hasStreamingAddons=true` â Meldung verschwindet. Scraper-Ergebnisse erscheinen dann in der Liste.
-- **ARVIO-seitiger Fix nÃ¶tig:** `getStreamAddons`/`hasStreamingAddons` sollten auch EXTERNAL_DEX-Scraper zÃ¤hlen. Lohnt als GitHub-Issue.
+Selbst bei korrekt aktiviertem Cloudstream-Scraper zeigt ARVIO oft "keine Streaming-Addons eingerichtet". Ursache ist eine ARVIO-seitige LogiklГғВјcke:
+- `StreamRepository.getStreamAddons` (StreamRepository.kt:1440): `if (addon.runtimeKind != RuntimeKind.STREMIO) return@filter false` ГўВҶВ’ **nur Stremio-Addons** kommen in die Stream-Auswahl.
+- `DetailsViewModel` berechnet `hasStreamingAddons` aus `streamRepository.installedAddons.count { it.isVodStreamingAddon() }` (DetailsViewModel.kt:1633) ГўВҶВ’ zГғВӨhlt **nur Stremio-Addons**, nicht Cloudstream-Scraper.
+- Cloudstream-Scraper sind eine **getrennte Liste** (`PluginManager.scrapers`), nicht in `installedAddons` ГўВҶВ’ werden fГғВјr `hasStreamingAddons` nicht gezГғВӨhlt.
+- **Aber:** `DetailsViewModel` (DetailsViewModel.kt:1516) ruft `pluginManager.executeScrapersStreaming()` separat auf ГўВҶВ’ Cloudstream-Scraper **laufen im Hintergrund** und mergen Streams in `streams`. Nur die *Meldung* ist falsch, nicht das Scraping.
+- **Workaround:** ZusГғВӨtzlich ein (Dummy-)Stremio-Addon aktivieren ГўВҶВ’ `addonCount > 0` ГўВҶВ’ `hasStreamingAddons=true` ГўВҶВ’ Meldung verschwindet. Scraper-Ergebnisse erscheinen dann in der Liste.
+- **ARVIO-seitiger Fix nГғВ¶tig:** `getStreamAddons`/`hasStreamingAddons` sollten auch EXTERNAL_DEX-Scraper zГғВӨhlen. Lohnt als GitHub-Issue.
 
 ### Build (lokal)
-JDK 17+ und Android SDK 35 nÃ¶tig. Im Env: `JAVA_HOME` + `ANDROID_HOME` (oder `local.properties` mit `sdk.dir`).
+JDK 17+ und Android SDK 35 nГғВ¶tig. Im Env: `JAVA_HOME` + `ANDROID_HOME` (oder `local.properties` mit `sdk.dir`).
 ```
 ./gradlew make makePluginsJson
 # -> FilmPalast/build/FilmPalast.cs3
 # -> build/plugins.json
 ```
 
-## Schritt-fÃ¼r-Schritt: Diagnose-Log auslesen (v1.2+)
+## Schritt-fГғВјr-Schritt: Diagnose-Log auslesen (v1.2+)
 
-Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trace und stellt ihn Ã¼ber einen lokalen HTTP-Server auf `http://localhost:8420/` bereit. So liest du das Log:
+Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trace und stellt ihn ГғВјber einen lokalen HTTP-Server auf `http://localhost:8420/` bereit. So liest du das Log:
 
-1. **Neues Plugin in ARVIO laden.** ARVIO-Einstellungen â Plugins & Extensions â Filmpalast aktualisieren/einschalten. Ab v1.2 startet beim Laden des Plugins automatisch der Diagnose-Server (im ARVIO-Prozess, nur loopback).
-2. **Quellensuche auslÃ¶sen** (das, was bisher leer blieb): Ãffne in ARVIO z.B. "Matrix" (Film) oder "Silo" (Serie) â "nach Quellen suchen". Das triggert ARVIOs Aufruf von `load()`/`loadLinks()` und erzeugt Trace-EintrÃ¤ge.
-3. **Log im Handy-Browser ansehen:** Ãffne einen Browser auf **demselben GerÃ¤t**, auf dem ARVIO lÃ¤uft (Chrome/Firefox), und gehe zu `http://localhost:8420/`.
+1. **Neues Plugin in ARVIO laden.** ARVIO-Einstellungen ГўВҶВ’ Plugins & Extensions ГўВҶВ’ Filmpalast aktualisieren/einschalten. Ab v1.2 startet beim Laden des Plugins automatisch der Diagnose-Server (im ARVIO-Prozess, nur loopback).
+2. **Quellensuche auslГғВ¶sen** (das, was bisher leer blieb): ГғВ–ffne in ARVIO z.B. "Matrix" (Film) oder "Silo" (Serie) ГўВҶВ’ "nach Quellen suchen". Das triggert ARVIOs Aufruf von `load()`/`loadLinks()` und erzeugt Trace-EintrГғВӨge.
+3. **Log im Handy-Browser ansehen:** ГғВ–ffne einen Browser auf **demselben GerГғВӨt**, auf dem ARVIO lГғВӨuft (Chrome/Firefox), und gehe zu `http://localhost:8420/`.
    - Die Seite aktualisiert sich automatisch alle 3 Sekunden.
-   - `http://localhost:8420/raw` â reiner Text (zum Kopieren).
-   - `http://localhost:8420/clear` â Trace lÃ¶schen (vor einer neuen Suche).
+   - `http://localhost:8420/raw` ГўВҶВ’ reiner Text (zum Kopieren).
+   - `http://localhost:8420/clear` ГўВҶВ’ Trace lГғВ¶schen (vor einer neuen Suche).
 4. **Trace lesen / interpretieren:**
-   - **Gar kein Trace-Eintrag** nach einer Suche â ARVIO ruft den Scraper nicht auf (ARVIO-Seite: `manifestEnabled`/`enabledScrapers`/`supportsType`). Der Diagnose-Server selbst sollte aber beim Plugin-Laden "listening on http://localhost:8420" geloggt haben â taucht das nicht auf, lief das Plugin gar nicht.
-   - `load: could not parse TMDB input` â ARVIO ruft `load()` mit einem Format auf, das wir nicht erwarten.
-   - `fetchTmdbMeta: request threw ...` â TMDB-Erreichbarkeit/Key-Problem.
-   - `searchFilmpalast: CSS selector matched 0 elements` â Filmpalast-Seitenstruktur hat sich geÃ¤ndert (Jsoup-Selektor veraltet) ODER Bot-Schutz/403.
-   - `load: after matchResults -> 0 matches` â Suche liefert Treffer, aber `matchResults` filtert alle raus (Titel-Normalisierung zu streng).
-   - `loadLinks: 0 links -> returning false` â `collectHosterLinks` findet nichts (Selektor/`data-player-url`-Attribut geÃ¤ndert).
-   - `loadExtractor('...') -> matched=false` fÃ¼r ALLE Links â keine built-in Extractoren fÃ¼r die aktuellen Hoster-Domains.
-5. **Log fÃ¼r mich aufheben:** Entweder den `/raw`-Text kopieren und in der nÃ¤chsten Session einfÃ¼gen, ODER die gespiegelte Datei `Android/data/com.arflix.tv/files/arvio-addon-logs/filmpalast-trace.log` (ab Android 13 evtl. nur Ã¼ber ADB erreichbar).
-6. **Falls der Browser die Seite nicht lÃ¤dt:** Server lÃ¤uft nur, solange der ARVIO-Prozess lebt. ARVIO zwischendrin nicht beenden. Alternativ via ADB: `adb forward tcp:8420 tcp:8420` dann am PC `curl http://localhost:8420/raw`.
+   - **Gar kein Trace-Eintrag** nach einer Suche ГўВҶВ’ ARVIO ruft den Scraper nicht auf (ARVIO-Seite: `manifestEnabled`/`enabledScrapers`/`supportsType`). Der Diagnose-Server selbst sollte aber beim Plugin-Laden "listening on http://localhost:8420" geloggt haben ГўВҖВ“ taucht das nicht auf, lief das Plugin gar nicht.
+   - `load: could not parse TMDB input` ГўВҶВ’ ARVIO ruft `load()` mit einem Format auf, das wir nicht erwarten.
+   - `fetchTmdbMeta: request threw ...` ГўВҶВ’ TMDB-Erreichbarkeit/Key-Problem.
+   - `searchFilmpalast: CSS selector matched 0 elements` ГўВҶВ’ Filmpalast-Seitenstruktur hat sich geГғВӨndert (Jsoup-Selektor veraltet) ODER Bot-Schutz/403.
+   - `load: after matchResults -> 0 matches` ГўВҶВ’ Suche liefert Treffer, aber `matchResults` filtert alle raus (Titel-Normalisierung zu streng).
+   - `loadLinks: 0 links -> returning false` ГўВҶВ’ `collectHosterLinks` findet nichts (Selektor/`data-player-url`-Attribut geГғВӨndert).
+   - `loadExtractor('...') -> matched=false` fГғВјr ALLE Links ГўВҶВ’ keine built-in Extractoren fГғВјr die aktuellen Hoster-Domains.
+5. **Log fГғВјr mich aufheben:** Entweder den `/raw`-Text kopieren und in der nГғВӨchsten Session einfГғВјgen, ODER die gespiegelte Datei `Android/data/com.arflix.tv/files/arvio-addon-logs/filmpalast-trace.log` (ab Android 13 evtl. nur ГғВјber ADB erreichbar).
+6. **Falls der Browser die Seite nicht lГғВӨdt:** Server lГғВӨuft nur, solange der ARVIO-Prozess lebt. ARVIO zwischendrin nicht beenden. Alternativ via ADB: `adb forward tcp:8420 tcp:8420` dann am PC `curl http://localhost:8420/raw`.
 
 ## Versionshistorie dieses Addons
 
 - **v1 (Proof-of-Concept):** Filmpalast-Plugin als TmdbProvider. Baut & kompiliert. Noch nicht in ARVIO endgeraet-getestet.
 - **v1.1 (Aug 2026, Commits b6e3c1b bis 8aa09d3):** Hoster-Extraktion gefixt (loadLinks respektiert loadExtractor-Return; Voe1 entfernt; generischer Fallback fuer unbekannte Hostnamen); endgeraet-getestet in ARVIO 1.9.983 (sideload) von Nutzer. Plugin laedt, ist sichtbar & aktivierbar. **Aber:** bei Quellensuche (Matrix/Silo) zeigt ARVIO nur webstreamr-Quellen, nicht Filmpalast - Root-Cause offen, Logcat vom Geraet noetig (siehe "AKTUELLER STAND" ganz oben). AGENTS.md umfassend mit ARVIO-Scraper-Pfad, Touch-Bug-Fix #502, Test-Funktion-Status und Logcat-Optionen dokumentiert.
-- **v1.2 (13.08.2026):** Selbst-Diagnose-Modus statt Logcat. `DebugLog.kt` + `DebugServer.kt` (lokaler HTTP-Server `localhost:8420`), `FilmpalastProvider` vollstÃ¤ndig instrumentiert, Version auf 2 gebumpt. Ersetzt Logcat-Zugang fuer unseren eigenen Scraper-Code. Siehe "Schritt-fuer-Schritt: Diagnose-Log auslesen".
+- **v1.2 (13.08.2026):** Selbst-Diagnose-Modus statt Logcat. `DebugLog.kt` + `DebugServer.kt` (lokaler HTTP-Server `localhost:8420`), `FilmpalastProvider` vollstГғВӨndig instrumentiert, Version auf 2 gebumpt. Ersetzt Logcat-Zugang fuer unseren eigenen Scraper-Code. Siehe "Schritt-fuer-Schritt: Diagnose-Log auslesen".
 - **v1.3 (13.08.2026, Commits bis ca9f81f):** Diagnose-Tooling massiv ausgebaut, aber **Kernerkenntnis: ARVIO ruft .cs3-Plugins auf dem Geraet GAR NICHT auf.** Beweise: (a) GermanProviders (bewaehrtes .cs3-Repo) liefert auf dem Geraet ebenfalls 0 Quellen, (b) unsere v6-v8 haetten bei JEDEM loadLinks-Aufruf ArvioAddon-Debug-Quellen emittieren muessen - erschienen nie, (c) GitHub-Issues #459/#273 berichten exakt dasselbe Symptom. Webstreamr (Stremio-Addon) funktioniert = anderer ARVIO-Code-Pfad. Versionen: v3 DebugServer auf 127.0.0.1; v4 File-Trace+PLUGIN_LOADED Marker; v5 MediaStore->public Download; v6 Diagnose als Pseudo-Quellen in ARVIO-Quellenauswahl; v7 load() gibt nie null zurueck (debugLoadResponse) damit loadLinks garantiert laeuft; v8 Per-Call-Netzwerk-Timeouts. ARVIO library (TmdbProvider/MainAPI/Plugin) verifiziert vorhanden in classes3/4.dex. ARVIO-Timeouts (120s/60s) schliessen Timeout als Ursache aus. **Naechster Schritt: mit Laptop weiter (Logcat via USB+adb); ggf. GitHub-Issue bei ARVIO.** Siehe "AKTUELLER STAND" ganz oben.

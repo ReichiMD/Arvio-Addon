@@ -51,9 +51,11 @@ object DownloadsLogWriter {
             } else {
                 val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "arvio-addon-logs")
                 if (!dir.exists()) dir.mkdirs()
-                File(dir, MARKER_FILE).writeText(text)
+                // java.io (not kotlin.io writeText) — FilesKt is missing in ARVIO's
+                // plugin classloader at runtime (release APK shrinks it); see DebugLog.kt.
+                writeTextJava(File(dir, MARKER_FILE), text)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w("ArvioAddon[$TAG]", "writeMarker failed: ${e.message}")
         }
     }
@@ -71,9 +73,10 @@ object DownloadsLogWriter {
             } else {
                 val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "arvio-addon-logs")
                 if (!dir.exists()) dir.mkdirs()
-                File(dir, TRACE_FILE).writeText(text)
+                // java.io (not kotlin.io writeText) — see DebugLog.kt re. FilesKt linkage.
+                writeTextJava(File(dir, TRACE_FILE), text)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w("ArvioAddon[$TAG]", "flush failed: ${e.message}")
         }
     }
@@ -89,8 +92,8 @@ object DownloadsLogWriter {
         // Try to find an existing item with the same name in Downloads and overwrite it.
         val existing = findExistingUri(resolver, collection, fileName)
         val uri: Uri = if (existing != null) {
-            // truncate then rewrite
-            try { resolver.openOutputStream(existing, "wt")?.use { it.write(ByteArray(0)) } } catch (_: Exception) {}
+            // truncate then rewrite (plain java.io — no kotlin-stdlib .use/.toByteArray)
+            truncateAndClose(resolver.openOutputStream(existing, "wt"))
             existing
         } else {
             val values = ContentValues().apply {
@@ -104,9 +107,7 @@ object DownloadsLogWriter {
             resolver.insert(collection, values) ?: return
         }
 
-        resolver.openOutputStream(uri, "wt")?.use { os: OutputStream ->
-            os.write(content.toByteArray())
-        }
+        writeAndClose(resolver.openOutputStream(uri, "wt"), content)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val fin = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
             resolver.update(uri, fin, null, null)
@@ -117,12 +118,47 @@ object DownloadsLogWriter {
         val projection = arrayOf(MediaStore.MediaColumns._ID)
         val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
         val selArgs = arrayOf(name)
-        resolver.query(collection, projection, selection, selArgs, null)?.use { c ->
-            if (c.moveToFirst()) {
-                val id = c.getLong(0)
-                return android.content.ContentUris.withAppendedId(collection, id)
+        val cursor = resolver.query(collection, projection, selection, selArgs, null)
+        if (cursor != null) {
+            try {
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(0)
+                    return android.content.ContentUris.withAppendedId(collection, id)
+                }
+            } finally {
+                cursor.close()
             }
         }
         return null
+    }
+}
+
+// Plain java.io helpers — avoid kotlin-stdlib extension functions (.use, .toByteArray,
+// writeText) which can be missing from ARVIO's shrunk plugin classloader at runtime
+// (NoClassDefFoundError: kotlin/io/FilesKt and similar). See DebugLog.kt.
+private fun writeTextJava(file: File, text: String) {
+    val out = java.io.FileOutputStream(file)
+    try {
+        out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    } finally {
+        out.close()
+    }
+}
+
+private fun writeAndClose(os: OutputStream?, content: String) {
+    if (os == null) return
+    try {
+        os.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    } finally {
+        os.close()
+    }
+}
+
+private fun truncateAndClose(os: OutputStream?) {
+    if (os == null) return
+    try {
+        os.write(ByteArray(0))
+    } finally {
+        os.close()
     }
 }

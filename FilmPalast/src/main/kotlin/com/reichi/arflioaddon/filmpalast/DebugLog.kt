@@ -44,7 +44,12 @@ object DebugLog {
             // loaded at all, even if no search has been triggered yet.
             markerFile = File(dir, "PLUGIN_LOADED.txt")
             try {
-                markerFile?.writeText(
+                // NOTE: use plain java.io here, NOT kotlin.io File extensions (writeText).
+                // ARVIO loads .cs3 plugins via DexClassLoader whose parent classloader
+                // does not expose kotlin/io/FilesKt at runtime, so writeText() throws
+                // NoClassDefFoundError (an Error, not caught by `catch Exception`),
+                // which aborts plugin.load() and leaves the scraper unusable.
+                markerFile?.writeTextJava(
                     "Arvio Filmpalast plugin loaded at ${java.text.SimpleDateFormat(
                         "yyyy-MM-dd HH:mm:ss", java.util.Locale.GERMANY
                     ).format(java.util.Date())}\n" +
@@ -52,12 +57,12 @@ object DebugLog {
                         "If this file exists, plugin.load() ran. The trace file " +
                         "filmpalast-trace.log only gets entries after a source search.\n"
                 )
-            } catch (_: Exception) {}
+            } catch (_: Throwable) {}
             // Also mirror everything into the PUBLIC Downloads folder so the user can
             // read it with any file manager on Android 13+ (no permission needed).
             DownloadsLogWriter.init(context)
             add(Level.TRACE, "DebugLog", "init ok, log dir=${base.absolutePath}")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             logFile = null
         }
     }
@@ -77,10 +82,11 @@ object DebugLog {
             if (entries.size > MAX_ENTRIES) entries.removeAt(0)
             logFile?.let { f ->
                 try {
-                    // append + flush so entries survive even if the process is killed
-                    f.appendText(format(entry) + "\n")
+                    // append + flush so entries survive even if the process is killed.
+                    // java.io (not kotlin.io) — see init() note re. FilesKt linkage.
+                    f.appendTextJava(format(entry) + "\n")
                     f.setReadable(true, false)
-                } catch (_: Exception) {
+                } catch (_: Throwable) {
                 }
             }
             // Mirror the full trace to the public Downloads folder (throttled inside).
@@ -97,7 +103,7 @@ object DebugLog {
     fun clear() {
         synchronized(lock) {
             entries.clear()
-            try { logFile?.delete() } catch (_: Exception) {}
+            try { logFile?.delete() } catch (_: Throwable) {}
         }
     }
 
@@ -110,5 +116,28 @@ object DebugLog {
             Level.ERROR -> "ERROR"
         }
         return "${tsFormat.format(Date(e.time))} $lvl [${e.tag}] ${e.message}"
+    }
+}
+
+// Plain java.io replacements for kotlin.io File extensions (writeText/appendText).
+// ARVIO's release APK shrinks unused kotlin-stdlib classes, so kotlin/io/FilesKt is
+// missing at runtime and the stdlib writeText/appendText throw NoClassDefFoundError
+// (an Error that escapes `catch Exception` and aborts plugin.load()). These helpers
+// use ONLY java.* APIs (no kotlin-stdlib extension functions at all) to stay safe.
+private fun File.writeTextJava(text: String) {
+    val out = java.io.FileOutputStream(this)
+    try {
+        out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    } finally {
+        out.close()
+    }
+}
+
+private fun File.appendTextJava(text: String) {
+    val out = java.io.FileOutputStream(this, true)
+    try {
+        out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    } finally {
+        out.close()
     }
 }
