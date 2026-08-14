@@ -77,16 +77,44 @@ Alle Kotlin-stdlib-IO-Erweiterungen durch reines java.io/java.lang ersetzt (kein
 - FilmpalastPlugin.kt: load() umschliesst DebugLog.init+DebugServer.start in `try { } catch (t: Throwable)` (best-effort - ein Diagnose-Fehler killt nie mehr den Scraper). registerMainAPI/registerExtractorAPI laufen immer.
 - FilmpalastProvider/FilmpalastExtractors nutzen KEINE kotlin-stdlib-IO-Erweiterungen (verifiziert) - Scraper-Pfad ist sicher.
 - Version auf 9 gebumpt. CI baut beim Push auf main automatisch die neue FilmPalast.cs3 und pusht auf builds.
+**ABER v9 crashte ARVIO trotzdem** (siehe ERKENNTNIS #3 unten) - der try/catch(Throwable) half nicht, weil der Crash in einem asynchronen Thread passierte, der ausserhalb von load() lief.
 
-### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #2)
-**Prio 1 - v9 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
-1. v9 bauen lassen (CI nach Commit auf main). Warten bis builds-Branch aktualisiert (neue FilmPalast.cs3 Version 9).
-2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v9.
+### ENTSCHEIDENDE ERKENNTNIS #3 (14.08.2026, v9-TV-Test, Crash-ID 628a90de...): DebugLog$Level enum braucht kotlin.enums.EnumEntriesKt -> FATAL CRASH
+v9 crashte ARVIO beim Quellen-Suchen (ARVIO zeigte "Bericht an Discord senden", Crash-ID 628a90dec76d4c21bd162f80d63a271d, Error: NoClassDefFoundError: com.reichi.arflioaddon.filmpalast.DebugLog$Level).
+TV-Logcat (arvio-tv-log2.txtp):
+```
+W ArvioAddon[DownloadsLogWriter]: writeMarker failed: Failed resolution of: Lkotlin/text/Channels;
+I com.arvio.tv: Rejecting re-init on previously-failed class DebugLog$Level: NoClassDefFoundError: Lkotlin/enums/EnumEntriesKt
+I com.arvio.tv:   at DebugLog$Level.<clinit>() (DebugLog.kt:35)
+I com.arvio.tv:   at DebugLog.init(DebugLog.kt:64)
+I com.arvio.tv:   at FilmpalastPlugin.load(FilmpalastPlugin.kt:15)
+E AndroidRuntime: FATAL EXCEPTION: ArvioAddon-DebugServer
+E AndroidRuntime: java.lang.NoClassDefFoundError: com.reichi.arflioaddon.filmpalast.DebugLog$Level
+E AndroidRuntime:  at DebugLog.t(DebugLog.kt:70)
+E AndroidRuntime:  at DebugServer.start$lambda$0(DebugServer.kt:41)   <- asynchroner Thread!
+E AndroidRuntime:  ... at Thread.run
+```
+**Erklaerung:** ARVIOs R8-geshrinkter Classloader fehlt MEHRERE kotlin-stdlib-Klassen: kotlin.io.FilesKt (v8), kotlin.text.Channels (DownloadsLogWriter), kotlin.enums.EnumEntriesKt (DebugLog$Level enum). Modernes Kotlin kompiliert `enum class` via EnumEntriesKt. DebugLog$Level.<clinit> (Klassenladen) beim ersten DebugLog.t()-Aufruf braucht EnumEntriesKt -> NoClassDefFoundError. Das passierte im **DebugServer-Hintergrund-Thread** (DebugServer.kt:41 ruft DebugLog.t("listening...")) - der Thread laeuft asynchron NACH load() und liegt NICHT im load()-try/catch(Throwable) -> Exception entkommt zum UncaughtExceptionHandler -> ARVIO-Prozess crasht (FATAL). Der defensive try/catch in load() half also nicht.
+
+### FIX #3 (14.08.2026, v10): gesamte Diagnose-Infrastruktur entfernt, nur noch android.util.Log
+Jetzt wo logcat via WLAN-ADB zuverlaessig verfuegbar ist, ist die ganze Diagnose-Infrastruktur (die nie funktioniert hat, weil das Plugin nie weit genug lief) net-negativ und crasht die App. Komplett entfernt, ersetzt durch plain android.util.Log (immer verfuegbar, keine kotlin-stdlib-Abhaengigkeit):
+- **DebugLog.kt neu geschrieben**: minimaler android.util.Log-Wrapper. KEIN enum Level (enum <clinit> brauchte EnumEntriesKt), kein File-IO (FilesKt), kein Ring-Buffer, keine Threads. Methoden t/w/e leiten direkt an Log.d/w/e weiter.
+- **DebugServer.kt geloescht** (ServerSocket-Thread + kotlin.concurrent.thread).
+- **DownloadsLogWriter.kt geloescht** (MediaStore + FilesKt/Channels).
+- **FilmpalastPlugin.load()**: nur registerMainAPI + registerExtractorAPI + ein Log.d. Keine Diagnose-Threads mehr -> kein asynchroner Crash-Pfad.
+- **FilmpalastProvider**: debugLoadResponse()/emitTraceAsSources() (Fake-Quellen) entfernt; pluginVersion-Feld entfernt; load() gibt bei Fehler null zurueck (ARVIO handled null); loadLinks() emittiert keine Fake-Debug-Quellen mehr. echtes Tracing geht nur noch ins logcat.
+- Version auf 10 gebumpt. CI gruen. builds-Branch: FilmPalast.cs3 v10 (33368 Bytes, status=1).
+
+### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #3 / v10)
+**Prio 1 - v10 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
+1. v10 ist gebaut (builds-Branch, FilmPalast.cs3 v10, 33368 Bytes, status=1).
+2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v10.
 3. `adb logcat -c`, Scraper einschalten, Matrix-Quellensuche ausloesen, 15 s warten.
-4. `adb logcat -d | grep -iE "Filmpalast|ExtExtension|PluginManager|No API|MISSING|load|loadLinks|Tmdb|result|ArvioAddon"` -> pruefen:
-   - plugin.load() erfolgreich: KEIN "MISSING CLASS"/"0 APIs so far"; stattdessen "API loaded"/Scraper laeuft. -> dann pruefen, ob load()/loadLinks Quellen liefern.
-   - Falls ein ANDERER NoClassDefFoundError auftaucht (andere kotlin-stdlib-Klasse, z.B. kotlinx.coroutines/kotlin.collections): notieren - dann muessen wir mehr stdlib-Referenzen eliminieren oder R8-Keep-Regeln pruefen.
-   - Falls load() laeuft aber "0 links collected": Jsoup-Selektoren/Hoster-Extraktion debuggen (naechste Ebene).
+4. `adb logcat -d | grep -iE "Filmpalast|ExtExtension|PluginManager|No API|MISSING|load|loadLinks|Tmdb|result|ArvioAddon|FATAL"` -> pruefen:
+   - **KEIN Crash mehr** (kein "FATAL EXCEPTION", kein Discord-Bericht-Dialog). plugin.load() sollte durchlaufen ("API loaded" / kein "MISSING CLASS").
+   - Falls ein ANDERER NoClassDefFoundError auftaucht (andere kotlin-stdlib-Klasse, z.B. in FilmpalastProvider via coroutines/jsoup): notieren - dann muessen wir Provider-Code auf stdlib-Abhaengigkeiten pruefen. (Wahrscheinlich nicht, da Provider nur cloudstream3-APIs + jsoup + jackson nutzt, die ARVIO shipt.)
+   - Falls load() laeuft aber "0 links collected" / keine Quellen: Jsoup-Selektoren/Hoster-Extraktion debuggen (naechste Ebene). DebugLog.t/w/e geht jetzt ins logcat (Tag "ArvioAddon[Filmpalast]") -> dort detaillierter Trace.
+   - WICHTIG: ARVIO zeigt "kein Add-on eingerichtet" solange KEIN Stremio-Addon aktiv ist (hasStreamingAddons zaehlt nur Stremio). Workaround: WebStreamr/Stremio-Addon aktiv lassen. Meldung ist irrefuehrend, Scraper laufen trotzdem.
 
 **Prio 2 - GitHub-Issue bei ARVIO (zwei klare Bugs):**
 1. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (CloudSyncRepository.applyCloudPayload macht nur saveScrapers ohne downloadDexExtensions). Wer Plugins via Cloud-Sync auf ein neues Geraet uebernimmt, hat leere Scraper ("DEX file not found"). Skizze: ".cs3/Cloudstream3 plugins restored via Cloud Sync show in list but return no sources: saveScrapers() stores metadata but never downloads the .cs3 (no downloadDexExtensions call) - cs_extensions/ stays empty". Verweis auf #459/#273.
