@@ -1,5 +1,7 @@
 import com.android.build.gradle.BaseExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+import com.lagradost.cloudstream3.gradle.tasks.CompileDexTask
+import org.gradle.api.tasks.Sync
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
@@ -106,7 +108,7 @@ subprojects {
     }
 
     afterEvaluate {
-        tasks.named("compileDex", com.lagradost.cloudstream3.gradle.tasks.CompileDexTask::class.java) { task ->
+        tasks.named("compileDex", CompileDexTask::class.java) { task ->
             task.input.from(extractedStdlibDir)
             task.dependsOn(extractStdlib)
         }
