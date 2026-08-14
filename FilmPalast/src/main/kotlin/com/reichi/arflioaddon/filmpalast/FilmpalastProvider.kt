@@ -2,10 +2,7 @@ package com.reichi.arflioaddon.filmpalast
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.MainPageData
-import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
@@ -13,7 +10,6 @@ import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.fixUrlNull
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
 import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
@@ -45,7 +41,6 @@ class FilmpalastProvider : TmdbProvider() {
     override var name = "Filmpalast"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override var lang = "de"
-    override val hasMainPage = true
 
     override val useMetaLoadResponse = false
 
@@ -55,22 +50,7 @@ class FilmpalastProvider : TmdbProvider() {
     // would never run. Keep each call well under ARVIO's total budget.
     private val NET_TIMEOUT_MS = 8000L
 
-    // Build mainPage from MainPageData directly instead of mainPageOf(Pair...): ARVIO's
-    // R8-shrunk cloudstream3 library removed the mainPageOf(vararg Pair<String,String>)
-    // overload (NoSuchMethodError at <init>), but retains the MainPageData data class.
-    override val mainPage = listOf(
-        MainPageData(name = "Neu", data = ""),
-        MainPageData(name = "Filme", data = "/movies/top"),
-        MainPageData(name = "Serien", data = "/serien/view")
-    )
-
     data class LoadData(val links: List<String> = emptyList())
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.get("$mainUrl${request.data}/page/${page}").document
-        val results = document.select("#content article.liste").mapNotNull { it.toSearchResponse() }
-        return newHomePageResponse(request, results, hasNext = true)
-    }
 
     // search() is still implemented so the classic CloudStream app (and ARVIOs search path
     // fallback) can use it. Returns the Filmpalast stream URL as the SearchResponse url.
