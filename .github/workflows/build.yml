@@ -52,45 +52,20 @@ jobs:
 
       - name: Extract ARVIO obfuscated cloudstream3 JAR
         run: |
-          # Download ARVIO sideload APK and extract obfuscated cloudstream3 classes.
-          # ARVIO's R8 renames kotlin.coroutines.Continuation→j7.d and kotlin.jvm.functions.Function1→x7.l.
-          # We compile against these obfuscated types so suspend-method override descriptors match.
           cd $GITHUB_WORKSPACE/src
           mkdir -p libs
           pip install androguard
-          # Download ARVIO APK
+          # Download ARVIO sideload APK
           curl -L -o /tmp/arvio.apk \
             "https://github.com/ProdigyV21/ARVIO/releases/download/v1.9.983/ARVIO-v1.9.983-sideload-release.apk"
-          # Extract and combine all DEX files into a trimmed JAR
-          python3 -c "
-          import zipfile, os, subprocess, tempfile, shutil
-          # Extract all classes*.dex from APK
-          with zipfile.ZipFile('/tmp/arvio.apk') as z:
-              dex_names = sorted([n for n in z.namelist() if n.startswith('classes') and n.endswith('.dex')])
-              for d in dex_names:
-                  z.extract(d, '/tmp/arvio_dex')
-          # Convert each DEX to JAR using dex2jar
-          os.makedirs('/tmp/dex2jar', exist_ok=True)
-          d2j_url = 'https://github.com/ThexXTHEEXx/dex-tools/releases/download/v2.4/dex-tools-v2.4.zip'
-          subprocess.run(['bash', '-c', f'curl -L -o /tmp/d2j.zip \"{d2j_url}\" && cd /tmp && unzip -o d2j.zip -d dex-tools'], check=True)
-          jars = []
-          for d in dex_names:
-              dpath = f'/tmp/arvio_dex/{d}'
-              jpath = f'/tmp/arvio_dex/{d.replace(\".dex\", \".jar\")}'
-              subprocess.run(['bash', '/tmp/dex-tools/dex-tools-v2.4/d2j-dex2jar.sh', dpath, '-o', jpath, '--force'], check=True)
-              jars.append(jpath)
-          # Combine: keep cloudstream3 + obfuscated packages
-          seen = set()
-          with zipfile.ZipFile('libs/arvio-cloudstream3-v1.9.983.jar', 'w', zipfile.ZIP_DEFLATED) as out:
-              for jar in jars:
-                  with zipfile.ZipFile(jar) as z:
-                      for name in z.namelist():
-                          if name not in seen and name.endswith('.class'):
-                              if name.startswith('com/lagradost/cloudstream3/') or not name.startswith(('com/', 'org/', 'java/', 'android/', 'androidx/', 'kotlin', 'sun/', 'javax/')):
-                                  seen.add(name)
-                                  out.writestr(name, z.read(name))
-          print(f'Created arvio-cloudstream3-v1.9.983.jar with {len(seen)} classes')
-          "
+          # Download dex2jar
+          curl -L -o /tmp/d2j.zip \
+            "https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip"
+          cd /tmp && unzip -o d2j.zip -d dex-tools
+          chmod +x /tmp/dex-tools/dex-tools-v2.4/d2j-dex2jar.sh
+          # Extract all DEX files from APK and convert to JARs
+          cd $GITHUB_WORKSPACE/src
+          python3 scripts/extract_arvio_jar.py /tmp/arvio.apk /tmp/dex-tools/dex-tools-v2.4/d2j-dex2jar.sh libs/arvio-cloudstream3-v1.9.983.jar
 
       - name: Build Plugins
         run: |
