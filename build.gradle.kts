@@ -95,21 +95,19 @@ subprojects {
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
 
     val extractedStdlibDir = layout.buildDirectory.dir("intermediates/stdlib-classes/${project.name}")
-    val extractStdlib = tasks.register("extractStdlibForDex", Copy::class.java) { extract ->
+    val extractStdlib = tasks.register("extractStdlibForDex", Sync::class.java) { extract ->
         extract.dependsOn(bundleStdlib)
-        // Resolve the configuration at execution time and unzip each artifact.
-        extract.from(provider { bundleStdlib.files.map { zipTree(it) } }) { spec ->
-            spec.include("kotlin/**")
-            spec.include("kotlinx/**")
-            spec.include("META-INF/*.kotlin_module")
-            spec.exclude("**/*.kotlin_builtins")
-        }
         extract.into(extractedStdlibDir)
+        extract.include("kotlin/**", "kotlinx/**", "META-INF/*.kotlin_module")
+        extract.exclude("**/*.kotlin_builtins")
+        // Resolve and unzip the stdlib artifacts at execution time.
+        val stdlibJars = bundleStdlib.files
+        stdlibJars.forEach { jar -> extract.from(project.zipTree(jar)) }
     }
 
     afterEvaluate {
-        tasks.named("compileDex", com.lagradost.cloudstream3.gradle.tasks.CompileDexTask::class.java) { task ->
-            task.input.from(extractedStdlibDir)
+        tasks.named("compileDex") { task ->
+            (task as com.lagradost.cloudstream3.gradle.tasks.CompileDexTask).input.from(extractedStdlibDir)
             task.dependsOn(extractStdlib)
         }
     }
