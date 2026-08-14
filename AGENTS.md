@@ -150,21 +150,80 @@ R8 hat den **synthetischen Default-Argument-Konstruktor** von `MainPageData` ent
 - Version auf 13 gebumpt. CI gruen. builds-Branch: FilmPalast.cs3 v13 (1268533 Bytes, status=1).
 - **Erwartung v13-Test:** plugin.load() durchlaufen OHNE NoSuchMethodError (keine MainPageData mehr). "API loaded" / "Executing DEX scraper: FilmPalast" -> load() laeuft. Falls naechster R8-Strip (z.B. newMovieLoadResponse/newTvSeriesLoadResponse/loadExtractor): jeweilige Methode notieren -> retained-Alternative oder direkten Konstruktor verwenden.
 
-### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #6 / v13)
-**Prio 1 - v13 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
-1. v13 ist gebaut (builds-Branch, FilmPalast.cs3 v13, 1268533 Bytes, status=1).
-2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v13.
-3. `adb logcat -c`, Scraper einschalten, Matrix-Quellensuche ausloesen, 15 s warten.
-4. `adb logcat -d | grep -iE "Filmpalast|ExtExtension|PluginManager|No API|MISSING|NoSuchMethod|loadLinks|Tmdb|result|ArvioAddon|FATAL"` -> pruefen:
-   - **KEIN NoSuchMethodError/MISSING CLASS** mehr bei `<init>`. "API loaded" / Provider instanziiert. Falls ein ANDERER NoSuchMethodError/NoClassDef auftaucht (andere cloudstream3-Methode: newMovieLoadResponse/newTvSeriesLoadResponse/loadExtractor/fixUrl etc.): genaue Methode/Klasse notieren -> retained-Alternative bauen ODER direkten Konstruktor ohne Default-Args verwenden.
-   - Falls load() laeuft aber "0 links collected" / keine Quellen: Jsoup-Selektoren/Hoster-Extraktion debuggen (naechste Ebene). DebugLog.t/w/e geht ins logcat (Tag "ArvioAddon[Filmpalast]") -> dort detaillierter Trace.
-   - WICHTIG: ARVIO zeigt "kein Add-on eingerichtet" solange KEIN Stremio-Addon aktiv ist (hasStreamingAddons zaehlt nur Stremio). Workaround: WebStreamr/Stremio-Addon aktiv lassen. Meldung ist irrefuehrend, Scraper laufen trotzdem.
-   - webstreamr-Timeout (in frueheren Logs) ist serverseitiges Netzwerkproblem (baby-beamup.club antwortet nicht) - unabhaengig von uns.
+### ENTSCHEIDENDE ERKENNTNIS #7 (14.08.2026, v13-DEX-Analyse + ARVIO-APK-Analyse): R8 hat kotlin.coroutines.Continuation obfuscated — suspend-Overrides funtionieren NICHT
+**Root-Cause fuer "load() override wird nicht aufgerufen" gefunden und verifiziert durch DEX-Bytecode-Analyse der ARVIO-APK.**
 
-**Prio 2 - GitHub-Issue bei ARVIO (zwei klare Bugs):**
-1. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (CloudSyncRepository.applyCloudPayload macht nur saveScrapers ohne downloadDexExtensions). Wer Plugins via Cloud-Sync auf ein neues Geraet uebernimmt, hat leere Scraper ("DEX file not found"). Skizze: ".cs3/Cloudstream3 plugins restored via Cloud Sync show in list but return no sources: saveScrapers() stores metadata but never downloads the .cs3 (no downloadDexExtensions call) - cs_extensions/ stays empty". Verweis auf #459/#273.
-2. Touch-Bug im Add-Repo-Dialog auf Handy (trotz #502-Fix in 1.9.983): Abbrechen/Bestaetigen nicht tippbar nach URL-Eingabe.
-AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]" einfuegen. NOCH NICHT geoeffnet - erst nach v9-TV-Test entscheiden.
+v13 laedt erfolgreich (Provider registriert, Extractoren registriert, "API loaded" bestätigt in log6). Aber ARVIO ruft bei `api.load(loadJson)` die **PARENT** `TmdbProvider.load()` auf, nicht unseren Override. Das Ergebnis: `ErrorLoadingException: No id found` (parent parst JSON nicht), dann Fallback-URL `themoviedb.org/movie/603` (parent parst URL, ruft `loadFromTmdb` auf, aber wir haben das nicht ueberschrieben), dann `both load() paths failed` → 0 Quellen.
+
+**Warum der Override nicht bindet (verifiziert im ARVIO-APK-Bytecode):**
+- ARVIOs R8 (full mode, `isMinifyEnabled=true`) hat **kotlin.coroutines.Continuation zu `j7.d` obfuscated** und **kotlin.jvm.functions.Function1 zu `x7.l`**.
+- Die `-keep class com.lagradost.** { *; }`-Regel behaelt cloudstream3-Klassennamen + Methodennamen, aber R8 obfuscated die **Parameter-TYPEN** in Methodensignaturen unabhaengig davon.
+- ARVIOs `MainAPI.load()` in der kompilierten APK hat Signatur: `load(Ljava/lang/String;Lj7/d;)Ljava/lang/Object;` (j7.d = obfuscated Continuation).
+- Unser `FilmpalastProvider.load()` in der .cs3-DEX hat Signatur: `load(Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;` (unobfuscated, weil wir gegen `pre-release`-Stub kompilieren).
+- **Lj7/d; != Lkotlin/coroutines/Continuation;** → JVM findet unseren Override nicht → virtual dispatch faellt auf parent zurueck → parent laeuft.
+- **Dasselbe gilt fuer `loadLinks` und `search`:** alle suspend-Methoden haben Continuation-Parameter → alle Overrides sind broken.
+- ARVIOs `executeTmdbLoadLinks$completed$1` ruft auf: `invoke-virtual MainAPI->loadLinks(Ljava/lang/String;ZLx7/l;Lx7/l;Lj7/d;)Ljava/lang/Object;` (x7.l = obfuscated Function1, j7.d = obfuscated Continuation).
+- Unsere `loadLinks` hat: `(Ljava/lang/String;ZLkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;` → mismatch.
+
+**Verifizierte Obfuscation-Map (aus ARVIO-APK extrahiert, classes4.dex/classes5.dex):**
+| Original-Typ | Obfuscated | Wo gefunden |
+|---|---|---|
+| `kotlin.coroutines.Continuation` | `j7.d` | MainAPI.load/loadLinks/search Signaturen; interface mit getContext():j7.j + resumeWith(Object):V |
+| `kotlin.coroutines.CoroutineContext` | `j7.j` | j7.d.getContext() return type |
+| `kotlin.jvm.functions.Function1` | `x7.l` | MainAPI.loadLinks callback-Parameter; interface mit invoke(Object):Object, extends d7.o |
+| `kotlin.jvm.functions.Function` | `d7.o` | x7.l's super-interface |
+
+**Nicht-obfuscated (durch `-keep` geschuetzt oder primitiv):**
+- `com.lagradost.cloudstream3.**` (Klassen + Methoden-Namen; `-keep class com.lagradost.** { *; }`)
+- `loadFromTmdb(I)Lcom/lagradost/cloudstream3/LoadResponse;` (int-Parameter = primitiv, LoadResponse = kept) **→ dieser Override wuerde funktionieren!**
+- `loadFromImdb(Ljava/lang/String;)Lcom/lagradost/cloudstream3/LoadResponse;` (String + LoadResponse = both unobfuscated) **→ wuerde auch funktionieren!**
+
+**WARUM das ALLE .cs3-Plugins in ARVIO betrifft (nicht nur unseres):**
+- Jedes Cloudstream3-Plugin, das gegen den unobfuscated cloudstream3-Stub (GitHub `pre-release`/`v4.7.0`) kompiliert, hat unobfuscated Continuation/Function1 in seinen Override-Signaturen.
+- ARVIOs R8-obfuscated Runtime hat j7.d/x7.l → **KEIN** externes .cs3-Plugin kann suspend-Methoden (load/loadLinks/search/getMainPage) korrekt ueberschreiben.
+- Das erklaert endgueltig, warum GermanProviders (bewaehrtes Repo) in ARVIO auch 0 Quellen liefert, und warum GitHub-Issues #459/#273 dasselbe Symptom berichten.
+- **ARVIOs EIGENE eingebaute Provider** sind davon nicht betroffen, weil sie im selben APK kompiliert wurden (gleiche obfuscated Typen).
+
+### GEPLANTER FIX #7: Gegen ARVIOs obfuscated cloudstream3 kompilieren
+**Ansatz:** ARVIOs cloudstream3-Klassen aus der APK extrahieren (dex2jar) und als `compileOnly`-Dependency verwenden. Der Kotlin-Compiler liest die `@kotlin.Metadata`-Annotation auf MainAPI/TmdbProvider (vorhanden → verifiziert), die die obfuscated JVM-Signaturen enthaelt. Der Compiler generiert dann unsere Overrides mit `j7.d`/`x7.l` als Parameter-Typen → Signaturen matchen → virtual dispatch funktioniert.
+
+**Schritte:**
+1. ARVIO-sideload-APK herunterladen (`ARVIO-v1.9.983-sideload-release.apk`, 135MB).
+2. `classes4.dex` extrahieren (enthält cloudstream3: MainAPI, TmdbProvider, LoadResponse etc.).
+3. Mit dex2jar (`d2j-dex2jar.sh classes4.dex -o arvio-cloudstream3.jar`) zu JAR konvertieren.
+4. JAR als `compileOnly`-Dependency im `FilmPalast/build.gradle.kts` einbinden (statt `pre-release`-Stub).
+5. Kotlin-Compiler liest @Metadata → generiert Overrides mit obfuscated Typen.
+6. `.cs3` bauen, deployen, am TV testen.
+7. **Risiko:** Obfuscation-Map ändert sich bei jedem ARVIO-Release → JAR muss pro ARVIO-Version aktualisiert werden. Aber ARVIO v1.9.983 ist die aktuelle Version, und der Nutzer hat sie.
+
+**Alternative falls Fix #7 nicht funktioniert (DEX-Patching):**
+Falls der Kotlin-Compiler die @Metadata-JVM-Signaturen NICHT respektiert (immer noch `kotlin.coroutines.Continuation` generiert), muessten wir die .cs3-DEX post-processen: in den proto_id/method_id-Items unserer load/loadLinks/search-Methoden den Parameter-Typ von `Lkotlin/coroutines/Continuation;` auf `Lj7/d;` (und Function1 auf `Lx7/l;`) patchen. Komplex aber machbar (DEX-Binary-Patching der type_id-Referenzen).
+
+**Alternative falls beides nicht funktioniert (loadFromTmdb-Ansatz):**
+Da `loadFromTmdb(Int): LoadResponse?` eine **nicht-suspend**-Methode ist (kein Continuation-Parameter) und ihre Signatur in ARVIO unobfuscated ist (`loadFromTmdb(I)Lcom/lagradost/cloudstream3/LoadResponse;`), wuerde ein Override hier **funktionieren**. ARVIOs `executeTmdbProvider` ruft `api.load(tmdbUrl)` auf → parent parst URL → extrahiert ID → ruft `loadFromTmdb(id)` auf → unser Override wuerde aufgerufen. **Aber:** `loadLinks` ist suspend → bleibt broken. Nur fuer den Load-Teil nutzbar, nicht fuer Link-Resolution.
+
+### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Erkenntnis #7)
+**Prio 1 - Fix #7 implementieren (gegen obfuscated cloudstream3 kompilieren):**
+1. ARVIO-APK → classes4.dex → dex2jar → `arvio-cloudstream3.jar`.
+2. In `FilmPalast/build.gradle.kts` als `compileOnly` einbinden (ohne `pre-release`).
+3. Build testen: pruefen ob DEX-Output `j7.d` in load()-Signatur hat (androguard-Check).
+4. Falls ja: `.cs3` deployen, am TV testen.
+5. Falls nein: DEX-Patching-Ansatz evaluieren.
+
+**Prio 2 - v14 am TV testen (mit WLAN-ADB + Logcat):**
+1. Fix #7 als v14 bauen + deployen (builds-Branch).
+2. Am TV: Repo loeschen + neu hinzufuegen (direkt, NICHT Cloud-Sync).
+3. `adb logcat -c`, Scraper einschalten, Matrix suchen, 15s warten.
+4. `adb logcat -d | grep -iE "Filmpalast|ExtExtension|ArvioAddon|load|Tmdb|link|result"` pruefen:
+   - ArvioAddon-Debug-Trace-Zeilen sichtbar? (load() wird jetzt aufgerufen)
+   - loadLinks-Ergebnisse? (ExtractorLink-Ausgabe)
+   - "0 links collected" → naechste Ebene (Jsoup-Selektoren/Hoster).
+
+**Prio 3 - GitHub-Issue bei ARVIO (drei klare Bugs):**
+1. **R8 obfuscated kotlin.coroutines.Continuation → externe .cs3-Plugins koennen suspend-Overrides nicht binden.** Haupt-Bug. Skizze: "R8 full-mode obfuscates kotlin.coroutines.Continuation (→j7.d) and kotlin.jvm.functions.Function1 (→x7.l) despite -keep rules for cloudstream3 classes. External .cs3 plugins compiled against the public cloudstream3 stub use unobfuscated type names, so their load()/loadLinks()/search() override method descriptors don't match the obfuscated parent → virtual dispatch always calls the parent TmdbProvider/MainAPI implementation instead of the plugin's override. ALL external .cs3 plugins are affected (GermanProviders, custom TmdbProviders). Fix: either keep kotlin.coroutines.Continuation and kotlin.jvm.functions.* unobfuscated in proguard-rules.pro, or provide a mapping file." Verweis auf #459/#273.
+2. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (siehe Erkenntnis #1).
+3. Touch-Bug im Add-Repo-Dialog auf Handy (trotz #502-Fix in 1.9.983).
+AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]" einfuegen.
 
 ### ADB-over-WLAN beim TCL C7K (verifizierter Weg, Session 14.08.)
 USB-Kabel-ADB funktioniert bei TVs praktisch nie (TV-USB-Buchsen sind Host-Modus fuer Sticks, nicht Client fuer ADB). Weg = WLAN-ADB.
@@ -709,3 +768,5 @@ Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trac
 - **v1.1 (Aug 2026, Commits b6e3c1b bis 8aa09d3):** Hoster-Extraktion gefixt (loadLinks respektiert loadExtractor-Return; Voe1 entfernt; generischer Fallback fuer unbekannte Hostnamen); endgeraet-getestet in ARVIO 1.9.983 (sideload) von Nutzer. Plugin laedt, ist sichtbar & aktivierbar. **Aber:** bei Quellensuche (Matrix/Silo) zeigt ARVIO nur webstreamr-Quellen, nicht Filmpalast - Root-Cause offen, Logcat vom Geraet noetig (siehe "AKTUELLER STAND" ganz oben). AGENTS.md umfassend mit ARVIO-Scraper-Pfad, Touch-Bug-Fix #502, Test-Funktion-Status und Logcat-Optionen dokumentiert.
 - **v1.2 (13.08.2026):** Selbst-Diagnose-Modus statt Logcat. `DebugLog.kt` + `DebugServer.kt` (lokaler HTTP-Server `localhost:8420`), `FilmpalastProvider` vollstГғВӨndig instrumentiert, Version auf 2 gebumpt. Ersetzt Logcat-Zugang fuer unseren eigenen Scraper-Code. Siehe "Schritt-fuer-Schritt: Diagnose-Log auslesen".
 - **v1.3 (13.08.2026, Commits bis ca9f81f):** Diagnose-Tooling massiv ausgebaut, aber **Kernerkenntnis: ARVIO ruft .cs3-Plugins auf dem Geraet GAR NICHT auf.** Beweise: (a) GermanProviders (bewaehrtes .cs3-Repo) liefert auf dem Geraet ebenfalls 0 Quellen, (b) unsere v6-v8 haetten bei JEDEM loadLinks-Aufruf ArvioAddon-Debug-Quellen emittieren muessen - erschienen nie, (c) GitHub-Issues #459/#273 berichten exakt dasselbe Symptom. Webstreamr (Stremio-Addon) funktioniert = anderer ARVIO-Code-Pfad. Versionen: v3 DebugServer auf 127.0.0.1; v4 File-Trace+PLUGIN_LOADED Marker; v5 MediaStore->public Download; v6 Diagnose als Pseudo-Quellen in ARVIO-Quellenauswahl; v7 load() gibt nie null zurueck (debugLoadResponse) damit loadLinks garantiert laeuft; v8 Per-Call-Netzwerk-Timeouts. ARVIO library (TmdbProvider/MainAPI/Plugin) verifiziert vorhanden in classes3/4.dex. ARVIO-Timeouts (120s/60s) schliessen Timeout als Ursache aus. **Naechster Schritt: mit Laptop weiter (Logcat via USB+adb); ggf. GitHub-Issue bei ARVIO.** Siehe "AKTUELLER STAND" ganz oben.
+- **v9-v13 (14.08.2026, Logcat-Aera):** Nach USB-ADB+Logcat am TV: Erkenntnis #1 (.cs3 nie heruntergeladen bei Cloud-Sync) → Erkenntnis #2 (kotlin/io/FilesKt von R8 geshrinkt) → FIX #2 (v9: kotlin-stdlib-IO entfernt) → Erkenntnis #3 (DebugServer-Thread-Crash) → FIX #3 (v10: DebugServer removed) → Erkenntnis #4 (kotlin.collections.SetsKt von R8 geshrinkt) → FIX #4 (v11: kotlin-stdlib in .cs3 gebundled) → Erkenntnis #5 (mainPageOf von R8 geshrinkt) → FIX #5 (v12: listOf(MainPageData)) → Erkenntnis #6 (MainPageData-ctor von R8 geshrumpft) → FIX #6 (v13: mainPage komplett entfernt). v13 laedt erstmals VOLLSTAENDIG (Provider+Extractoren registriert, "API loaded" bestätigt).
+- **Erkenntnis #7 (14.08.2026, v13-DEX+APK-Analyse):** **Root-Cause gefunden.** ARVIOs R8 hat `kotlin.coroutines.Continuation` zu `j7.d` obfuscated. Unsere suspend-Override-Methoden (load/loadLinks/search) haben `Lkotlin/coroutines/Continuation;` in der Signatur, ARVIOs Parent hat `Lj7/d;` → JVM findet Override nicht → parent laeuft → `ErrorLoadingException: No id found` → 0 Quellen. **Betrifft ALLE externen .cs3-Plugins.** Geplanter Fix #7: gegen ARVIOs obfuscated cloudstream3-JAR kompilieren (dex2jar aus APK extrahieren). Siehe "ENTSCHEIDENDE ERKENNTNIS #7" oben.
