@@ -87,32 +87,29 @@ subprojects {
     // stdlib — which the real cloudstream3 app does, but ARVIO does not.
     //
     // Fix: bundle kotlin-stdlib (+ coroutines, which the provider uses) into the .cs3 DEX by
-    // adding the stdlib/coroutines compiled classes to the compileDex task input. The DexClassLoader
-    // then finds the stdlib classes within the plugin's own DEX, independent of the parent.
+    // extracting their .class files into a directory and adding it to the compileDex task
+    // input. The DexClassLoader then finds stdlib classes within the plugin's own DEX,
+    // independent of the parent classloader.
+    val bundleStdlib by configurations.creating
+    dependencies.add(bundleStdlib.name, "org.jetbrains.kotlin:kotlin-stdlib:2.3.0")
+    dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+
+    val extractedStdlibDir = layout.buildDirectory.dir("intermediates/stdlib-classes/${project.name}")
+    val extractStdlib = tasks.register("extractStdlibForDex", Copy::class.java) { extract ->
+        extract.dependsOn(bundleStdlib)
+        // Resolve the configuration at execution time and unzip each artifact.
+        extract.from(provider { bundleStdlib.files.map { zipTree(it) } }) { spec ->
+            spec.include("kotlin/**")
+            spec.include("kotlinx/**")
+            spec.include("META-INF/*.kotlin_module")
+            spec.exclude("**/*.kotlin_builtins")
+        }
+        extract.into(extractedStdlibDir)
+    }
+
     afterEvaluate {
-        tasks.findByName("compileDex")?.let { task ->
-            val compileDexTask = task as com.lagradost.cloudstream3.gradle.tasks.CompileDexTask
-            // Extract the classes we need from their dependency JARs and feed them to the DEX
-            // compiler. We must avoid bundling classes the host already provides reliably
-            // (cloudstream3, jsoup, jackson, nicehttp) — only stdlib + coroutines, which ARVIO
-            // shrinks away.
-            val bundleDeps = configurations.create("bundleStdlib")
-            dependencies.add("bundleStdlib", kotlin("stdlib"))
-            dependencies.add("bundleStdlib", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
-
-            val extractedStdlib = layout.buildLocation.dir("intermediates/stdlib-classes/${project.name}")
-            val extractStdlib = tasks.register("extractStdlibForDex", Copy::class.java) { extract ->
-                extract.from(zipTree(configurations.named("bundleStdlib").map { it.singleFile })) {
-                    it.include("kotlin/**")
-                    it.include("kotlinx/**")
-                    it.include("META-INF/*.kotlin_module")
-                    it.exclude("**/*.kotlin_builtins")
-                }
-                extract.into(extractedStdlib)
-                extract.dependsOn(configurations.named("bundleStdlib"))
-            }
-
-            compileDexTask.input.from(extractedStdlib)
+        tasks.named("compileDex", com.lagradost.cloudstream3.gradle.tasks.CompileDexTask::class.java) { task ->
+            task.input.from(extractedStdlibDir)
             task.dependsOn(extractStdlib)
         }
     }
