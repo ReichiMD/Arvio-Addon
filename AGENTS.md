@@ -770,3 +770,23 @@ Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trac
 - **v1.3 (13.08.2026, Commits bis ca9f81f):** Diagnose-Tooling massiv ausgebaut, aber **Kernerkenntnis: ARVIO ruft .cs3-Plugins auf dem Geraet GAR NICHT auf.** Beweise: (a) GermanProviders (bewaehrtes .cs3-Repo) liefert auf dem Geraet ebenfalls 0 Quellen, (b) unsere v6-v8 haetten bei JEDEM loadLinks-Aufruf ArvioAddon-Debug-Quellen emittieren muessen - erschienen nie, (c) GitHub-Issues #459/#273 berichten exakt dasselbe Symptom. Webstreamr (Stremio-Addon) funktioniert = anderer ARVIO-Code-Pfad. Versionen: v3 DebugServer auf 127.0.0.1; v4 File-Trace+PLUGIN_LOADED Marker; v5 MediaStore->public Download; v6 Diagnose als Pseudo-Quellen in ARVIO-Quellenauswahl; v7 load() gibt nie null zurueck (debugLoadResponse) damit loadLinks garantiert laeuft; v8 Per-Call-Netzwerk-Timeouts. ARVIO library (TmdbProvider/MainAPI/Plugin) verifiziert vorhanden in classes3/4.dex. ARVIO-Timeouts (120s/60s) schliessen Timeout als Ursache aus. **Naechster Schritt: mit Laptop weiter (Logcat via USB+adb); ggf. GitHub-Issue bei ARVIO.** Siehe "AKTUELLER STAND" ganz oben.
 - **v9-v13 (14.08.2026, Logcat-Aera):** Nach USB-ADB+Logcat am TV: Erkenntnis #1 (.cs3 nie heruntergeladen bei Cloud-Sync) → Erkenntnis #2 (kotlin/io/FilesKt von R8 geshrinkt) → FIX #2 (v9: kotlin-stdlib-IO entfernt) → Erkenntnis #3 (DebugServer-Thread-Crash) → FIX #3 (v10: DebugServer removed) → Erkenntnis #4 (kotlin.collections.SetsKt von R8 geshrinkt) → FIX #4 (v11: kotlin-stdlib in .cs3 gebundled) → Erkenntnis #5 (mainPageOf von R8 geshrinkt) → FIX #5 (v12: listOf(MainPageData)) → Erkenntnis #6 (MainPageData-ctor von R8 geshrumpft) → FIX #6 (v13: mainPage komplett entfernt). v13 laedt erstmals VOLLSTAENDIG (Provider+Extractoren registriert, "API loaded" bestätigt).
 - **Erkenntnis #7 (14.08.2026, v13-DEX+APK-Analyse):** **Root-Cause gefunden.** ARVIOs R8 hat `kotlin.coroutines.Continuation` zu `j7.d` obfuscated. Unsere suspend-Override-Methoden (load/loadLinks/search) haben `Lkotlin/coroutines/Continuation;` in der Signatur, ARVIOs Parent hat `Lj7/d;` → JVM findet Override nicht → parent laeuft → `ErrorLoadingException: No id found` → 0 Quellen. **Betrifft ALLE externen .cs3-Plugins.** Geplanter Fix #7: gegen ARVIOs obfuscated cloudstream3-JAR kompilieren (dex2jar aus APK extrahieren). Siehe "ENTSCHEIDENDE ERKENNTNIS #7" oben.
+
+---
+
+## Fix #7: R8-obfuscated kotlin type descriptors (14.08.2026)
+
+### Root cause
+ARVIO R8 obfuscated kotlin.coroutines.Continuation->j7.d, kotlin.jvm.functions.Function1->x7.l despite -keep. Our suspend overrides (load/loadLinks/search) compiled with Lkotlin/coroutines/Continuation; in descriptors do not match ARVIO runtime Lj7/d; -> JVM virtual dispatch never calls our override -> parent load() -> ErrorLoadingException -> 0 sources.
+
+### Fix: Post-build DEX patching
+Kotlin compiler always generates kotlin.coroutines.Continuation for suspend (language semantics). So we patch the built DEX: replace string table entries (Lkotlin/coroutines/Continuation;->Lj7/d; etc.), pad freed bytes with zeros (no offset shifts), recompute SHA-1+Adler32. Integrated as doLast on make task. CI downloads ARVIO APK and extracts obfuscated JAR via dex2jar.
+
+### Verified patched signatures
+load: (Ljava/lang/String; Lj7/d;)Ljava/lang/Object;
+loadLinks: (Ljava/lang/String; Z Lx7/l; Lx7/l; Lj7/d;)Ljava/lang/Object;
+search: (Ljava/lang/String; Lj7/d;)Ljava/lang/Object;
+
+### Version 14
+- DEX patching implemented, v14 on builds branch (1,268,540 bytes)
+- Scripts: patch_dex_obfuscation.py, extract_arvio_jar.py
+- Test on TCL C7K TV pending
