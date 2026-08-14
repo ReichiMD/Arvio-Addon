@@ -97,7 +97,7 @@ subprojects {
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
 
     val extractedStdlibDir = layout.buildDirectory.dir("intermediates/stdlib-classes/${project.name}")
-    val extractStdlib = tasks.register<Sync>("extractStdlibForDex") { extract ->
+    val extractStdlib = tasks.register("extractStdlibForDex", Sync::class.java) { extract: Sync ->
         extract.dependsOn(bundleStdlib)
         extract.into(extractedStdlibDir)
         extract.include("kotlin/**", "kotlinx/**", "META-INF/*.kotlin_module")
@@ -108,7 +108,7 @@ subprojects {
     }
 
     afterEvaluate {
-        tasks.named("compileDex", CompileDexTask::class.java) { task ->
+        tasks.named("compileDex", CompileDexTask::class.java) { task: CompileDexTask ->
             task.input.from(extractedStdlibDir)
             task.dependsOn(extractStdlib)
         }
