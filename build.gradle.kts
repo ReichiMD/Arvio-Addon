@@ -71,7 +71,29 @@ subprojects {
         val cloudstream by configurations
         val implementation by configurations
 
-        cloudstream("com.lagradost:cloudstream3:pre-release")
+        // Compile against ARVIO's R8-obfuscated cloudstream3 classes (extracted from the
+        // sideload APK via dex2jar). ARVIO's R8 renames kotlin.coroutines.Continuation→j7.d
+        // and kotlin.jvm.functions.Function1→x7.l. Plugins compiled against the public
+        // unobfuscated stub have mismatched suspend-method descriptors → virtual dispatch
+        // always calls the parent instead of the override. Compiling against the obfuscated
+        // JAR makes the Kotlin compiler read @kotlin.Metadata with obfuscated JVM signatures
+        // and generate matching overrides.
+        //
+        // The JAR is gitignored (10MB). To obtain it:
+        //   1. Download ARVIO-v1.9.983-sideload-release.apk
+        //   2. Extract all classes*.dex
+        //   3. d2j-dex2jar.sh classes*.dex → classes*.jar
+        //   4. Combine: keep com/lagradost/cloudstream3/** + obfuscated packages (j7, x7, etc.)
+        //   5. Place at libs/arvio-cloudstream3-v1.9.983.jar
+        // CI does this automatically (see .github/workflows/build.yml).
+        val arvioJar = rootProject.file("libs/arvio-cloudstream3-v1.9.983.jar")
+        if (arvioJar.exists()) {
+            cloudstream(files(arvioJar))
+        } else {
+            // Fallback for environments without the obfuscated JAR (produces unobfuscated DEX
+            // that won't work in ARVIO but allows compilation to succeed)
+            cloudstream("com.lagradost:cloudstream3:pre-release")
+        }
 
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.13")
@@ -124,6 +146,24 @@ subprojects {
         extractStdlib.dependsOn(bundleStdlib)
         compileDexTask.input.from(extractedStdlibDir)
         compileDexTask.dependsOn(extractStdlib)
+
+        // After the .cs3 is built, patch the DEX to replace kotlin type descriptors with
+        // ARVIO's R8-obfuscated equivalents (kotlin.coroutines.Continuation→j7.d, etc.).
+        // This makes suspend-function override method signatures match ARVIO's runtime so
+        // virtual dispatch calls our overrides instead of the parent.
+        val makeTask = tasks.findByName("make") ?: tasks.findByName("makeCloudstreamPlugin")
+        makeTask?.doLast {
+            val cs3File = layout.buildDirectory.file("${project.name}.cs3").get().asFile
+            if (cs3File.exists()) {
+                val patchScript = rootProject.file("scripts/patch_dex_obfuscation.py")
+                if (patchScript.exists()) {
+                    logger.lifecycle("Patching DEX obfuscation in ${cs3File.name}...")
+                    project.exec {
+                        commandLine("python3", patchScript.absolutePath, cs3File.absolutePath)
+                    }
+                }
+            }
+        }
     }
 }
 

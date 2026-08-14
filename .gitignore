@@ -4,3 +4,4 @@ local.properties
 *.iml
 .idea/
 .cxx/
+libs/arvio-cloudstream3-*.jar
