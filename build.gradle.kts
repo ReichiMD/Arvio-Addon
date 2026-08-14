@@ -1,7 +1,6 @@
 import com.android.build.gradle.BaseExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import com.lagradost.cloudstream3.gradle.tasks.CompileDexTask
-import org.gradle.api.tasks.Sync
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
@@ -97,21 +96,34 @@ subprojects {
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
 
     val extractedStdlibDir = layout.buildDirectory.dir("intermediates/stdlib-classes/${project.name}")
-    val extractStdlib = tasks.register("extractStdlibForDex", Sync::class.java) { extract: Sync ->
-        extract.dependsOn(bundleStdlib)
-        extract.into(extractedStdlibDir)
-        extract.include("kotlin/**", "kotlinx/**", "META-INF/*.kotlin_module")
-        extract.exclude("**/*.kotlin_builtins")
-        // Resolve and unzip the stdlib artifacts at execution time.
-        val stdlibJars = bundleStdlib.files
-        stdlibJars.forEach { jar -> extract.from(project.zipTree(jar)) }
-    }
 
     afterEvaluate {
-        tasks.named("compileDex", CompileDexTask::class.java) { task: CompileDexTask ->
-            task.input.from(extractedStdlibDir)
-            task.dependsOn(extractStdlib)
+        val compileDexTask = tasks.getByName("compileDex") as CompileDexTask
+        // Extract kotlin-stdlib + coroutines .class files and feed them to the DEX compiler so
+        // they are compiled INTO the .cs3 (ARVIO's R8-shrunk parent classloader lacks them).
+        val extractStdlib = tasks.create("extractStdlibForDex")
+        extractStdlib.doLast {
+            val outDir = extractedStdlibDir.get().asFile
+            outDir.deleteRecursively()
+            bundleStdlib.files.forEach { jar ->
+                java.util.zip.ZipFile(jar).use { zf ->
+                    val entries = zf.entries()
+                    while (entries.hasMoreElements()) {
+                        val ze = entries.nextElement()
+                        if (ze.isDirectory) continue
+                        val name = ze.name
+                        if (!(name.startsWith("kotlin/") || name.startsWith("kotlinx/") || name.endsWith(".kotlin_module"))) continue
+                        if (name.endsWith(".kotlin_builtins")) continue
+                        val target = java.io.File(outDir, name)
+                        target.parentFile.mkdirs()
+                        zf.getInputStream(ze).use { input -> java.io.FileOutputStream(target).use { out -> input.copyTo(out) } }
+                    }
+                }
+            }
         }
+        extractStdlib.dependsOn(bundleStdlib)
+        compileDexTask.input.from(extractedStdlibDir)
+        compileDexTask.dependsOn(extractStdlib)
     }
 }
 
