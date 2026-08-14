@@ -4,13 +4,13 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.fixUrlNull
-import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
@@ -55,10 +55,13 @@ class FilmpalastProvider : TmdbProvider() {
     // would never run. Keep each call well under ARVIO's total budget.
     private val NET_TIMEOUT_MS = 8000L
 
-    override val mainPage = mainPageOf(
-        "" to "Neu",
-        "/movies/top" to "Filme",
-        "/serien/view" to "Serien"
+    // Build mainPage from MainPageData directly instead of mainPageOf(Pair...): ARVIO's
+    // R8-shrunk cloudstream3 library removed the mainPageOf(vararg Pair<String,String>)
+    // overload (NoSuchMethodError at <init>), but retains the MainPageData data class.
+    override val mainPage = listOf(
+        MainPageData(name = "Neu", data = ""),
+        MainPageData(name = "Filme", data = "/movies/top"),
+        MainPageData(name = "Serien", data = "/serien/view")
     )
 
     data class LoadData(val links: List<String> = emptyList())
