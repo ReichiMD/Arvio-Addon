@@ -50,10 +50,9 @@ class FilmpalastProvider : TmdbProvider() {
     override val useMetaLoadResponse = false
 
     private val dbg = "Filmpalast"
-    private val pluginVersion = 8
     // Per-network-call timeout. ARVIO's scraper has a total timeout that covers load() +
     // loadLinks(); if a single app.get() hangs, it would consume the whole budget and loadLinks
-    // would never run (hiding all diagnostics). Keep each call well under ARVIO's total budget.
+    // would never run. Keep each call well under ARVIO's total budget.
     private val NET_TIMEOUT_MS = 8000L
 
     override val mainPage = mainPageOf(
@@ -89,24 +88,21 @@ class FilmpalastProvider : TmdbProvider() {
         return try {
             loadInternal(url)
         } catch (e: Throwable) {
-            DebugLog.e(dbg, "load() threw ${e.javaClass.simpleName}: ${e.message}")
-            // Never return null on failure: a null LoadResponse makes ARVIO skip loadLinks
-            // entirely, which would hide all diagnostics. Return a debug response instead so
-            // loadLinks runs and the trace surfaces as sources in ARVIO's picker.
-            debugLoadResponse()
+            DebugLog.e(dbg, "load() threw ${e.javaClass.simpleName}: ${e.message}", e)
+            null
         }
     }
 
-    private suspend fun loadInternal(url: String): LoadResponse {
+    private suspend fun loadInternal(url: String): LoadResponse? {
         val (tmdbId, isTv) = parseTmdbInput(url) ?: run {
             DebugLog.w(dbg, "load: could not parse TMDB input from '$url'")
-            return debugLoadResponse()
+            return null
         }
         DebugLog.t(dbg, "load: parsed tmdbId=$tmdbId isTv=$isTv")
 
         val meta = fetchTmdbMeta(tmdbId, isTv) ?: run {
             DebugLog.e(dbg, "load: TMDB metadata fetch failed for tmdbId=$tmdbId isTv=$isTv")
-            return debugLoadResponse()
+            return null
         }
         val title = meta.displayTitle
         val year = meta.year
@@ -121,27 +117,14 @@ class FilmpalastProvider : TmdbProvider() {
         DebugLog.t(dbg, "load: after matchResults -> ${matches.size} matches (isTv=$isTv)")
         matches.take(15).forEach { DebugLog.t(dbg, "  match: ${it.title} | s=${it.season} e=${it.episode} | ${it.url}") }
         if (matches.isEmpty()) {
-            DebugLog.w(dbg, "load: no matches -> returning debug response")
-            return debugLoadResponse()
+            DebugLog.w(dbg, "load: no matches -> returning null")
+            return null
         }
 
         return if (isTv) {
-            buildSeriesResponse(matches, meta) ?: debugLoadResponse()
+            buildSeriesResponse(matches, meta)
         } else {
-            buildMovieResponse(matches.first(), meta) ?: debugLoadResponse()
-        }
-    }
-
-    /**
-     * A minimal MovieLoadResponse whose dataUrl is a marker string. ARVIO's extractData
-     * returns dataUrl for MovieLoadResponse, so loadLinks gets called with "ARVIO_DEBUG",
-     * which triggers the debug-source emission so the trace becomes visible in ARVIO.
-     */
-    private suspend fun debugLoadResponse(): LoadResponse {
-        DebugLog.t(dbg, "load: returning debug LoadResponse (dataUrl=ARVIO_DEBUG)")
-        return newMovieLoadResponse("Filmpalast (Diagnose)", mainUrl, TvType.Movie, "ARVIO_DEBUG") {
-            this.year = null
-            this.plot = "Diagnose-Antwort — siehe ArvioAddon-Debug-Quellen"
+            buildMovieResponse(matches.first(), meta)
         }
     }
 
@@ -374,9 +357,6 @@ class FilmpalastProvider : TmdbProvider() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         DebugLog.t(dbg, "loadLinks() called with data=${data.take(300)}")
-        // Emit the trace accumulated so far (during load()) as diagnostic "sources" so the
-        // user can read what happened directly in ARVIO's source picker — no logcat/PC needed.
-        emitTraceAsSources(callback)
 
         val links: List<String> = when {
             data.trimStart().startsWith("{") -> {
@@ -403,8 +383,7 @@ class FilmpalastProvider : TmdbProvider() {
         }
         DebugLog.t(dbg, "loadLinks: resolved ${links.size} hoster links to try")
         if (links.isEmpty()) {
-            DebugLog.w(dbg, "loadLinks: 0 links -> no real sources (debug sources already emitted above)")
-            emitTraceAsSources(callback)
+            DebugLog.w(dbg, "loadLinks: 0 links -> no sources")
             return false
         }
 
@@ -432,58 +411,7 @@ class FilmpalastProvider : TmdbProvider() {
             }
         }
         DebugLog.t(dbg, "loadLinks: DONE, any=$any (any=true means at least one source emitted)")
-        // Final summary as a diagnostic source so the user sees the outcome too.
-        emitTraceAsSources(callback)
         return any
-    }
-
-    /**
-     * Emits the current trace entries as fake "sources" so the diagnosis shows up directly
-     * in ARVIO's source picker (the only place we can reach without logcat). ARVIO keeps only
-     * links whose url starts with http(s), so we use a harmless placeholder url and put the
-     * real diagnostic text into the link's name/source. These are not playable; their only
-     * purpose is to be visible.
-     */
-    private fun emitTraceAsSources(callback: (ExtractorLink) -> Unit) {
-        // First: a version banner so the user can confirm in ARVIO which plugin build is
-        // actually loaded (ARVIO doesn't show the plugin version number in its UI).
-        callback.invoke(
-            ExtractorLink(
-                source = "ArvioAddon-Debug",
-                name = "PLUGIN v$pluginVersion loaded — Filmpalast Arvio-Addon",
-                url = "https://arvio-addon.invalid/debug/version",
-                referer = mainUrl,
-                quality = Qualities.Unknown.value,
-                type = ExtractorLinkType.VIDEO
-            )
-        )
-        val snap = DebugLog.snapshot()
-        if (snap.isEmpty()) {
-            callback.invoke(
-                ExtractorLink(
-                    source = "ArvioAddon-Debug",
-                    name = "[trace empty] loadLinks reached but no trace entries from load()",
-                    url = "https://arvio-addon.invalid/debug/empty",
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.VIDEO
-                )
-            )
-            return
-        }
-        snap.take(40).forEachIndexed { idx, e ->
-            val text = DebugLog.format(e).take(140)
-            callback.invoke(
-                ExtractorLink(
-                    source = "ArvioAddon-Debug",
-                    name = "[$idx] $text",
-                    url = "https://arvio-addon.invalid/debug/$idx",
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.VIDEO
-                )
-            )
-        }
     }
 
     /**
