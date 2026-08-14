@@ -46,6 +46,65 @@ Nutzer kommt nÃ¤chste Session **mit Laptop**. Dann ist **Logcat via USB+adb** 
 Da der GermanProviders-Test beweist, dass es ein ARVIO-seitiges Problem mit dem `.cs3`-Pfad ist (nicht unseres), lohnt ein Issue bei den sehr aktiven ARVIO-Devs. **Noch NICHT geÃ¶ffnet** â in der nÃ¤chsten Session entscheiden, ob nach dem Logcat-Befund. Betreff/Inhalt-Skizze: ".cs3/Cloudstream3 plugins install and appear in list, but return no sources on sideload (GermanProviders AND custom TmdbProvider both empty; Stremio addons work)". Verweis auf #459/#273. **AI-Disclosure-Pflicht:** Falls Issue/MR-Kommentar erstellt wird, Hinweis "created by an AI agent (OpenHands) on behalf of [user]" einfÃ¼gen.
 - Vor dem Issue benÃ¶tigte Infos vom Nutzer: genaue ARVIO-Version (1.9.983?), sideload bestÃ¤tigt, GerÃ¤t/Android-Version.
 
+### ENTSCHEIDUNG NUTZER (14.08.2026): GitHub-Issue bei ARVIO professionell vorbereiten
+Nutzer mÃ¶chte das GitHub-Issue bei ARVIO **professionell** einreichen (Vorbild: ARVIO Issue #537), ggf. sogar mit eigenem Fix-PR. Bis zur nÃ¤chsten Session sollen **alle dafÃ¼r nÃ¶tigen Informationen gesammelt und hier gespeichert** werden, damit eine andere Session das Issue ausarbeiten kann. **Status der Issue-ErÃ¶ffnung: NOCH NICHT Ã¶ffnen** â erst nach Logcat-Befund (Prio 1). Diese Sektion ist die Checkliste fÃ¼r die Vorbereitung.
+
+#### Was bereits verifiziert/recherchiert ist (Stand 14.08.2026)
+- **ARVIO-Repo:** `ProdigyV21/ARVIO` â Apache-2.0, 634 Stars, 98 Forks, sehr aktiv (18 Releases in 5 Monaten, letzte Commits 14.08.2026). Latest release `v1.9.983` (30.07.2026). `hasIssuesEnabled=true`, `hasDiscussionsEnabled=false` (â nur Issues, keine Discussions).
+- **Maintainer:** `ProdigyV21` (Hauptmaintainer). **`Himanth-reddy`** = hochaktiver Mitwirkender, dessen PRs fast tÃ¤glich gemerged werden (#563, #561, #560, #558, #553, #552). Er hat auch den mobilen Plugin-UI-Fix (#466/v1.9.983) beigesteuert.
+- **Externe PRs werden gemerged** (nicht nur closed) â ARVIO ist offen fÃ¼r saubere Contributions.
+- **Kein CONTRIBUTING.md, keine Issue-Templates, keine PR-Templates** im Repo (obwohl GSSoC-Teilnehmer Issues dafÃ¼r Ã¶ffneten: #444/#477/#482 â closed, Status unklar). **â keine formale Contribution-Policy, die uns blockiert.**
+- **"KIS" = vermutlich GSSoC** (GirlScript Summer of Code): ARVIO hat Label `gssoc:approved`; Teilnehmer wie `prince-pokharna`/`aayan-rashid` Ã¶ffnen viele `[Feature Request]`-Issues (oft oberflÃ¤chlich). Unser Issue ist tiefgreifender â qualitativ positiv herausstechend.
+- **README-Repo-Zweck** (verifiziert): explizit *"Issue investigation and technical discussion"* + *"Contribution review"* â die Devs **wollen** gut recherchierte technische Issues.
+- **README AI-Disclosure:** *"This application was developed with significant AI assistance. Contributions should still be reviewed, tested, and treated as normal source code changes."* â Devs haben selbst nichts gegen AI; erwarten aber qualitativ normales Code-Handling. **Unsere AI-Disclosure-Pflicht bleibt trotzdem bestehen.**
+- **Label-System** (fÃ¼r Issue): `bug`/`type:bug`, `area: android`, ggf. `Next Update`. Maintainer setzt Labels i.d.R. selbst.
+
+#### Vorbild-Issue fÃ¼r unseren Stil: ARVIO #537 (erfolgreich, schnell geschlossen)
+"Pastebin dependency causes ~14s timeout for users in Turkey" â Aufbau: konkrete Code-Referenz (`MediaRepository`/`STREAMING_COLLECTION_ADDON_URL`) + Root-Cause (Pastebin in TÃ¼rkei blockiert) + LÃ¶sungsalternativen ("Would it be possible to replace with a project-controlled endpoint / GitHub raw / GitHub Pages?") + Angebot weiterer Beweise (network capture). **Genau dieser Stil ist bei ARVIO erfolgreich.**
+
+#### Bekannte ARVIO-Issues mit identischem Symptom (Verweis im Issue nÃ¶tig)
+- **#459** "Nuvio JS scraper repository installs but returns no sources" (closed, ohne Ã¶ffentliche LÃ¶sung) â hatten Reproduktion, aber **kein Logcat** â vermutlich deshalb sang- und klanglos geschlossen. **Genau diese Falle dÃ¼rfen wir nicht tappen.**
+- **#273** "I'm able to add nuvio plugin but not showing any video links" (closed; Dev @Himanth-reddy: "it should be working").
+- **#500** "unable to install the plugin" (open).
+- **#491** "plugins & extensions section shows addons not plugins" (closed â "next update").
+
+#### Voraussetzungen, damit das Issue gehÃ¶rt wird (Checkliste â vor Ãffnen abhaken)
+- [ ] **Logcat-Beweis** (Prio 1, entscheidend). Ohne Logcat lÃ¤uft das Issue Gefahr, wie #459 geschlossen zu werden. Logcat-Filter: `ExtExt|ExternalExtension|PluginManager|Filmpalast|No API loaded|MISSING CLASS|CloudstreamPlugin|linkage error`.
+- [ ] Genaue ARVIO-Version (1.9.983?) + sideload bestÃ¤tigt.
+- [ ] GerÃ¤t-Modell + Android-Version.
+- [ ] Reproduzierbare Schritte (Repo-URL installieren â Filmpalast suchen, z.B. Matrix â 0 Quellen).
+- [ ] Beweis "ARVIO-seitig": GermanProviders (Bnyro, woanders funktionierend) liefert auf dem GerÃ¤t ebenfalls 0 Quellen.
+- [ ] Root-Cause-Vermutung mit Code-Verweis (z.B. `hasStreamingAddons` zÃ¤hlt nur Stremio-Addons; `StreamRepository.getStreamAddons` filtert `runtimeKind != STREMIO`).
+- [ ] LÃ¶sungsvorschlag ("Would it be possible to...").
+- [ ] AI-Disclosure: "created by an AI agent (OpenHands) on behalf of [user]".
+
+#### Issue-Struktur-Vorschlag (nach Vorbild #537)
+1. **Environment:** ARVIO v1.9.983 sideload, GerÃ¤t, Android-Version.
+2. **Summary:** `.cs3`-Plugins installieren, erscheinen aktiviert in der Liste, liefern aber 0 Quellen; Stremio-Addons funktionieren (anderer Code-Pfad).
+3. **Steps to reproduce:** Repo installieren (unsere + GermanProviders) â Suche Matrix/Silo â 0 Quellen.
+4. **Expected vs. Actual:** Cloudstream3-Scraper sollten Streams liefern wie in Cloudstream3-App/NuvioTV.
+5. **Root cause (vermutet):** je nach Logcat-Befund â (a) Scraper wird gar nicht instanziiert (`No API loaded`/`linkage error`) ODER (b) LogiklÃ¼cke `hasStreamingAddons` ignoriert EXTERNAL_DEX-Scraper (verifiziert: `getStreamAddons` filtert `runtimeKind != STREMIO`; `DetailsViewModel` berechnet `hasStreamingAddons` nur aus Stremio-Addons).
+6. **Proposed fix:** je nach Befund â (a) Logcat-Einbettung/Loader-Diagnose ODER (b) `getStreamAddons`/`hasStreamingAddons` sollten EXTERNAL_DEX-Scraper zÃ¤hlen.
+7. **References:** #459, #273, #500.
+8. **Logcat-Auszug** (gekÃ¼rzt).
+9. **AI-Disclosure.**
+
+#### Ablauf: Fork + eigener Fix-PR (professionellster Weg)
+Der professionellste Weg (so machen es `Himanth-reddy`/GSSoC-Teilnehmer, deren PRs gemerged werden):
+1. **Phase 1 â Beweise sichern:** Logcat via Laptop+USB+adb (siehe Prio 1).
+2. **Phase 2 â Issue erÃ¶ffnen:** EIN fokussiertes Issue, Stil wie #537, mit Logcat-Beweis + Root-Cause + LÃ¶sungsvorschlag. **Nicht vor Phase 1 Ã¶ffnen.**
+3. **Phase 3 â Fork & PR (optional, aber wirkungsvoll):** `ProdigyV21/ARVIO` forken, lokal bauen (README "Build And Run": JDK 17+, Android SDK 35), Fix testen, PR gegen Original. Issue+PR = hÃ¶chste Erfolgsquote, weil der Maintainer etwas Greifbares zum Mergen hat.
+   - **Realistische Fix-Kandidaten je Logcat-Befund:**
+     - (a) `hasStreamingAddons`-LogiklÃ¼cke (irrefÃ¼hrende "kein Addon"-Meldung): in `DetailsViewModel`/`StreamRepository.getStreamAddons` auch EXTERNAL_DEX-Scraper zÃ¤hlen â **kleiner, sauberer PR, gut mergebar.**
+     - (b) Scraper wird gar nicht geladen (`No API loaded`/`linkage error`): tiefer in `ExternalExtensionLoader.loadExtension` â komplizierter, ARVIO-intern. Da eher **Issue ohne PR**, weil der Fix tief in der Engine liegt.
+
+#### Was in dieser/nÃ¤chster Session zu sammeln/speichern ist
+- Logcat-Auszug (gekÃ¼rzt, anonymisiert) â hier als Code-Block oder verlinkt ablegen.
+- BestÃ¤tigte ARVIO-Version + sideload + GerÃ¤t/Android.
+- Falls Fork gebaut: Branch-Name, gefixte Dateien, Test-Ergebnis.
+- Issue-URL nach ErÃ¶ffnung.
+- PR-URL nach ErÃ¶ffnung.
+
 ### Plugin-Versionen dieser Session (alle auf `builds`, status=1)
 - **v2** (Hash 647c...): DebugServer 127.0.0.1:8420 + Datei-Trace.
 - **v3**: DebugServer auf 127.0.0.1 gebunden (statt Wildcard).
