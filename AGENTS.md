@@ -104,16 +104,33 @@ Jetzt wo logcat via WLAN-ADB zuverlaessig verfuegbar ist, ist die ganze Diagnose
 - **FilmpalastPlugin.load()**: nur registerMainAPI + registerExtractorAPI + ein Log.d. Keine Diagnose-Threads mehr -> kein asynchroner Crash-Pfad.
 - **FilmpalastProvider**: debugLoadResponse()/emitTraceAsSources() (Fake-Quellen) entfernt; pluginVersion-Feld entfernt; load() gibt bei Fehler null zurueck (ARVIO handled null); loadLinks() emittiert keine Fake-Debug-Quellen mehr. echtes Tracing geht nur noch ins logcat.
 - Version auf 10 gebumpt. CI gruen. builds-Branch: FilmPalast.cs3 v10 (33368 Bytes, status=1).
+**ABER v10 crashte ARVIO auch** (siehe ERKENNTNIS #4) - weil nicht die Diagnose das Problem war, sondern ARVIOs Classloader die KERN-kotlin-stdlib fehlt.
 
-### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #3 / v10)
-**Prio 1 - v10 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
-1. v10 ist gebaut (builds-Branch, FilmPalast.cs3 v10, 33368 Bytes, status=1).
-2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v10.
+### ENTSCHEIDENDE ERKENNTNIS #4 (14.08.2026, v10-TV-Test): kotlin.collections.SetsKt fehlt -> ARVIO hat praktisch die GESAMTE kotlin-stdlib geschrumpft
+v10 (ohne Diagnose-Code) crashte ARVIO immer noch beim Quellen-Suchen:
+```
+W ExtExtensionLoader: plugin.load() MISSING CLASS: Failed (0 APIs so far)
+W ExtExtensionLoader: java.lang.NoClassDefFoundError: Failed resolution of: Lkotlin/collections/SetsKt;
+W ExtExtensionLoader: Caused by: java.lang.ClassNotFoundException: kotlin.collections.SetsKt
+```
+`kotlin.collections.SetsKt` ist die fundamentalste kotlin-stdlib-Klasse (setOf, listOf etc.). DAS BEWEIST: ARVIOs R8-Shrinking hat praktisch die GESAMTE kotlin-stdlib aus dem Parent-Classloader entfernt, die ARVIO selbst nicht direkt nutzt. Stueckweises Patchen (Whack-a-Mole: FilesKt -> EnumEntriesKt -> Channels -> SetsKt -> ...) ist UNMOEGLICH, weil jeder Kotlin-Code zwangslaeufig kotlin.collections nutzt.
+**Architektur-Problem:** Das cloudstream3-Plugin-Modell geht davon aus, dass die Host-App die volle kotlin-stdlib bereitstellt (die echte Cloudstream3-App tut das; ARVIO tut es NICHT wegen R8). Der cloudstream3-Gradle-Plugin kompiliert nur die Plugin-eigenen Klassen in die .cs3-DEX (compileDex.input = compileDebugKotlin.destinationDirectory) - die stdlib wird von der Host-App erwartet. GermanProviders (identische Build-Config) wuerde auf ARVIO dasselbe Problem haben (erklaert die urspruengliche "0 Quellen"-Beobachtung).
+
+### FIX #4 (14.08.2026, v11): kotlin-stdlib IN die .cs3-DEX bündeln
+Statt auf den Parent-Classloader zu vertrauen, wird die kotlin-stdlib (+ kotlinx-coroutines) direkt in die .cs3-DEX kompiliert. Der DexClassLoader findet die stdlib-Klassen dann in der Plugin-eigenen DEX, unabhaengig vom Parent.
+- **build.gradle.kts (root):** neue `bundleStdlib`-Configuration (kotlin-stdlib:2.3.0 + kotlinx-coroutines-core:1.10.1). `extractStdlibForDex`-Task (doLast, java.util.zip.ZipFile) entpackt die kotlin/** + kotlinx/** + .kotlin_module-Entries aus den JARs in ein Build-Verzeichnis. `compileDex`-Task (CompileDexTask) bekommt dieses Verzeichnis als zusaetzliches `input` -> die stdlib-Klassen werden mit in die classes.dex kompiliert.
+- CI-Iterationen noetig wegen Kotlin-Gradle-DSL-Typ-Inferenz-Problemen bei register/named -> finale Loesung: `tasks.create` + `doLast` + raw ZipFile (keine Gradle-Copy/Sync-DSL-Typ-Probleme).
+- Version auf 11 gebumpt. CI gruen. builds-Branch: FilmPalast.cs3 v11 (1.269.376 Bytes = ~1,27 MB statt 33 KB -> stdlib ist drin). status=1.
+
+### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #4 / v11)
+**Prio 1 - v11 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
+1. v11 ist gebaut (builds-Branch, FilmPalast.cs3 v11, 1.269.376 Bytes = ~1,27 MB [kotlin-stdlib gebuendelt], status=1).
+2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v11 (groesserer Download wegen stdlib, ~1,3 MB).
 3. `adb logcat -c`, Scraper einschalten, Matrix-Quellensuche ausloesen, 15 s warten.
 4. `adb logcat -d | grep -iE "Filmpalast|ExtExtension|PluginManager|No API|MISSING|load|loadLinks|Tmdb|result|ArvioAddon|FATAL"` -> pruefen:
-   - **KEIN Crash mehr** (kein "FATAL EXCEPTION", kein Discord-Bericht-Dialog). plugin.load() sollte durchlaufen ("API loaded" / kein "MISSING CLASS").
-   - Falls ein ANDERER NoClassDefFoundError auftaucht (andere kotlin-stdlib-Klasse, z.B. in FilmpalastProvider via coroutines/jsoup): notieren - dann muessen wir Provider-Code auf stdlib-Abhaengigkeiten pruefen. (Wahrscheinlich nicht, da Provider nur cloudstream3-APIs + jsoup + jackson nutzt, die ARVIO shipt.)
-   - Falls load() laeuft aber "0 links collected" / keine Quellen: Jsoup-Selektoren/Hoster-Extraktion debuggen (naechste Ebene). DebugLog.t/w/e geht jetzt ins logcat (Tag "ArvioAddon[Filmpalast]") -> dort detaillierter Trace.
+   - **KEIN Crash, KEIN "MISSING CLASS"** (plugin.load() durchlaufen - stdlib jetzt in der DEX). "API loaded" / "Executing DEX scraper: FilmPalast" sichtbar.
+   - Falls ein ANDERER NoClassDefFoundError auftaucht (andere Library, z.B. jsoup/jackson/nicehttp die ARVIO auch geshrumpft hat): notieren - dann muessen wir auch jsoup/jackson in die .cs3 bündeln (gleicher extractStdlib-Ansatz).
+   - Falls load() laeuft aber "0 links collected" / keine Quellen: Jsoup-Selektoren/Hoster-Extraktion debuggen (naechste Ebene). DebugLog.t/w/e geht ins logcat (Tag "ArvioAddon[Filmpalast]") -> dort detaillierter Trace.
    - WICHTIG: ARVIO zeigt "kein Add-on eingerichtet" solange KEIN Stremio-Addon aktiv ist (hasStreamingAddons zaehlt nur Stremio). Workaround: WebStreamr/Stremio-Addon aktiv lassen. Meldung ist irrefuehrend, Scraper laufen trotzdem.
 
 **Prio 2 - GitHub-Issue bei ARVIO (zwei klare Bugs):**
