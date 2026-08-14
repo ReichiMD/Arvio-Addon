@@ -135,16 +135,31 @@ v11-Test (arvio-tv-log4.txt) zeigt GROSSEN Fortschritt:
 - Version auf 12 gebumpt. CI gruen. builds-Branch: FilmPalast.cs3 v12 (1269371 Bytes, status=1).
 - **Erwartung v12-Test:** plugin.load() durchlaufen OHNE NoSuchMethodError (MainPageData ist retained). "API loaded" / "Executing DEX scraper: FilmPalast" sichtbar. Falls eine ANDERE cloudstream3-Methode geshrumpft ist (z.B. newMovieLoadResponse/newTvSeriesLoadResponse/loadExtractor), wird der naechste NoSuchMethodError/NoClassDef auftauchen -> dann jeweilige Methode durch retained-Alternative ersetzen.
 
-### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #5 / v12)
-**Prio 1 - v12 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
-1. v12 ist gebaut (builds-Branch, FilmPalast.cs3 v12, 1269371 Bytes, status=1).
-2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v12.
+### ENTSCHEIDENDE ERKENNTNIS #6 (14.08.2026, v12-TV-Test): mainPageOf weg, aber MainPageData-ctor von R8 geschrumpft
+v12-Test (arvio-tv-log5.txt): `mainPageOf`-Fehler WEG, aber neue Huerde:
+```
+NoSuchMethodError: No direct method <init>(Ljava/lang/String;Ljava/lang/String;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+in class com.lagradost.cloudstream3.MainPageData
+at FilmpalastProvider.<init>(FilmpalastProvider.kt:62)
+```
+R8 hat den **synthetischen Default-Argument-Konstruktor** von `MainPageData` entfernt. Unser `MainPageData(name=..., data=...)` nutzt Default-Args -> Kotlin generiert den synthetischen `(String,String,boolean,int,DefaultConstructorMarker)`-ctor, den R8 geschrumpft hat. MainPageData ist zwar retained, aber nur der explizite 2-Parameter-ctor wuerde funktionieren (Default-Args sind weg).
+**Wichtige Erkenntnis:** `mainPage`/`hasMainPage`/`getMainPage` werden **NUR von der Cloudstream3-App-Startseite** genutzt. ARVIOs Scraper-Pfad (`executeTmdbProvider`) ruft nur `load()` + `loadLinks()` auf — `getMainPage()` wird **nie** aufgerufen. Also ist das alles **toter Code fuer ARVIO**, der nur R8-Strip-Fehlerpunkte schafft.
+
+### FIX #6 (14.08.2026, v13): mainPage/getMainPage komplett entfernt
+`hasMainPage`, `mainPage`, `getMainPage()` **komplett geloescht** — keine MainPageData-Konstruktion mehr. Provider ueberschreibt jetzt nur noch, was ARVIO wirklich aufruft: `search()`, `load()`, `loadLinks()`. Das minimiert die R8-geshrinkte cloudstream3-API-Oberflaeche auf das, was ARVIO selbst nutzt.
+- Version auf 13 gebumpt. CI gruen. builds-Branch: FilmPalast.cs3 v13 (1268533 Bytes, status=1).
+- **Erwartung v13-Test:** plugin.load() durchlaufen OHNE NoSuchMethodError (keine MainPageData mehr). "API loaded" / "Executing DEX scraper: FilmPalast" -> load() laeuft. Falls naechster R8-Strip (z.B. newMovieLoadResponse/newTvSeriesLoadResponse/loadExtractor): jeweilige Methode notieren -> retained-Alternative oder direkten Konstruktor verwenden.
+
+### NEUE NÄCHSTE SCHRITTE (Stand 14.08.2026, nach Fix #6 / v13)
+**Prio 1 - v13 am TV testen (direktes Add Repository, nicht Cloud-Sync):**
+1. v13 ist gebaut (builds-Branch, FilmPalast.cs3 v13, 1268533 Bytes, status=1).
+2. Am TV (TCL C7K, WLAN-ADB verbunden): in ARVIO Repo LOESCHEN + neu hinzufuegen (direkt am TV, NICHT Cloud-Sync - sonst kein Download!). ARVIO zieht v13.
 3. `adb logcat -c`, Scraper einschalten, Matrix-Quellensuche ausloesen, 15 s warten.
 4. `adb logcat -d | grep -iE "Filmpalast|ExtExtension|PluginManager|No API|MISSING|NoSuchMethod|loadLinks|Tmdb|result|ArvioAddon|FATAL"` -> pruefen:
-   - **KEIN NoSuchMethodError/MISSING CLASS** mehr bei `<init>`. "API loaded" / Provider instanziiert. Falls ein ANDERER NoSuchMethodError/NoClassDef auftaucht (andere cloudstream3-Methode oder jsoup/jackson/nicehttp): genaue Methode/Klasse notieren -> retained-Alternative bauen ODER jeweilige Lib in .cs3 buendeln (gleicher extractStdlib-Ansatz).
+   - **KEIN NoSuchMethodError/MISSING CLASS** mehr bei `<init>`. "API loaded" / Provider instanziiert. Falls ein ANDERER NoSuchMethodError/NoClassDef auftaucht (andere cloudstream3-Methode: newMovieLoadResponse/newTvSeriesLoadResponse/loadExtractor/fixUrl etc.): genaue Methode/Klasse notieren -> retained-Alternative bauen ODER direkten Konstruktor ohne Default-Args verwenden.
    - Falls load() laeuft aber "0 links collected" / keine Quellen: Jsoup-Selektoren/Hoster-Extraktion debuggen (naechste Ebene). DebugLog.t/w/e geht ins logcat (Tag "ArvioAddon[Filmpalast]") -> dort detaillierter Trace.
    - WICHTIG: ARVIO zeigt "kein Add-on eingerichtet" solange KEIN Stremio-Addon aktiv ist (hasStreamingAddons zaehlt nur Stremio). Workaround: WebStreamr/Stremio-Addon aktiv lassen. Meldung ist irrefuehrend, Scraper laufen trotzdem.
-   - webstreamr-Timeout (im v11-Log gesehen) ist ein serverseitiges Netzwerkproblem (baby-beamup.club antwortet nicht) - unabhaengig von uns. Wenn webstreamr weiterhin timeoutet, ist der webstreamr-Server down/langsam.
+   - webstreamr-Timeout (in frueheren Logs) ist serverseitiges Netzwerkproblem (baby-beamup.club antwortet nicht) - unabhaengig von uns.
 
 **Prio 2 - GitHub-Issue bei ARVIO (zwei klare Bugs):**
 1. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (CloudSyncRepository.applyCloudPayload macht nur saveScrapers ohne downloadDexExtensions). Wer Plugins via Cloud-Sync auf ein neues Geraet uebernimmt, hat leere Scraper ("DEX file not found"). Skizze: ".cs3/Cloudstream3 plugins restored via Cloud Sync show in list but return no sources: saveScrapers() stores metadata but never downloads the .cs3 (no downloadDexExtensions call) - cs_extensions/ stays empty". Verweis auf #459/#273.
