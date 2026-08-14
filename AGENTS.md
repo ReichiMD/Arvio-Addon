@@ -839,3 +839,36 @@ Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trac
 - **Erkenntnis #7 (14.08.2026, v13-DEX+APK-Analyse):** **Root-Cause gefunden.** ARVIOs R8 hat `kotlin.coroutines.Continuation` zu `j7.d` obfuscated. Unsere suspend-Override-Methoden (load/loadLinks/search) haben `Lkotlin/coroutines/Continuation;` in der Signatur, ARVIOs Parent hat `Lj7/d;` → JVM findet Override nicht → parent laeuft → `ErrorLoadingException: No id found` → 0 Quellen. **Betrifft ALLE externen .cs3-Plugins.** Geplanter Fix #7: gegen ARVIOs obfuscated cloudstream3-JAR kompilieren (dex2jar aus APK extrahieren). Siehe "ENTSCHEIDENDE ERKENNTNIS #7" oben.
 - **v14 (14.08.2026, Commit 829c057):** **Post-Build DEX-Patching fuer R8-obfuszierte Typen (Fix #7).** Ansatz 1 (gegen obfuszierte dex2jar-JAR kompilieren) wurde verwendet; Override-Signaturen korrekt obfusziert (load=(Ljava/lang/String;Lj7/d;)...). v14 live auf builds (1.268.540 bytes).
 - **Erkenntnis #8 + v15 (14.08.2026):** v14-TV-Test (arvio-tv-log-v14.txt) zeigte: DEX ist KAPUTT — ART-Verifier lehnt ab ("Failure to verify dex file: Non-zero padding b before section of type 8196 at offset 0x3111d2"). Root-Cause: dex2jar-Klassen (j7/d, j7/j, x7/l) wurden mit in die DEX gebuendelt und korrumpten deren Struktur. **Fix #8 (v15):** zurueck zum unobfuszierten Stub (keine dex2jar-Klassen -> valide DEX) + Post-Build-DEX-Patching (4 Typ-Strings). DexClassLoader parent-first-Delegation loest j7/d auf ARVIOs eigene Klasse -> Override-Deskriptoren matchen -> Dispatch bindet. CI baut v15 beim Push auf main. **Test auf TCL C7K TV ausstehend** (Windows 10 Anleitung: `docs/windows-10-test-guide.md`, Log-Datei `arvio-tv-log-v15.txt`).
+
+
+### ALTERNATIVER WEG: Nuvio-JS-Scraper (Recherche 14.08.2026) - umgeht R8-Problem komplett
+ARVIO hat ZWEI Plugin-Engines (verifiziert in `PluginRuntime.kt` @ v1.9.983):
+1. **.cs3/DEX** (unser Weg): DexClassLoader + cloudstream3-`MainAPI`. Ruft `load()`/`loadLinks()` (suspend) auf. **Betroffen vom R8-Obfuscation-Bug (Erkenntnis #7): Continuation->j7.d => Override bindet nicht => Parent laeuft => 0 Quellen. Betrifft ALLE externen .cs3-Plugins.** v14 DEX-Patching ist Workaround, aber Test ausstehend.
+2. **Nuvio-JS** (Alternative): QuickJS (`com.dokar.quickjs`). Ruft `getStreams(tmdbId, mediaType, season, episode)` auf. **KEIN R8-Problem** (JS wird interpretiert, keine Kotlin-Signaturen). **Bestaetigt lauffaehig in ARVIO.**
+
+**Beweis dass Nuvio-JS in ARVIO funktioniert:** GitHub Issue #459 (ProdigyV21/ARVIO) bestätigt ausdrücklich: das Nuvio-JS-Repo `saimuelbr/saimuel-nuvio-repo` (portugiesische Scraper FSHD/MegaEmbed/Peachify/RedeFlix, obfusziertes JS) **liefert in ARVIO tatsächlich Streams** ("This raw Nuvio JS repository works in ARVIO"). Dasselbe Issue zeigt aber: komplexe Scraper (`patr0nq/nuvioaddons`) funktionieren NICHT in ARVIO (zu viele fetch chains, Promise.all, große HTML-Responses).
+
+**JS-Runtime-Interface (verifiziert in `PluginRuntime.kt`):**
+- Plugin exportiert `getStreams(tmdbId, type, season, episode)` → returnt Array von `{url, quality, headers, name, title, group, provider}`.
+- ARVIO stellt im JS-Global bereit: `__native_fetch(url, method, headers, body)` (OkHttp-Bridge), `__cheerio_load/select/find/text/html/attr/next/prev` (Jsoup-Wrapper), `console.log/error`, CryptoJS, `fetch` (wrapped).
+- Manifest-Format: root `manifest.json` mit `scrapers: [{id, name, filename, supportedTypes:["movie","tv"], formats:["m3u8"], enabled:true}]`. NICHT das cloudstream3 `repo.json`/`plugins.json`-Format.
+- Kein Build noetig - .js-Dateien direkt auf GitHub raw gehostet.
+
+**Einschraenkungen der JS-Runtime (Issue #459):**
+- Response-Limit **256 KiB** (NuvioTV: 1 MiB) - große HTML-Seiten koennen abgeschnitten werden.
+- `__native_fetch` via async-OkHttp-Bridge (nicht synchron wie NuvioTV).
+- Kein IPv4-first DNS (vs NuvioTV).
+- Komplexe Multi-Fetch-Provider (patr0nq) laufen nicht; einfache (saimuelbr) schon.
+
+**Gefundene Referenz-Repos (Recherche 14.08.2026):**
+- `saimuelbr/saimuel-nuvio-repo`: **bestätigt lauffähig in ARVIO** (Issue #459). Interface-Vorbild für `getStreams()`. Portugiesisch.
+- `odoreeci/ARVIO-scrapers`: JS- + .kt-Templates für Multi-Embed (vidking, 1embed, 2embed, vidlink, vidsrc, embed.su). README dokumentiert beide Wege. Nutzt **TMDB-ID-basierte Embed-Services**: `https://vidking.net/embed/movie/{tmdbId}` bzw. `/embed/tv/{tmdbId}/{season}/{episode}` → HTML parsen → m3u8/mp4. **Einfachster Weg zu Quellen** (kein Title-Matching, kein Scraper-Seiten-Scraping). Das `.kt`-Template (`MultiEmbedPlugin.kt`) nutzt dieselbe suspend-Override-Signatur wie wir → wuerde am selben R8-Bug scheitern; der JS-Weg ist der lauffähige.
+- `patr0nq/nuvioaddons`: funktioniert NICHT in ARVIO (zu komplex für 256KiB-Limit).
+- `perfecplay/Brosvod-Nuvio-Arvio`: InatBox native JS-Test (Türkisch).
+- `Real-Morpheus/arvio-android-tv`: alte vereinfachte ARVIO-Version, lädt nur Repo-Manifeste, kein DexClassLoader. Irrelevant.
+
+**Implikation für unsere Architektur (Entscheidung ausstehend):**
+- **Stalker-VOD (Modul 2)** braucht .cs3/DEX (Config-Seite, eigene Kataloge - das kann JS nicht: `getStreams` ist das EINZIGE was JS-Plugins tun). => Weiter v15-Weg.
+- **Web-Scraper (Modul 1)** könnte auf Nuvio-JS umgestellt werden → würde **sofort funktionieren** (saimuelbr beweist es), kein R8-Risiko, keine stdlib-Bündelung. Filmpalast-Scraper von Kotlin nach JS portieren. Risiko: 256KiB-Limit bei Filmpalast-HTML.
+- **Empfohlener Hybrid-Ansatz:** Modul 1 (Web-Scraper) als Nuvio-JS → lauffähige Quellen JETZT. Modul 2 (Stalker-VOD) bleibt .cs3/DEX. So hat der Nutzer schnell funktionierende Quellen, unabhaengig vom v14-Testergebnis.
+- **Schnellster Quellen-Weg (ohne eigene Scraper-Seite):** TMDB-ID-basierte Embed-Services (vidsrc.me, vidlink.org, 2embed.cc) wie `odoreeci` - bauen Embed-URL aus TMDB-ID, ziehen m3u8 aus Player-HTML. Laufen am ehesten im 256KiB-Limit. Nicht deutschspezifisch, aber robust.
