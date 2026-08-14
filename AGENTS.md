@@ -220,26 +220,61 @@ Da `loadFromTmdb(Int): LoadResponse?` eine nicht-suspend-Methode ist (kein Conti
 
 **Was als naechstes passiert: NUTZER TESTET v14 AM TCL C7K TV (Windows 10 Laptop + WLAN-ADB)**
 
+### ENTSCHEIDENDE ERKENNTNIS #8 (14.08.2026, v14-TV-Test, arvio-tv-log-v14.txt): v14 DEX ist KAPUTT — ART-Verifizierung schlaegt fehl
+
+v14 wurde heruntergeladen (1.268.540 Bytes), ABER ARVIOs ART-DEX-Verifier lehnt die DEX-Datei ab — sie ist strukturell beschaedigt. Das Plugin wird NIE geladen:
+```
+D ExtExtensionLoader: Downloaded extension ...:FilmPalast: 1268540 bytes -> .../cs_extensions/..._FilmPalast.cs3
+W com.arvio.tv: Failure to verify dex file '...FilmPalast.cs3': Non-zero padding b before section of type 8196 at offset 0x3111d2
+E ExtExtensionLoader: Failed to load manifest class com.reichi.arflioaddon.filmpalast.FilmpalastPlugin: Didn't find class "...FilmpalastPlugin"
+E ExtExtensionLoader: java.lang.ClassNotFoundException: Didn't find class "...FilmpalastPlugin"
+E ExtExtensionLoader: No @CloudstreamPlugin class found in ...:FilmPalast
+E ExtExtensionRunner: No API loaded for scraper: ...:FilmPalast
+D PluginManager: DEX scraper FilmPalast returned 0 results
+```
+`8196 = 0x2004` (ENCODED_ARRAY_ITEM); `0x3111d2` liegt in der string_data-Region (String-Index 23018 = "zip$default", Byte 0x0b = ULEB128-Laenge 11). ART erwartet an einer Sektionsgrenze Null-Padding, findet aber String-Daten.
+
+**Root-Cause (verifiziert per DEX-Analyse der builds-FilmPalast.cs3):** Der v14-Build kompilierte gegen die dex2jar-extrahierte obfuszierte ARVIO-JAR (`libs/arvio-cloudstream3-v1.9.983.jar` via `cloudstream(files(arvioJar))`). Dadurch bekamen die Override-Signaturen korrekt obfuszierte Typen (`load(Ljava/lang/String;Lj7/d;)` etc. — verifiziert mit androguard, korrekt!). ABER dex2jars unvollstaendige Decompilierung der obfuszierten Interface-Klassen (`j7/d` = Continuation, `j7/j` = CoroutineContext, `x7/l` = Function1) wurde mit in die .cs3-DEX gebuendelt (3 class_defs: j7/d, j7/j, x7/l). Diese dex2jar-Klassen mit fehlerhaftem Bytecode/Gefuege korrumpten die DEX-Struktur (Sektionsgrenzen landeten mitten in string_data) -> ART-Verifier lehnt ab.
+- Das DEX-Patch-Skript (Ansatz 2) war ein **No-Op** in v14 (0 Strings gepatched): die Signaturen waren bereits obfusziert (von der JAR), das Skript fand keine unobfuszierten Strings mehr. Der Patch hat also NICHT die Korrumpierung verursacht — die dex2jar-Klassen haben es.
+- ARVIOs EIGENE DEX (im APK) hat die identische map_list-Struktur und laedt einwandfrei -> die map_list ist NICHT das Problem; die Korrumpierung ist in unserem DEX-Body durch die dex2jar-Klassen.
+
+**Warum v13 lud, v14 aber nicht:** v11-v13 kompilierten gegen den UNOBFUSZIERTEN Stub (`cloudstream3:pre-release`) -> keine dex2jar-Klassen -> valide DEX (aber Dispatch broken, da Signaturen unobfusziert). v14 wechselte auf die dex2jar-JAR -> korrekte Signaturen, ABER korrumpierte DEX. Beide Probleme (Dispatch + DEX-Gueltigkeit) wurden nie gleichzeitig geloest.
+
+### FIX #8 (14.08.2026, v15): Zurueck zum unobfuszierten Stub + Post-Build-DEX-Patching (ohne dex2jar)
+
+Die Loesung kombiniert v13s valide DEX-Struktur mit dem DEX-Patch-Ansatz (Ansatz 2), OHNE dex2jar:
+- **build.gradle.kts:** Kompiliert wieder gegen den unobfuszierten Stub (`cloudstream("com.lagradost:cloudstream3:pre-release")`). Die dex2jar-JAR wird NICHT mehr verwendet -> keine dex2jar-Klassen in der DEX -> keine Korrumpierung. Die `libs/arvio-cloudstream3-*.jar` + der ganze dex2jar-Extraktionsschritt entfallen.
+- **stdlib bleibt gebuendelt** (v11-Fix, unveraendert): kotlin-stdlib + kotlinx-coroutines werden in die .cs3-DEX kompiliert (ARVIOs Classloader hat sie geshrinkt). Die 4 suspend/coroutine-Typen (Continuation, CoroutineContext, Function, Function1) werden UNOBFUSZIERT gebuendelt.
+- **Post-Build-DEX-Patch** (`scripts/patch_dex_obfuscation.py`, als `doLast` auf `make`): ersetzt die 4 Strings `Lkotlin/coroutines/Continuation;`->`Lj7/d;`, `Lkotlin/coroutines/CoroutineContext;`->`Lj7/j;`, `Lkotlin/jvm/functions/Function1;`->`Lx7/l;`, `Lkotlin/jvm/functions/Function;`->`Ld7/o;` in der DEX-String-Tabelle (Padding-Trick, keine Offset-Verschiebung, SHA-1+Adler32 neu). Das Skript ist KEIN No-Op mehr (der Stub erzeugt unobfuszierte Strings).
+- **Dispatch-Logik (warum das klappt):** DexClassLoader nutzt parent-first-Delegation. Wir buendeln kotlin.coroutines.Continuation, patchen seinen Type-Descriptor-String zu `Lj7/d;` -> unsere DEX DEFINIERT eine (tote) Klasse j7/d. Aber bei Laufzeit loest jede `j7/d`-Referenz parent-first auf -> ARVIOs eigene j7/d (Continuation). Unsere tote j7/d wird nie geladen (kein Konflikt, keine Verify-Probleme da lazy-verify). Die Override-Methoden-Deskriptoren nutzen nun `Lj7/d;` -> beim Virtual Dispatch matcht ARVIOs MainAPI.load(String, j7/d) unseren Override (gleicher Klassen-Name, gleicher Classloader-Parent-Pfad) -> Dispatch bindet an UNSREN Override statt an den Parent.
+- **CI (`build.yml`):** dex2jar-Extraktionsschritt entfernt (schneller, keine externen Downloads, kein Failure-Point). Python bleibt (fuer das Patch-Skript).
+- **patch_dex_obfuscation.py:** `__main__` exitet bei 0 gepatchten Strings nicht mehr mit Code 1 (nur Warnung) -> kein Build-Bruch falls DEX bereits obfusziert.
+- Version auf 15 gebumpt. CI baut beim Push auf main automatisch die neue FilmPalast.cs3 und pusht auf builds.
+
+**Erwartung v15-Test:** Plugin laedt (valide DEX, keine dex2jar-Klassen), Override-Signaturen obfusziert (j7/d) -> ARVIO ruft UNSERN load()/loadLinks() auf statt Parent. Naechster moeglicher Fehler: Scraper-Logik (Jsoup-Selektoren, Hoster-Extraktion) — dannEbene 2.
+
 ### NAECHSTE SCHRITTE (Stand 14.08.2026, fuer naechste Session)
 
-**Prio 1 - v14 am TV testen (mit WLAN-ADB + Logcat):**
+**Prio 1 - v15 am TV testen (mit WLAN-ADB + Logcat):**
 1. Nutzer folgt `docs/windows-10-test-guide.md` (Schritt-fuer-Schritt Windows 10 Anleitung).
 2. Auf TV: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1).
    - URL: `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`
 3. `adb logcat -c`, Scraper einschalten, Matrix suchen, 15s warten.
-4. `adb logcat -v time > arvio-tv-log-v14.txt`, dann Strg+C.
-5. Log filtern: `findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load" arvio-tv-log-v14.txt`
+4. `adb logcat -v time > arvio-tv-log-v15.txt`, dann Strg+C.
+5. Log filtern: `findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load verify dex" arvio-tv-log-v15.txt`
 6. **Was im Log zu suchen (entscheidend):**
-   - `Filmpalast` / `ArvioAddon` im Log -> **Scraper wird aufgerufen! DEX-Patch hat funktioniert.**
-   - `ArvioAddon-Debug` Quellen auf dem TV -> Scraser laeuft, Diagnose sichtbar.
+   - `Filmpalast` / `ArvioAddon` im Log -> **Scraper wird aufgerufen! DEX-Patch + Dispatch hat funktioniert.**
+   - `Failure to verify dex file` -> DEX immer noch kaputt (Patch-Skript-Problem).
    - `No API loaded` -> Klassen-Ladefehler (neue fehlende Klasse?).
-   - `ErrorLoadingException: No id found` -> Patch hat NICHT funktioniert, Parent wird noch aufgerufen.
+   - `ErrorLoadingException: No id found` -> Parent load() wird noch aufgerufen (Dispatch nicht gebunden).
+   - Filmpalast-Quellen in der Auswahl -> **Erfolg!**
    - Gar kein `Filmpalast`-Eintrag -> Scraper wird nicht aufgerufen (Enable/Routing/Download-Problem).
 7. **Log-Datei in naechster Session mitbringen.**
 
 **Prio 2 - Je nach Logcat-Befund:**
 - Falls `load()` aufgerufen wird aber 0 Quellen: Scraper-Code debuggen (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz). Naechste Ebene.
-- Falls `ErrorLoadingException: No id found` (Parent noch aktiv): DEX-Patch deeper analysieren. Moeglicherweise muessen weitere Typen gepatched werden oder der Bytecode-Dispatch funktioniert anders.
+- Falls `ErrorLoadingException: No id found` (Parent noch aktiv): Dispatch bindet nicht. Moeglich: parent-first-Delegation stimmt nicht, oder weitere Typen muessen gepatched werden, oder die tote j7/d-Klassendefinition stoert doch.
+- Falls `Failure to verify dex file`: Patch-Skript erzeugt invalide DEX (Padding-Logik pruefen).
 - Falls `No API loaded` mit neuer Klasse: Naechste R8-stripped Klasse finden und workaround.
 - Falls gar kein Aufruf: Download/Routing/Enable pruefen (Erkenntnis #1: Cloud-Sync laedt nicht herunter).
 
@@ -373,8 +408,9 @@ Der professionellste Weg (so machen es `Himanth-reddy`/GSSoC-Teilnehmer, deren P
 - **v11**: kotlin-stdlib IN .cs3-DEX gebuendelt (Fix #4: SetsKt fehlt -> ganze stdlib buendeln).
 - **v12**: mainPage als listOf(MainPageData) statt mainPageOf(Pair) (Fix #5: NoSuchMethodError).
 - **v13**: mainPage/getMainPage komplett entfernt (Fix #6: MainPageData-ctor geschrumpft).
-- **v14** (AKTUELL): Post-Build DEX-Patching fuer R8-obfuszierte Typen (Fix #7: Continuation->j7.d). v14 live auf builds (1.268.540 bytes).
-- Letzter Commit auf `main`: `1da4c1f` (v14, DEX-Patching). Builds-Version: 14.
+- **v14** (gescheitert): Kompiliert gegen dex2jar-obfuszierte ARVIO-JAR (Fix #7 Ansatz 1). Override-Signaturen korrekt obfusziert, ABER dex2jar-Klassen (j7/d, j7/j, x7/l) korrumpten die DEX -> ART-Verifier lehnt ab ("Non-zero padding... type 8196"). v14 live auf builds (1.268.540 bytes) aber **unbrauchbar** (Erkenntnis #8).
+- **v15** (AKTUELL): Zurueck zum unobfuszierten Stub + Post-Build-DEX-Patching ohne dex2jar (Fix #8). stdlib gebuendelt, 4 Typ-Strings post-build gepatched (Continuation->j7.d etc.). DexClassLoader parent-first-Delegation loest j7/d auf ARVIOs eigene Klasse -> Dispatch bindet an unseren Override. CI baut v15 beim Push.
+- Letzter Commit auf `main`: v15 (Fix #8, DEX-Patch ohne dex2jar). Builds-Version: 15.
 
 ### Was fertig ist (unverГғВӨndert gГғВјltig)
 Filmpalast-Plugin als Cloudstream3-`TmdbProvider` implementiert, gebaut, auf `builds`-Branch (`status=1`, `tvTypes=[Movie,TvSeries]`). CI grГғВјn. Nutzer hat v13 in ARVIO 1.9.983 (sideload) installiert; v14 steht auf builds-Branch bereit zum Test. Python-E2E-Simulation lГғВӨuft durch; filmpalast.to + TMDB per HTTP erreichbar. **Das Problem ist rein ARVIO-seitig beim Laden/AusfГғВјhren von `.cs3`-Plugins.**
@@ -801,4 +837,5 @@ Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trac
 - **v1.3 (13.08.2026, Commits bis ca9f81f):** Diagnose-Tooling massiv ausgebaut, aber **Kernerkenntnis: ARVIO ruft .cs3-Plugins auf dem Geraet GAR NICHT auf.** Beweise: (a) GermanProviders (bewaehrtes .cs3-Repo) liefert auf dem Geraet ebenfalls 0 Quellen, (b) unsere v6-v8 haetten bei JEDEM loadLinks-Aufruf ArvioAddon-Debug-Quellen emittieren muessen - erschienen nie, (c) GitHub-Issues #459/#273 berichten exakt dasselbe Symptom. Webstreamr (Stremio-Addon) funktioniert = anderer ARVIO-Code-Pfad. Versionen: v3 DebugServer auf 127.0.0.1; v4 File-Trace+PLUGIN_LOADED Marker; v5 MediaStore->public Download; v6 Diagnose als Pseudo-Quellen in ARVIO-Quellenauswahl; v7 load() gibt nie null zurueck (debugLoadResponse) damit loadLinks garantiert laeuft; v8 Per-Call-Netzwerk-Timeouts. ARVIO library (TmdbProvider/MainAPI/Plugin) verifiziert vorhanden in classes3/4.dex. ARVIO-Timeouts (120s/60s) schliessen Timeout als Ursache aus. **Naechster Schritt: mit Laptop weiter (Logcat via USB+adb); ggf. GitHub-Issue bei ARVIO.** Siehe "AKTUELLER STAND" ganz oben.
 - **v9-v13 (14.08.2026, Logcat-Aera):** Nach USB-ADB+Logcat am TV: Erkenntnis #1 (.cs3 nie heruntergeladen bei Cloud-Sync) → Erkenntnis #2 (kotlin/io/FilesKt von R8 geshrinkt) → FIX #2 (v9: kotlin-stdlib-IO entfernt) → Erkenntnis #3 (DebugServer-Thread-Crash) → FIX #3 (v10: DebugServer removed) → Erkenntnis #4 (kotlin.collections.SetsKt von R8 geshrinkt) → FIX #4 (v11: kotlin-stdlib in .cs3 gebundled) → Erkenntnis #5 (mainPageOf von R8 geshrinkt) → FIX #5 (v12: listOf(MainPageData)) → Erkenntnis #6 (MainPageData-ctor von R8 geshrumpft) → FIX #6 (v13: mainPage komplett entfernt). v13 laedt erstmals VOLLSTAENDIG (Provider+Extractoren registriert, "API loaded" bestätigt).
 - **Erkenntnis #7 (14.08.2026, v13-DEX+APK-Analyse):** **Root-Cause gefunden.** ARVIOs R8 hat `kotlin.coroutines.Continuation` zu `j7.d` obfuscated. Unsere suspend-Override-Methoden (load/loadLinks/search) haben `Lkotlin/coroutines/Continuation;` in der Signatur, ARVIOs Parent hat `Lj7/d;` → JVM findet Override nicht → parent laeuft → `ErrorLoadingException: No id found` → 0 Quellen. **Betrifft ALLE externen .cs3-Plugins.** Geplanter Fix #7: gegen ARVIOs obfuscated cloudstream3-JAR kompilieren (dex2jar aus APK extrahieren). Siehe "ENTSCHEIDENDE ERKENNTNIS #7" oben.
-- **v14 (14.08.2026, Commit 829c057):** **Post-Build DEX-Patching fuer R8-obfuszierte Typen (Fix #7).** Root-Cause war, dass ARVIOs R8 kotlin.coroutines.Continuation->j7.d und kotlin.jvm.functions.Function1->x7.l obfusziert hat, was zu Method-Signature-Mismatch fuehrte (unsere Overrides wurden nie aufgerufen, Parent load() lief stattdessen). Ansatz 1 (gegen obfuszierte JAR kompilieren) scheiterte, weil der Kotlin-Compiler immer kotlin.coroutines.Continuation generiert. Ansatz 2: `scripts/patch_dex_obfuscation.py` patcht die DEX-String-Tabelle post-build (mit Padding, keine Offset-Verschiebung). Verifizierte Signaturen: load=(Ljava/lang/String;Lj7/d;)Ljava/lang/Object; etc. CI extrahiert ARVIO-APK automatisch via dex2jar. v14 live auf builds (1.268.540 bytes). **Test auf TCL C7K TV ausstehend** (Windows 10 Anleitung: `docs/windows-10-test-guide.md`).
+- **v14 (14.08.2026, Commit 829c057):** **Post-Build DEX-Patching fuer R8-obfuszierte Typen (Fix #7).** Ansatz 1 (gegen obfuszierte dex2jar-JAR kompilieren) wurde verwendet; Override-Signaturen korrekt obfusziert (load=(Ljava/lang/String;Lj7/d;)...). v14 live auf builds (1.268.540 bytes).
+- **Erkenntnis #8 + v15 (14.08.2026):** v14-TV-Test (arvio-tv-log-v14.txt) zeigte: DEX ist KAPUTT — ART-Verifier lehnt ab ("Failure to verify dex file: Non-zero padding b before section of type 8196 at offset 0x3111d2"). Root-Cause: dex2jar-Klassen (j7/d, j7/j, x7/l) wurden mit in die DEX gebuendelt und korrumpten deren Struktur. **Fix #8 (v15):** zurueck zum unobfuszierten Stub (keine dex2jar-Klassen -> valide DEX) + Post-Build-DEX-Patching (4 Typ-Strings). DexClassLoader parent-first-Delegation loest j7/d auf ARVIOs eigene Klasse -> Override-Deskriptoren matchen -> Dispatch bindet. CI baut v15 beim Push auf main. **Test auf TCL C7K TV ausstehend** (Windows 10 Anleitung: `docs/windows-10-test-guide.md`, Log-Datei `arvio-tv-log-v15.txt`).

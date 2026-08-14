@@ -50,23 +50,6 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Extract ARVIO obfuscated cloudstream3 JAR
-        run: |
-          cd $GITHUB_WORKSPACE/src
-          mkdir -p libs
-          pip install androguard
-          # Download ARVIO sideload APK
-          curl -L -o /tmp/arvio.apk \
-            "https://github.com/ProdigyV21/ARVIO/releases/download/v1.9.983/ARVIO-v1.9.983-sideload-release.apk"
-          # Download dex2jar
-          curl -L -o /tmp/d2j.zip \
-            "https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip"
-          cd /tmp && unzip -o d2j.zip -d dex-tools
-          chmod +x /tmp/dex-tools/dex-tools-v2.4/d2j-dex2jar.sh
-          # Extract all DEX files from APK and convert to JARs
-          cd $GITHUB_WORKSPACE/src
-          python3 scripts/extract_arvio_jar.py /tmp/arvio.apk /tmp/dex-tools/dex-tools-v2.4/d2j-dex2jar.sh libs/arvio-cloudstream3-v1.9.983.jar
-
       - name: Build Plugins
         run: |
           cd $GITHUB_WORKSPACE/src

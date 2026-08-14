@@ -71,29 +71,19 @@ subprojects {
         val cloudstream by configurations
         val implementation by configurations
 
-        // Compile against ARVIO's R8-obfuscated cloudstream3 classes (extracted from the
-        // sideload APK via dex2jar). ARVIO's R8 renames kotlin.coroutines.Continuation→j7.d
-        // and kotlin.jvm.functions.Function1→x7.l. Plugins compiled against the public
-        // unobfuscated stub have mismatched suspend-method descriptors → virtual dispatch
-        // always calls the parent instead of the override. Compiling against the obfuscated
-        // JAR makes the Kotlin compiler read @kotlin.Metadata with obfuscated JVM signatures
-        // and generate matching overrides.
+        // Compile against the public unobfuscated cloudstream3 stub. The override method
+        // descriptors (load/loadLinks/search) are generated against the unobfuscated
+        // kotlin.coroutines.Continuation and are then patched to ARVIO's R8-obfuscated names
+        // (j7.d, x7.l, ...) post-build (see scripts/patch_dex_obfuscation.py).
         //
-        // The JAR is gitignored (10MB). To obtain it:
-        //   1. Download ARVIO-v1.9.983-sideload-release.apk
-        //   2. Extract all classes*.dex
-        //   3. d2j-dex2jar.sh classes*.dex → classes*.jar
-        //   4. Combine: keep com/lagradost/cloudstream3/** + obfuscated packages (j7, x7, etc.)
-        //   5. Place at libs/arvio-cloudstream3-v1.9.983.jar
-        // CI does this automatically (see .github/workflows/build.yml).
-        val arvioJar = rootProject.file("libs/arvio-cloudstream3-v1.9.983.jar")
-        if (arvioJar.exists()) {
-            cloudstream(files(arvioJar))
-        } else {
-            // Fallback for environments without the obfuscated JAR (produces unobfuscated DEX
-            // that won't work in ARVIO but allows compilation to succeed)
-            cloudstream("com.lagradost:cloudstream3:pre-release")
-        }
+        // NOTE: We deliberately do NOT compile against a dex2jar-extracted obfuscated JAR.
+        // Earlier v14 tried that (so the Kotlin compiler emitted obfuscated descriptors
+        // natively). It worked for the signatures, BUT dex2jar's imperfect decompilation of
+        // the obfuscated interface classes (j7/d, j7/j, x7/l) got bundled into the .cs3 DEX and
+        // corrupted its structure — ART rejected the DEX:
+        //   "Failure to verify dex file: Non-zero padding b before section of type 8196".
+        // The post-build string patch avoids bundling any dex2jar classes entirely.
+        cloudstream("com.lagradost:cloudstream3:pre-release")
 
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.13")
@@ -113,6 +103,14 @@ subprojects {
     // extracting their .class files into a directory and adding it to the compileDex task
     // input. The DexClassLoader then finds stdlib classes within the plugin's own DEX,
     // independent of the parent classloader.
+    //
+    // The four suspend/coroutine types (kotlin.coroutines.Continuation, CoroutineContext,
+    // kotlin.jvm.functions.Function, Function1) ARE bundled here unobfuscated, then the
+    // post-build patch script renames their type-descriptor strings to ARVIO's obfuscated
+    // names (j7/d, j7/j, d7/o, x7/l). DexClassLoader uses parent-first delegation, so at
+    // runtime those obfuscated names resolve to ARVIO's OWN classes (our bundled copies are
+    // shadowed and unused) — but crucially the override METHOD DESCRIPTORS now use the
+    // obfuscated strings, so virtual dispatch binds our overrides instead of the parent.
     val bundleStdlib by configurations.creating
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlin:kotlin-stdlib:2.3.0")
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
