@@ -504,7 +504,75 @@ k7/a ist ein 3-Wert-Enum. app.get (suspend, ARVIO-provided) resume-t nicht korre
 
 ### FIX #13 (IMPLEMENTIERT, 15.08.2026, v21): HTTP komplett auf java.net + jsoup umgestellt (app.get entfernt)
 Strategiewechsel: nicht mehr jede obfuscated okhttp/coroutine-Type einzeln jagen. Statt ARVIOs suspend app.get (NiceHttp/okhttp) nutzen wir plain java.net.HttpURLConnection (JDK, NIE obfuscated) + Jsoup.parse (jsoup von ARVIO unobfuscated kept, 330 Klassen verifiziert). Alle internen HTTP-Helfer (fetchTmdbMeta, searchFilmpalast, buildMovieResponse, genericResolve) -> httpGet()-Helper, nicht-suspend. withTimeoutOrNull entfernt (stattdessen java.net connect/read timeouts). load()/loadLinks()/search() bleiben suspend (cloudstream3 API-Vertrag, DEX-patched j7/d) aber haben keine inneren suspend-Aufrufe mehr (coroutine state machine trivial -> obfuscated-Type-Breakage umgangen). AUSNAHME: loadExtractor + newMovieLoadResponse/newTvSeriesLoadResponse bleiben suspend-Aufrufe (ARVIO->ARVIO intern, funktionieren wie ARVIOs eigene Scraper). Builds: v21. CI gruen.
-- **v21** (AKTUELL): HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21.
+- **v21** (AKTUELL): HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21. AUF TV-TEST AUSSTEHEND (Stand 15.08.2026 Ende Session).
+
+### ENTSCHEIDENDE ERKENNTNIS #14 (15.08.2026, v20-TV-Test-Log arvio-tv-log-v20-filtered.txt): k7.a ClassCastException = app.get fuer externe Plugins broken
+v19-fix (ContinuationInterceptor.Key fieldref) WIRKT: NoSuchFieldError WEG. v20-fix (okhttp3/Interceptor->rb/c0) WIRKT: NoSuchMethodError get$default WEG. load() laeuft, TMDB parsed ("parsed tmdbId=603 isTv=false"). ABER dann:
+`ClassCastException: k7.a cannot be cast to com.lagradost.nicehttp.NiceResponse` in fetchTmdbMeta (unser Code ruft app.get auf).
+- k7/a ist ein 3-Wert-Enum (super=Enum, fields i/l/m, valueOf/values) — KEIN HttpResponse/Coroutine-Typ.
+- app.get ist eine ARVIO-provided suspend Extension. Aus unserem externen .cs3-Plugin aufgerufen, resume-t die coroutine-Machinery nicht korrekt -> gibt stray Enum statt NiceResponse zurueck.
+- Das ist dasselbe grundsaetzliche Problem wie Erkenntnis #7 (R8 obfuscated kotlin.coroutines.Continuation -> j7/d): unsere Plugin-suspend-Aufrufe an ARVIOs suspend-Funktionen (app.get) sind gestoert, weil die Coroutine-Machinery zwischen externem Plugin und obfuscated ARVIO-Runtime nicht zusammenpasst.
+- okhttp3 hat ~100 obfuscated Klassen -> Whack-a-Mole endlos -> Strategiewechsel noetig (Fix #13).
+
+### ENTSCHEIDUNG / FIX #13 (15.08.2026, v21): HTTP komplett auf java.net + jsoup umgestellt (app.get entfernt)
+Statt jede obfuscated okhttp/coroutine-Type einzeln zu jagen: ALLE unsere HTTP-Aufrufe von ARVIOs suspend `app.get` (NiceHttp/okhttp) auf plain java.net.HttpURLConnection umgestellt.
+- `httpGet(url, params, headers): HttpResp(code, text)` Helper: java.net.HttpURLConnection (JDK, NIE obfuscated), connectTimeout/readTimeout = NET_TIMEOUT_MS, instanceFollowRedirects, UTF-8 body. Non-suspend.
+- jsoup.parse(text) statt res.document — jsoup von ARVIO unobfuscated kept (330 Klassen verifiziert), Jsoup.parse(String) verfuegbar.
+- Interne Helfer non-suspend gemacht: fetchTmdbMeta, searchFilmpalast, genericResolve (nutzen httpGet). AUSNAHME suspend geblieben: buildMovieResponse + buildSeriesResponse (rufen newMovieLoadResponse/newTvSeriesLoadResponse auf, die selbst suspend cloudstream3-API sind — ARVIO->ARVIO intern, funktionieren wie ARVIOs eigene Scraper).
+- loadExtractor (suspend, ARVIO-provided) bleibt in loadLinks — laeuft ARVIO->ARVIO intern.
+- withTimeoutOrNull entfernt (java.net timeouts statt Coroutinen-Timeout).
+- Konsequenz: load()/loadLinks()/search() bleiben suspend (cloudstream3 API-Vertrag, DEX-patched j7/d) aber haben keine eigenen inneren app.get-suspend-Aufrufe mehr -> coroutine state machine trivial -> obfuscated-Type-Breakage umgangen. build*Response+loadExtractor bleiben suspend-Aufrufe an ARVIO (wie ARVIOs eigene Scraper, sollten funktionieren).
+- v21 auf builds (status=1). CI gruen. AUF TV/HANDY-TEST AUSSTEHEND.
+- Verifiziert im Build: plugin-classes patched 66 Utf8 (weniger als v20's 120, weil app.get/okhttp-Referenzen entfernt), stdlib patched 7740.
+
+### ARVIO v1.9.994 (15.08.2026 veroeffentlicht) — NUTZER HAT UPGEDATET (TV + HANDY)
+- VERIFIZIERT: Obfuskations-Map UNVERAENDERT (j7/d=Continuation, rb/c0=okhttp3.Interceptor) -> unsere DEX-Patches kompatibel.
+- NUTZER HAT auf v1.9.994 geupdatet (TV + Handy). WICHTIG: unsere Patches/Analyse basieren auf 1.9.983-DEX, aber da Obfuskation identisch, gilt alles weiter.
+- Neue nuetzliche Features fuer uns: "Refresh Add-ons" (#511) — ABER Nutzer korrigiert: das ist fuer Stremio-Add-ons, NICHT fuer .cs3-Plugins -> fuer Plugin-Update weiterhin Repo loeschen+neu hinzufuegen.
+- "Fixed release dependency injection for sideload builds" (#525).
+- Release-Notes erwaehnen NICHT den Cloudstream3-.cs3-Plugin-Obfuskations-Bug -> Kernproblem von ARVIO nicht geloest.
+- Touch-Bug im Add-Repo-Dialog auf Handy: NUTZER BESTAETIGT BEHOBEN in 1.9.994 ("ich kann jetzt Plugin-Repo eintragen und bestaetigen, das ist mega"). -> Testen kuenftig auch auf dem Handy moeglich (UI geht jetzt).
+
+### LOGCAT AM HANDY (neu ab 15.08.2026) — Setup dokumentiert in docs/handy-logcat-ladb-termux.md
+Nutzer kann ab sofort auch auf dem HANDY testen (UI-Bug behoben). Fuer Logcat ohne Laptop: LADB (einmalig) + Termux.
+- Einmalig: LADB pairen (Drahtloses Debugging + Pairing-Code), dann `pm grant com.termux android.permission.READ_LOGS` in LADB-Shell -> Termux darf logcat lesen. Ueberlebt Neustarts.
+- Danach nur Termux: `logcat -c` -> ARVIO-Suche -> `logcat -d | grep -iE "Filmpalast|ArvioAddon|ExtExt|Error|No.API|load" > /sdcard/arvio-log-v21.txt` -> Datei teilen.
+- KEIN WLAN/Netz noetig (Loopback localhost). WLAN-Schalter AN lassen genuegt.
+- LADB-Pairing zickig (60s Timer) -> Fallback Shizuku (stabiler) oder TV+Laptop WLAN-ADB.
+- Alternativ-Setup: Shizuku (gratis) statt LADB, dann Logcat-Reader-App die Shizuku nutzt.
+- Nutzer moechte Setup SPAETER machen (Session-Wechsel), hat Termux schon, LADB frueher nicht geklappt.
+- Vollstaendige Anleitung: docs/handy-logcat-ladb-termux.md
+- ACHTUNG: ARVIO auf Handy = gleiche sideload-APK wie TV -> gleiche Obfuskation -> Tests auf Handy repraesentativ fuer TV.
+
+### NAECHSTE SCHRITTE (Stand 15.08.2026 Ende Session, fuer naechste Session)
+
+**Prio 1 - v21 am Geraet testen (Handy ODER TV):**
+- v21 steht auf builds (status=1, version=21). CI gruen.
+- Handy-Test jetzt moeglich (UI-Bug in 1.9.994 behoben). Logcat via LADB+Termux (docs/handy-logcat-ladb-termux.md) ODER weiterhin TV+Laptop WLAN-ADB.
+- Setup: Repo loeschen + neu hinzufugen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v21).
+- Test: `logcat -c` -> Matrix (TMDB 603) suchen -> "Nach Quellen suchen" -> 15s warten -> Logcat holen.
+- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet fetchTmdbMeta searchFilmpalast buildMovieResponse collectHosterLinks loadExtractor`.
+- **Was im Log zu suchen (entscheidend nach v21-Strategiewechsel):**
+  - `httpGet: ... -> 200 (N bytes)` -> java.net-HTTP FUNKTIONIERT! Strategiewechsel erfolgreich.
+  - `fetchTmdbMeta: GET ... -> 200` + `parseJson` -> TMDB-Meta geholt.
+  - `searchFilmpalast: ... matched N elements` -> Filmpalast-Suche laeuft!
+  - `buildMovieResponse` + `collectHosterLinks` + `loadExtractor` -> Hoster-Extraktion laeuft.
+  - Filmpalast-Quellen in ARVIO-Quellenauswahl -> ZIEL ERREICHT.
+  - Falls NEUER Fehler bei `loadExtractor` oder `newMovieLoadResponse`/`newTvSeriesLoadResponse` (die noch ARVIO-suspend-Funktionen nutzen): naechste Ebene — diese sind ARVIO->ARVIO, sollten eigentlich wie ARVIOs eigene Scraper funktionieren, aber falls nicht: workaround pruefen.
+  - Falls `httpGet` schlaegt fehl (Timeout/Verbindungsfehler): Netzwerk/Bot-Schutz, nicht Obfuskation.
+  - Falls `ClassCastException`/`NoSuchMethodError` WIEDER bei app.get-aehnlichem: v21 hat app.get nicht vollstaendig entfernt (grep pruefen).
+
+**Prio 2 - Je nach v21-Logcat-Befund:**
+- Falls Scraper durchlaeuft aber 0 Quellen: Scraper-Logik debuggen (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz). Naechste Ebene — jetzt ist es "echtes" Scraping, kein Obfuskations-Problem mehr.
+- Falls loadExtractor crasht (suspend, ARVIO-provided): pruefen ob ARVIOs eigene Extractoren fuer die Filmpalast-Hoster registriert sind; ggf. eigenen non-suspend Extractor bauen (java.net statt loadExtractor).
+- Falls httpGet Timeout: mobileUA/Headers pruefen, ggf. Cloudflare/Bot-Schutz auf filmpalast.to.
+
+**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v21-Befund):**
+Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereiten". Drei klare Bugs:
+1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 -> externe .cs3-Plugins koennen suspend-Overrides + app.get nicht nutzen (Haupt-Bug, Erkenntnis #7+#13).
+2. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (Erkenntnis #1).
+3. (ehemals Touch-Bug Add-Repo-Dialog — BEHOBEN in 1.9.994, Nutzer bestaetigt).
+AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]".
 
 ### NEUE ARVIO-VERSION v1.9.994 (15.08.2026)
 ARVIO v1.9.994 heute veroeffentlicht. VERIFIZIERT: Obfuskations-Map UNVERAENDERT (j7/d immer noch Continuation, rb/c0 immer noch okhttp3.Interceptor) -> unsere DEX-Patches funktionieren weiterhin. Neue nuetzliche Features: "Refresh Add-ons"-Aktion (#511, Plugin-Update ohne Loeschen/Neu-Hinzufuegen), "Fixed release dependency injection for sideload builds" (#525). Release-Notes erwaehnen NICHT den Cloudstream3-.cs3-Plugin-Obfuskations-Bug -> Kernproblem von ARVIO nicht geloest, nur unsere Patches bleiben kompatibel. Nutzer kann auf 1.9.994 updaten (sicher).
