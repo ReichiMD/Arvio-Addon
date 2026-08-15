@@ -1,6 +1,5 @@
 package com.reichi.arflioaddon.filmpalast
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.SearchResponse
@@ -13,12 +12,11 @@ import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
+import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
@@ -95,7 +93,39 @@ class FilmpalastProvider : TmdbProvider() {
         }
     }
 
-    data class LoadData(val links: List<String> = emptyList())
+    // Movie dataUrl payload: hand-built JSON (org.json) instead of AppUtils.toJson, to avoid
+    // Jackson + kotlin-reflect dependency (see TmdbMeta note above).
+    private fun linksToJson(links: List<String>): String {
+        val sb = StringBuilder("{\"links\":[")
+        links.forEachIndexed { i, link ->
+            if (i > 0) sb.append(',')
+            sb.append('"')
+            // minimal JSON string escaping
+            link.forEach { c ->
+                when (c) {
+                    '"' -> sb.append("\\\"")
+                    '\\' -> sb.append("\\\\")
+                    '\n' -> sb.append("\\n")
+                    '\r' -> sb.append("\\r")
+                    '\t' -> sb.append("\\t")
+                    else -> sb.append(c)
+                }
+            }
+            sb.append('"')
+        }
+        sb.append("]}")
+        return sb.toString()
+    }
+
+    private fun parseLinksJson(data: String): List<String> {
+        return try {
+            val arr = JSONObject(data).optJSONArray("links") ?: return emptyList()
+            (0 until arr.length()).mapNotNull { arr.optString(it) }.filter { it.isNotBlank() }
+        } catch (e: Exception) {
+            DebugLog.e(dbg, "loadLinks: could not parse movie links JSON: ${e.message}")
+            emptyList()
+        }
+    }
 
     // search() is still implemented so the classic CloudStream app (and ARVIOs search path
     // fallback) can use it. Returns the Filmpalast stream URL as the SearchResponse url.
@@ -158,40 +188,41 @@ class FilmpalastProvider : TmdbProvider() {
 
     private fun parseTmdbInput(url: String): Pair<Int, Boolean>? {
         // JSON form: {"id":123,"type":"tv"}
-        if (url.trimStart().startsWith("{")) {
-            return try {
-                val parsed = parseJson<TmdbInput>(url)
-                val id = parsed.id ?: return null
-                val isTv = parsed.type.equals("tv", ignoreCase = true)
+        return try {
+            if (url.trimStart().startsWith("{")) {
+                val obj = JSONObject(url)
+                val rawId = obj.opt("id") ?: return null
+                val id = when (rawId) {
+                    is Int -> rawId
+                    is Number -> rawId.toInt()
+                    else -> rawId.toString().toIntOrNull() ?: return null
+                }
+                val type = obj.optString("type", "")
+                val isTv = type.equals("tv", ignoreCase = true)
                 id to isTv
-            } catch (_: Exception) { null }
+            } else {
+                // URL form: https://www.themoviedb.org/<movie|tv>/<id>
+                val regex = Regex("""themoviedb\.org/(movie|tv)/(\d+)""")
+                val m = regex.find(url) ?: return null
+                val isTv = m.groupValues[1].equals("tv", ignoreCase = true)
+                m.groupValues[2].toIntOrNull()?.let { it to isTv }
+            }
+        } catch (_: Exception) {
+            null
         }
-        // URL form: https://www.themoviedb.org/tv/123 or /movie/123
-        val regex = Regex("""themoviedb\.org/(movie|tv)/(\d+)""")
-        val m = regex.find(url) ?: return null
-        val isTv = m.groupValues[1].equals("tv", ignoreCase = true)
-        return m.groupValues[2].toIntOrNull()?.let { it to isTv }
     }
-
-    data class TmdbInput(
-        @JsonProperty("id") val id: Int? = null,
-        @JsonProperty("type") val type: String? = null
-    )
 
     // ---- TMDB metadata (lightweight, only what we need for matching) ----
+    // Parsed with org.json (Android built-in) instead of cloudstream3's AppUtils.parseJson,
+    // because the latter uses Jackson + jackson-module-kotlin which needs kotlin-reflect, and
+    // ARVIO's R8 shrinking strips kotlin-reflect, breaking default-arg construction
+    // ("This callable does not support a default call"). org.json needs no reflection.
 
-    data class TmdbMeta(
-        @JsonProperty("id") val id: Int? = null,
-        @JsonProperty("title") val title: String? = null,        // movies
-        @JsonProperty("name") val name: String? = null,           // tv
-        @JsonProperty("original_title") val originalTitle: String? = null,
-        @JsonProperty("original_name") val originalName: String? = null,
-        @JsonProperty("release_date") val releaseDate: String? = null,
-        @JsonProperty("first_air_date") val firstAirDate: String? = null
-    ) {
-        val displayTitle: String get() = (title ?: name ?: originalTitle ?: originalName ?: "").trim()
-        val year: Int? get() = (releaseDate ?: firstAirDate)?.take(4)?.toIntOrNull()
-    }
+    private class TmdbMeta(
+        val id: Int?,
+        val displayTitle: String,
+        val year: Int?
+    )
 
     private val tmdbApiKey = "e6333b32409e02a4a6eba6fb7ff866bb"
     private val tmdbApiUrl = "https://api.themoviedb.org/3"
@@ -206,7 +237,12 @@ class FilmpalastProvider : TmdbProvider() {
                 return null
             }
             DebugLog.t(dbg, "fetchTmdbMeta: GET $full -> ${res.code}")
-            parseJson<TmdbMeta>(res.text)
+            val obj = JSONObject(res.text)
+            val title = obj.optString("title", "").ifEmpty { obj.optString("name", "") }
+                .ifEmpty { obj.optString("original_title", "") }.ifEmpty { obj.optString("original_name", "") }
+            val date = obj.optString("release_date", "").ifEmpty { obj.optString("first_air_date", "") }
+            val year = date.take(4).toIntOrNull()
+            TmdbMeta(obj.optInt("id", -1).takeIf { it >= 0 }, title.trim(), year)
         } catch (e: Exception) {
             DebugLog.e(dbg, "fetchTmdbMeta: request threw ${e.javaClass.simpleName}: ${e.message}")
             null
@@ -314,7 +350,7 @@ class FilmpalastProvider : TmdbProvider() {
             DebugLog.t(dbg, "buildMovieResponse: collected ${links.size} hoster links")
             links.take(20).forEach { DebugLog.t(dbg, "  hoster link: $it") }
 
-            newMovieLoadResponse(detailTitle, entry.url, TvType.Movie, LoadData(links).toJson()) {
+            newMovieLoadResponse(detailTitle, entry.url, TvType.Movie, linksToJson(links)) {
                 this.posterUrl = fixUrl(imagePath)
                 this.plot = description
                 this.year = meta.year
@@ -388,8 +424,8 @@ class FilmpalastProvider : TmdbProvider() {
 
         val links: List<String> = when {
             data.trimStart().startsWith("{") -> {
-                try { parseJson<LoadData>(data).links } catch (e: Exception) {
-                    DebugLog.e(dbg, "loadLinks: could not parse movie LoadData JSON: ${e.message}")
+                try { parseLinksJson(data) } catch (e: Exception) {
+                    DebugLog.e(dbg, "loadLinks: could not parse movie links JSON: ${e.message}")
                     emptyList()
                 }
             }
