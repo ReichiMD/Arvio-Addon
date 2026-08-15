@@ -284,6 +284,35 @@ Patch-Skript (`scripts/patch_dex_obfuscation.py`) komplett neu geschrieben (kein
 - Verifiziert lokal (Unpatch->Patch-Test): Checksummen (SHA-1, Adler32) matchen, sequenzieller Walk endet mit **82 Null-Bytes** Tail (non-zero-frei) bis zur encoded_array-Sektion, obfuszierte Strings (j7/d, j7/j, x7/l) vorhanden, Originale (kotlin.coroutines.*) weg. Override-Signaturen korrekt: `load(Ljava/lang/String;Lj7/d;)`, `loadLinks(...Lx7/l;Lx7/l;Lj7/d;)`, `search(...Lj7/d;)`.
 - Version auf 16 gebumpt. CI baut v16 beim Push.
 
+### ENTSCHEIDENDE ERKENNTNIS #10 (15.08.2026, v16-TV-Test, arvio-tv-log-v16-filtered.txt): DEX string_ids MUSS sortiert sein - Post-Build-Patching prinzipiell unmoeglich
+
+v16 (Fix #9, kompaktes string_data-Repack) behob das "Non-zero padding"-Problem, offenbarte aber den naechsten ART-Fehler:
+  Failure to verify dex file '...FilmPalast.cs3': Out-of-order string_ids: 'Lkotlin/coroutines/CombinedContext;' then 'Lj7/d;'
+
+DEX string_ids MUSS in unsigned Byte-Reihenfolge sortiert sein. Umbenennen von 'Lkotlin/coroutines/Continuation;' -> 'Lj7/d;' verschiebt den String von der 'k'-Region in die 'j'-Region (j<k) -> Sortierung kaputt. Repack (v16) kompaktionierte die Daten, liess aber die Sortierreihenfolge broken. Korrektes Fixen wuerde ein Re-Sortieren der GESAMTEN string-Tabelle + Remapping JEDES string-Index in type_ids/proto_ids/field_ids/method_ids/class_defs/encoded_arrays/debug_info erfordern - extrem fehleranfellig. **Schlussfolgerung: Post-Build-DEX-Patching ist prinzipiell der falsche Ansatz.**
+
+### FIX #10 (IMPLEMENTIERT, 15.08.2026, v17): .class constant_pool VOR d8 patchen, nicht DEX danach
+
+Statt die fertige DEX zu patchen, patchen wir die .class-Dateien VOR d8. d8 baut dann eine korrekt sortierte, valide DEX mit den obfuszierten Deskriptoren nativ. Neues Skript `scripts/patch_class_obfuscation.py`:
+- Walkt jede .class constant_pool, benennt Utf8-Eintraege um: kotlin/coroutines/Continuation -> j7/d, CoroutineContext -> j7/j, kotlin/jvm/functions/Function1 -> x7/l (Deskriptor-Form 'L...;' + exakter Klassenname).
+- Prefix-safe: ersetzt NUR 'L'+name+';' und exakten Namen, sodass Continuation NICHT ContinuationInterceptor korrumpiert und Function1 NICHT Function10..Function19. Verifiziert.
+- Behandelt alle constant_pool-Tags (InvokeDynamic-size=4 Bug gefixt).
+- Laeuft ueber ALLE compileDex-Input-Verzeichnisse (gebundelte stdlib + plugin-eigene kompilierte Klassen in build/tmp/kotlin-classes/debug).
+- d8 produziert dann valide DEX; keine Post-Build-Chirurgie mehr.
+
+**Wichtiger Fix im selben Commit:** erste v17-CI-Version patchte nur die stdlib (5045 Eintraege) weil das zweite Zielverzeichnis falsch war (classpath-snapshot, 0 Eintraege) - die Override-Deskriptoren des Plugins waren NICHT gepatcht. Fixed: iteriere compileDexTask.input.files (die autoritative Quelle was d8 konsumiert) statt compileDebugKotlin-Output zu raten. v17-CI patcht nun 5045 (stdlib) + 115 (plugin classes) = 5160 Eintraege.
+
+Verifiziert an der gebauten v17 (builds-Branch, version 17):
+- Checksummen matchen, string_ids von d8 sortiert (d8 garantiert das).
+- Override-Signaturen korrekt obfusziert (von d8 nativ erzeugt, aus DEX method_ids extrahiert):
+  load(Ljava/lang/String;Lj7/d;)Ljava/lang/Object;
+  loadLinks(Ljava/lang/String;ZLx7/l;Lx7/l;Lj7/d;)Ljava/lang/Object;
+  search(Ljava/lang/String;Lj7/d;)Ljava/lang/Object;
+- d8-Warnungen "Unexpected error during rewriting of Kotlin metadata" (nicht-fatal - nur @kotlin/Metadata-Annotation, nicht noetig fuer Ausfuehrung).
+- Version auf 17 gebumpt. CI gruen. builds: v17.
+
+**Erwartung v17-Test:** Erste Version mit GLEICHZEITIG valider DEX-Struktur (d8-gebaut) UND korrekt obfuszierten Override-Signaturen. ART sollte die DEX akzeptieren, ARVIO sollte UNSERN load()/loadLinks() aufrufen. Naechster moeglicher Fehler: Scraper-Logik (Jsoup, Hoster) - Ebene 2.
+
 **Erwartung v16-Test:** DEX laedt erstmals VOLLSTAENDIG (valide Struktur + obfuszierte Override-Signaturen gleichzeitig). ARVIO ruft UNSERN load()/loadLinks() auf. Naechster moeglicher Fehler: Scraper-Logik (Jsoup, Hoster) - Ebene 2.
 
 ### NAECHSTE SCHRITTE (Stand 15.08.2026, fuer naechste Session)
@@ -442,8 +471,9 @@ Der professionellste Weg (so machen es `Himanth-reddy`/GSSoC-Teilnehmer, deren P
 - **v13**: mainPage/getMainPage komplett entfernt (Fix #6: MainPageData-ctor geschrumpft).
 - **v14** (gescheitert): Kompiliert gegen dex2jar-obfuszierte ARVIO-JAR (Fix #7 Ansatz 1). Override-Signaturen korrekt obfusziert, ABER dex2jar-Klassen (j7/d, j7/j, x7/l) korrumpten die DEX -> ART-Verifier lehnt ab ("Non-zero padding... type 8196"). v14 live auf builds (1.268.540 bytes) aber **unbrauchbar** (Erkenntnis #8).
 - **v15** (gescheitert): Zurueck zum unobfuszierten Stub + Post-Build-DEX-Patching ohne dex2jar (Fix #8). DEX-Struktur valide (keine dex2jar-Klassen), ABER das Patch-Skript kuerzte Strings IN-PLACE mit Zero-Padding -> Gaps MITTEN in string_data -> ART-Verifier lehnt ab (Erkenntnis #9, derselbe Fehler wie v14).
-- **v16** (AKTUELL): Patch-Skript neu geschrieben - string_data kompakt neu packen, Freed-Bytes als TRAILING-Nullen (Fix #9). Keine Gaps -> ART-Verifier akzeptiert. Override-Signaturen obfusziert. CI baut v16 beim Push.
-- Letzter Commit auf `main`: v16 (Fix #9, kompaktes string_data-Repack). Builds-Version: 16.
+- **v16** (gescheitert): string_data kompakt neu packen, Freed-Bytes als TRAILING-Nullen (Fix #9). Behob "Non-zero padding", aber ART lehnt ab mit "Out-of-order string_ids" - DEX string_ids MUSS sortiert sein, Umbenennen verschiebt Sortierposition. Post-Build-DEX-Patching prinzipiell unmoeglich (Erkenntnis #10).
+- **v17** (AKTUELL): .class constant_pool VOR d8 patchen statt DEX danach (Fix #10). d8 baut valide sortierte DEX mit obfuszierten Deskriptoren nativ. Override-Signaturen verifiziert: load(...Lj7/d;), loadLinks(...Lx7/l;Lx7/l;Lj7/d;), search(...Lj7/d;). CI gruen. builds: v17.
+- Letzter Commit auf `main`: v17 (Fix #10, pre-d8 .class patching). Builds-Version: 17.
 
 ### Was fertig ist (unver–ď“ď–í”®ndert g–ď“ď–í—ėltig)
 Filmpalast-Plugin als Cloudstream3-`TmdbProvider` implementiert, gebaut, auf `builds`-Branch (`status=1`, `tvTypes=[Movie,TvSeries]`). CI gr–ď“ď–í—ėn. Nutzer hat v13 in ARVIO 1.9.983 (sideload) installiert; v14 steht auf builds-Branch bereit zum Test. Python-E2E-Simulation l–ď“ď–í”®uft durch; filmpalast.to + TMDB per HTTP erreichbar. **Das Problem ist rein ARVIO-seitig beim Laden/Ausf–ď“ď–í—ėhren von `.cs3`-Plugins.**
