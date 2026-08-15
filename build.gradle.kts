@@ -150,8 +150,11 @@ subprojects {
         // Patch .class constant_pool Utf8 entries to rename the four suspend/coroutine types to
         // ARVIO's R8-obfuscated names BEFORE d8 compiles them into the DEX. This produces a DEX
         // whose override method descriptors already use the obfuscated names (so virtual dispatch
-        // binds our overrides) while letting d8 build a correctly sorted, valid DEX. Runs over
-        // BOTH the extracted stdlib dir and the plugin's own compiled-classes dir.
+        // binds our overrides) while letting d8 build a correctly sorted, valid DEX. We patch
+        // EVERY directory that compileDex consumes as input (the bundled stdlib dir extracted
+        // above, plus the plugin's own compiled-classes dir that the cloudstream gradle plugin
+        // registers) — this is the robust way to cover the plugin's override descriptors without
+        // guessing compileDebugKotlin's output location.
         val patchClasses = tasks.create("patchClassesForObfuscation")
         patchClasses.doLast {
             val patchScript = rootProject.file("scripts/patch_class_obfuscation.py")
@@ -159,26 +162,12 @@ subprojects {
                 logger.warn("patch_class_obfuscation.py not found; skipping obfuscation patch")
                 return@doLast
             }
-            val targets = mutableListOf<String>()
-            // 1) bundled stdlib classes
-            targets.add(extractedStdlibDir.get().asFile.absolutePath)
-            // 2) plugin's own compiled classes (compileDebugKotlin output dir)
-            val kotlinCompileTask = tasks.findByName("compileDebugKotlin")
-            if (kotlinCompileTask != null) {
-                // Use reflection to read destinationDirectory to avoid hard-coding a dependency
-                // on the Kotlin Gradle plugin's task type at script-compile time.
-                val destDir = try {
-                    val prop = kotlinCompileTask.javaClass.getMethod("getDestinationDirectory")
-                    (prop.invoke(kotlinCompileTask) as org.gradle.api.provider.Provider<*>).get() as java.io.File
-                } catch (e: Exception) {
-                    // Fallback: outputs.files first directory
-                    kotlinCompileTask.outputs.files.files.first { it.isDirectory }
-                }
-                targets.add(destDir.absolutePath)
-            }
-            logger.lifecycle("Patching .class obfuscation in: ${targets.joinToString()}")
+            // Collect every directory in compileDex's input. compileDexTask.input is a
+            // ConfigurableFileCollection; .files resolves to the actual dirs/files d8 will read.
+            val inputDirs = compileDexTask.input.files.filter { it.isDirectory }.map { it.absolutePath }.distinct()
+            logger.lifecycle("Patching .class obfuscation in: ${inputDirs.joinToString()}")
             project.exec {
-                commandLine("python3", patchScript.absolutePath, *targets.toTypedArray())
+                commandLine("python3", patchScript.absolutePath, *inputDirs.toTypedArray())
             }
         }
         patchClasses.dependsOn(extractStdlib)
