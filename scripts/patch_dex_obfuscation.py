@@ -56,96 +56,101 @@ OBFUSCATION_MAP = {
 
 
 def patch_dex(dex_data):
-    """Patch DEX bytes in-place, replacing kotlin type descriptors with obfuscated names."""
+    """Patch DEX string_data with obfuscated type descriptors, repacked compactly in place.
+
+    ARVIO's R8 obfuscates kotlin.coroutines.Continuation -> j7.d etc. Our .cs3 is compiled
+    against the unobfuscated cloudstream3 stub, so override method descriptors use the
+    unobfuscated names. We replace the 4 type-descriptor strings.
+
+    Implementation: rebuild the string_data section COMPACTLY (all items back-to-back, no
+    gaps) within its ORIGINAL byte extent, padding the freed tail with zeros. Because the
+    section's total byte length and end offset are unchanged, NO other section, header field,
+    map_list entry, or embedded offset moves — only the string_id offsets (which now point to
+    the compact positions) change. This is minimal and safe.
+
+    Why compact (not zero-pad-in-place): ART's verifier walks string_data items SEQUENTIALLY
+    by the map_list item count. Zero-padding inserted BETWEEN shortened items is parsed as
+    phantom empty-string items, so the walk ends prematurely and ART rejects the DEX
+    ("Non-zero padding b before section of type 8196"). Trailing zero padding AFTER the last
+    real item (i.e. alignment/section padding) IS allowed by the DEX spec and ART. So we keep
+    all real items contiguous at the start and push the freed bytes to the tail as zeros.
+    """
     data = bytearray(dex_data)
 
-    # Parse header
-    magic = data[:8]
-    if magic[:4] != b'dex\n':
-        raise ValueError(f"Not a DEX file: magic={magic!r}")
-
-    checksum_off = 8       # uint32 adler32 checksum
-    signature_off = 12     # 20-byte SHA-1 signature
-    file_size_off = 32     # uint32
+    if data[:4] != b'dex\n':
+        raise ValueError(f"Not a DEX file: magic={data[:8]!r}")
 
     string_ids_size = struct.unpack_from('<I', data, 0x38)[0]
     string_ids_off = struct.unpack_from('<I', data, 0x3C)[0]
 
-    print(f"DEX header: string_ids_size={string_ids_size}, string_ids_off=0x{string_ids_off:x}")
+    print(f"DEX: string_ids_size={string_ids_size}")
 
-    patched_count = 0
-
+    # 1. Read every string_data item (in string_id order): (utf16_size, mutf8_bytes)
+    items = []
     for i in range(string_ids_size):
-        # Each string_id_item is 4 bytes: offset to string_data_item
-        sid_offset = string_ids_off + i * 4
-        sdi_offset = struct.unpack_from('<I', data, sid_offset)[0]
-
-        # string_data_item: ULEB128(utf16_size) + MUTF8_data + \x00
-        utf16_size, data_start = read_uleb128(data, sdi_offset)
-
-        # The MUTF8 data length is NOT necessarily utf16_size (multi-byte chars)
-        # Find the null terminator
+        sdi_off = struct.unpack_from('<I', data, string_ids_off + i * 4)[0]
+        utf16_size, data_start = read_uleb128(data, sdi_off)
         null_pos = data.index(b'\x00', data_start)
-        mutf8_bytes = data[data_start:null_pos]
-        original_str = mutf8_bytes.decode('utf-8', errors='replace')
+        items.append([utf16_size, bytes(data[data_start:null_pos])])
 
-        if original_str not in OBFUSCATION_MAP:
-            continue
-
-        new_str = OBFUSCATION_MAP[original_str]
-        new_mutf8 = new_str.encode('utf-8')
-
-        # Original item layout: ULEB128(utf16_size) + mutf8_bytes + \x00
-        # New item layout: ULEB128(new_utf16_size) + new_mutf8 + \x00 + padding
-        old_uleb = encode_uleb128(utf16_size)
-        new_utf16_size = len(new_str)  # ASCII = 1 code unit per char
-        new_uleb = encode_uleb128(new_utf16_size)
-
-        old_item_size = len(old_uleb) + len(mutf8_bytes) + 1  # +1 for null
-        new_item_size = len(new_uleb) + len(new_mutf8) + 1    # +1 for null
-
-        if new_item_size > old_item_size:
-            print(f"  ERROR: new item ({new_item_size}) larger than old ({old_item_size}) for '{original_str}'")
-            continue
-
-        # Write new ULEB128 length
-        pos = sdi_offset
-        data[pos:pos + len(new_uleb)] = new_uleb
-        pos += len(new_uleb)
-
-        # Write new MUTF8 data
-        data[pos:pos + len(new_mutf8)] = new_mutf8
-        pos += len(new_mutf8)
-
-        # Write null terminator
-        data[pos] = 0
-        pos += 1
-
-        # Pad remaining bytes with zeros (to keep total item size unchanged)
-        padding = old_item_size - new_item_size
-        for p in range(padding):
-            data[pos + p] = 0
-
-        print(f"  [{i}] offset=0x{sdi_offset:x}: '{original_str}' -> '{new_str}' "
-              f"(old={old_item_size}B, new={new_item_size}B, pad={padding}B)")
-        patched_count += 1
+    # 2. Apply the obfuscation map to item values
+    patched_count = 0
+    for it in items:
+        s = it[1].decode('utf-8', errors='replace')
+        if s in OBFUSCATION_MAP:
+            new_s = OBFUSCATION_MAP[s]
+            it[0] = len(new_s)  # ASCII: 1 utf16 code unit per char
+            it[1] = new_s.encode('utf-8')
+            print(f"  '{s}' -> '{new_s}'")
+            patched_count += 1
 
     if patched_count == 0:
-        print("WARNING: no strings patched — DEX may already be patched or mapping is wrong")
+        print("WARNING: no strings patched — DEX may already be obfuscated")
         return bytes(data), 0
 
-    # Recompute SHA-1 signature (bytes 32..file_size, stored at offset 12)
-    file_size = struct.unpack_from('<I', data, file_size_off)[0]
-    sha1 = hashlib.sha1(data[32:file_size]).digest()
-    data[12:32] = sha1
+    # 3. Find the string_data section extent [sd_off, sd_end) from the map_list.
+    map_off_val = struct.unpack_from('<I', data, 0x34)[0]
+    map_count = struct.unpack_from('<I', data, map_off_val)[0]
+    section_offsets = []
+    sd_off = None
+    for i in range(map_count):
+        t, _, _, off = struct.unpack_from('<HHII', data, map_off_val + 4 + i * 12)
+        section_offsets.append(off)
+        if t == 0x2002:  # TYPE_STRING_DATA_ITEM
+            sd_off = off
+    if sd_off is None:
+        raise ValueError("string_data section not found in map_list")
+    sd_end = min(o for o in section_offsets if o > sd_off)  # next section start
+    sd_byte_len = sd_end - sd_off
 
-    # Recompute Adler32 checksum (bytes 12..file_size, stored at offset 8)
-    checksum = zlib.adler32(data[12:file_size])
-    struct.pack_into('<I', data, 8, checksum)
+    # 4. Rebuild compactly; record new per-item offsets.
+    new_blob = bytearray()
+    new_offsets = []
+    for utf16_size, mutf8 in items:
+        new_offsets.append(sd_off + len(new_blob))
+        new_blob += encode_uleb128(utf16_size)
+        new_blob += mutf8
+        new_blob += b'\x00'
 
-    # Verify no string_data_item now overlaps the next one's declared offset. The patch keeps
-    # every item at its original offset and total length (padding fills freed space), so the
-    # string_ids offsets remain valid. This is a sanity guard, not a restructure.
+    freed = sd_byte_len - len(new_blob)
+    if freed < 0:
+        raise ValueError(f"string_data repack grew by {-freed} bytes — obfuscated names must be shorter")
+    # Pad the tail with zeros so the section keeps its original byte extent/end offset.
+    new_blob += b'\x00' * freed
+    print(f"string_data: repacked {len(new_blob)} bytes (compact={sd_byte_len - freed}, freed tail={freed} zeros)")
+
+    # 5. Overwrite the string_data region in place.
+    data[sd_off:sd_end] = new_blob
+
+    # 6. Update string_id offsets to the compact positions.
+    for i, noff in enumerate(new_offsets):
+        struct.pack_into('<I', data, string_ids_off + i * 4, noff)
+
+    # 7. Recompute SHA-1 signature (bytes 32..file_size) + Adler32 checksum (bytes 12..file_size).
+    file_size = struct.unpack_from('<I', data, 32)[0]
+    data[12:32] = hashlib.sha1(bytes(data[32:file_size])).digest()
+    struct.pack_into('<I', data, 8, zlib.adler32(bytes(data[12:file_size])) & 0xffffffff)
+
     print(f"\nPatched {patched_count} strings. DEX size unchanged: {len(data)} bytes")
     return bytes(data), patched_count
 

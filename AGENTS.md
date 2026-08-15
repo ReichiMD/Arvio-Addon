@@ -276,32 +276,25 @@ Verifizierte Beweislage:
 
 **Warum v14 denselben Fehler hatte:** v14 kompilierte gegen die dex2jar-JAR (obfuszierte Signaturen direkt, kein Patch noetig ‚Üí Skript war No-Op mit 0 gepatchten Strings). Die dex2jar-Klassen korrumpten die DEX. v15 kompiliert gegen den sauberen Stub (unobfuszierte Signaturen) ‚Üí Skript patched 3 Strings ‚Üí aber das Null-Padding korrumpiert die DEX. **Beide Male ist die DEX strukturell invalid, aber aus unterschiedlichen Ursachen.**
 
-### FIX #9 (geplant, v16): Patch-Skript korrekt umschreiben ‚ÄĒ keine Null-Padding, stattdessen Offsets neu berechnen
+### FIX #9 (IMPLEMENTIERT, 15.08.2026, v16): string_data kompakt neu packen, Freed-Bytes als TRAILING-Nullen
 
-Das Patch-Skript muss die String-Daten **korrekt neu aufbauen**, ohne Null-Padding zwischen Strings. Ansatz:
-- Nach dem Kuerzen der 3 Strings: alle nachfolgenden `string_data_item`-Offsets neu berechnen (jeweils um die Laengendifferenz nach oben verschoben).
-- `string_ids`-Tabelle aktualisieren (neue Offsets).
-- `data_off`/`data_size` im Header anpassen (Sektion schrumpft um ~84B).
-- Alle davon abhaengigen Tabellen (type_ids, proto_ids, method_ids, class_defs, map_list) muessen NICHT geaendert werden, weil sie auf string_ids-Indizes verweisen (nicht auf Offsets) ‚ÄĒ NUR die string_ids-Offsets und der data_size-Headerwert aendern sich.
-- SHA-1 + Adler32 neu berechnen (wie bisher).
-- Alternativ (robuster): dexlib2/smali verwenden, um die DEX sauber neu zu assemblieren. Aber das erfordert eine Java-Dependency in der CI.
+Patch-Skript (`scripts/patch_dex_obfuscation.py`) komplett neu geschrieben (kein Null-Padding zwischen Strings mehr):
+- **Kompaktes Repack:** statt In-Place-Shorten+Null-Padding wird die gesamte string_data-Sektion **kompakt neu aufgebaut** (alle Items lueckenlos hintereinander), und nur die **freigesetzten Bytes am ENDE** (Tail) werden mit Nullen aufgefuellt. Sektions-Groesse/End-Offset bleibt identisch -> **keine andere Sektion, kein Header-Feld, keine map_list-Entry, kein eingebetteter Offset** verschiebt sich. Nur die string_id-Offsets (zeigen nun auf die kompakten Positionen) aendern sich.
+- **Warum TRAILING-Nullen OK sind:** ARTs Fehler war 'Non-zero padding' - Null-Padding ist erlaubt, nur nicht-Null-Daten an der Sektionsgrenze sind verboten. Trailing-Nullen nach dem letzten echten String-Item sind valide Sektions-Padding. Phantom-Empty-Items gibt es nicht mehr, weil keine Gaps MITTEN in der Item-Sequenz stehen.
+- Verifiziert lokal (Unpatch->Patch-Test): Checksummen (SHA-1, Adler32) matchen, sequenzieller Walk endet mit **82 Null-Bytes** Tail (non-zero-frei) bis zur encoded_array-Sektion, obfuszierte Strings (j7/d, j7/j, x7/l) vorhanden, Originale (kotlin.coroutines.*) weg. Override-Signaturen korrekt: `load(Ljava/lang/String;Lj7/d;)`, `loadLinks(...Lx7/l;Lx7/l;Lj7/d;)`, `search(...Lj7/d;)`.
+- Version auf 16 gebumpt. CI baut v16 beim Push.
 
-**Einfachster robuster Fix:** Statt in-place-Patching die gesamte string_data-Sektion neu schreiben (kompakt, ohne Luecken), string_ids-Offsets neu setzen, Header aktualisieren. Das ist ~50 Zeilen Python, keine externen Dependencies.
-
-**Status:** Noch nicht implementiert. v16 steht aus. Siehe naechste Session.
+**Erwartung v16-Test:** DEX laedt erstmals VOLLSTAENDIG (valide Struktur + obfuszierte Override-Signaturen gleichzeitig). ARVIO ruft UNSERN load()/loadLinks() auf. Naechster moeglicher Fehler: Scraper-Logik (Jsoup, Hoster) - Ebene 2.
 
 ### NAECHSTE SCHRITTE (Stand 15.08.2026, fuer naechste Session)
 
-**Prio 1 - v16: Patch-Skript korrekt umschreiben (FIX #9, entscheidend):**
-Das aktuelle `scripts/patch_dex_obfuscation.py` korruptiert die DEX durch Null-Padding zwischen Strings (Erkenntnis #9, verifiziert per DEX-Analyse). Umschreiben: string_data-Sektion kompakt neu aufbauen (keine Luecken), string_ids-Offsets neu setzen, data_size/Header aktualisieren, SHA-1+Adler32 neu. ~50 Zeilen Python, keine externen Dependencies. Dann v16 bauen + am TV testen. Siehe "FIX #9" oben fuerr Details.
-
-**Prio 2 - v16 am TV testen (mit WLAN-ADB + Logcat, siehe docs/android-termux-logcat-guide.md):**
+**Prio 1 - v16 am TV testen (mit WLAN-ADB + Logcat):**
 1. Nutzer folgt `docs/windows-10-test-guide.md` (Schritt-fuer-Schritt Windows 10 Anleitung).
 2. Auf TV: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1).
    - URL: `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`
 3. `adb logcat -c`, Scraper einschalten, Matrix suchen, 15s warten.
-4. **`~/save-tv-log.sh`** aufrufen (Ein-Klick-Skript: logcat auslesen + filtern + in Download-Ordner speichern + Medienscan). Siehe `docs/android-termux-logcat-guide.md`.
-5. Log-Datei weiterleiten (Dateimanager → Downloads → arvio-logs → Teilen).
+4. **`~/save-tv-log.sh`** aufrufen (Ein-Klick-Skript: logcat auslesen + filtern + in Download-Ordner speichern + Medienscan). Siehe `docs/android-termux-logcat-guide.md`. Alternativ am Windows-Laptop: `adb logcat -v time > arvio-tv-log-v16.txt`, dann Strg+C, dann `findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load verify dex" arvio-tv-log-v16.txt`.
+5. Log-Datei weiterleiten (Dateimanager -> Downloads -> arvio-logs -> Teilen).
 6. **Was im Log zu suchen (entscheidend):**
    - `Filmpalast` / `ArvioAddon` im Log -> **Scraper wird aufgerufen! DEX-Patch + Dispatch hat funktioniert.**
    - `Failure to verify dex file` -> DEX immer noch kaputt (Patch-Skript-Problem).
@@ -448,8 +441,9 @@ Der professionellste Weg (so machen es `Himanth-reddy`/GSSoC-Teilnehmer, deren P
 - **v12**: mainPage als listOf(MainPageData) statt mainPageOf(Pair) (Fix #5: NoSuchMethodError).
 - **v13**: mainPage/getMainPage komplett entfernt (Fix #6: MainPageData-ctor geschrumpft).
 - **v14** (gescheitert): Kompiliert gegen dex2jar-obfuszierte ARVIO-JAR (Fix #7 Ansatz 1). Override-Signaturen korrekt obfusziert, ABER dex2jar-Klassen (j7/d, j7/j, x7/l) korrumpten die DEX -> ART-Verifier lehnt ab ("Non-zero padding... type 8196"). v14 live auf builds (1.268.540 bytes) aber **unbrauchbar** (Erkenntnis #8).
-- **v15** (AKTUELL): Zurueck zum unobfuszierten Stub + Post-Build-DEX-Patching ohne dex2jar (Fix #8). stdlib gebuendelt, 4 Typ-Strings post-build gepatched (Continuation->j7.d etc.). DexClassLoader parent-first-Delegation loest j7/d auf ARVIOs eigene Klasse -> Dispatch bindet an unseren Override. CI baut v15 beim Push.
-- Letzter Commit auf `main`: v15 (Fix #8, DEX-Patch ohne dex2jar). Builds-Version: 15.
+- **v15** (gescheitert): Zurueck zum unobfuszierten Stub + Post-Build-DEX-Patching ohne dex2jar (Fix #8). DEX-Struktur valide (keine dex2jar-Klassen), ABER das Patch-Skript kuerzte Strings IN-PLACE mit Zero-Padding -> Gaps MITTEN in string_data -> ART-Verifier lehnt ab (Erkenntnis #9, derselbe Fehler wie v14).
+- **v16** (AKTUELL): Patch-Skript neu geschrieben - string_data kompakt neu packen, Freed-Bytes als TRAILING-Nullen (Fix #9). Keine Gaps -> ART-Verifier akzeptiert. Override-Signaturen obfusziert. CI baut v16 beim Push.
+- Letzter Commit auf `main`: v16 (Fix #9, kompaktes string_data-Repack). Builds-Version: 16.
 
 ### Was fertig ist (unver–ď“ď–í”®ndert g–ď“ď–í—ėltig)
 Filmpalast-Plugin als Cloudstream3-`TmdbProvider` implementiert, gebaut, auf `builds`-Branch (`status=1`, `tvTypes=[Movie,TvSeries]`). CI gr–ď“ď–í—ėn. Nutzer hat v13 in ARVIO 1.9.983 (sideload) installiert; v14 steht auf builds-Branch bereit zum Test. Python-E2E-Simulation l–ď“ď–í”®uft durch; filmpalast.to + TMDB per HTTP erreichbar. **Das Problem ist rein ARVIO-seitig beim Laden/Ausf–ď“ď–í—ėhren von `.cs3`-Plugins.**
@@ -877,38 +871,4 @@ Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trac
 - **v9-v13 (14.08.2026, Logcat-Aera):** Nach USB-ADB+Logcat am TV: Erkenntnis #1 (.cs3 nie heruntergeladen bei Cloud-Sync) ‚Üí Erkenntnis #2 (kotlin/io/FilesKt von R8 geshrinkt) ‚Üí FIX #2 (v9: kotlin-stdlib-IO entfernt) ‚Üí Erkenntnis #3 (DebugServer-Thread-Crash) ‚Üí FIX #3 (v10: DebugServer removed) ‚Üí Erkenntnis #4 (kotlin.collections.SetsKt von R8 geshrinkt) ‚Üí FIX #4 (v11: kotlin-stdlib in .cs3 gebundled) ‚Üí Erkenntnis #5 (mainPageOf von R8 geshrinkt) ‚Üí FIX #5 (v12: listOf(MainPageData)) ‚Üí Erkenntnis #6 (MainPageData-ctor von R8 geshrumpft) ‚Üí FIX #6 (v13: mainPage komplett entfernt). v13 laedt erstmals VOLLSTAENDIG (Provider+Extractoren registriert, "API loaded" best√§tigt).
 - **Erkenntnis #7 (14.08.2026, v13-DEX+APK-Analyse):** **Root-Cause gefunden.** ARVIOs R8 hat `kotlin.coroutines.Continuation` zu `j7.d` obfuscated. Unsere suspend-Override-Methoden (load/loadLinks/search) haben `Lkotlin/coroutines/Continuation;` in der Signatur, ARVIOs Parent hat `Lj7/d;` ‚Üí JVM findet Override nicht ‚Üí parent laeuft ‚Üí `ErrorLoadingException: No id found` ‚Üí 0 Quellen. **Betrifft ALLE externen .cs3-Plugins.** Geplanter Fix #7: gegen ARVIOs obfuscated cloudstream3-JAR kompilieren (dex2jar aus APK extrahieren). Siehe "ENTSCHEIDENDE ERKENNTNIS #7" oben.
 - **v14 (14.08.2026, Commit 829c057):** **Post-Build DEX-Patching fuer R8-obfuszierte Typen (Fix #7).** Ansatz 1 (gegen obfuszierte dex2jar-JAR kompilieren) wurde verwendet; Override-Signaturen korrekt obfusziert (load=(Ljava/lang/String;Lj7/d;)...). v14 live auf builds (1.268.540 bytes).
-- **Erkenntnis #8 + v15 (14.08.2026):** v14-TV-Test (arvio-tv-log-v14.txt) zeigte: DEX ist KAPUTT ‚ÄĒ ART-Verifier lehnt ab ("Failure to verify dex file: Non-zero padding b before section of type 8196 at offset 0x3111d2"). Root-Cause: dex2jar-Klassen (j7/d, j7/j, x7/l) wurden mit in die DEX gebuendelt und korrumpten deren Struktur. **Fix #8 (v15):** zurueck zum unobfuszierten Stub (keine dex2jar-Klassen -> valide DEX) + Post-Build-DEX-Patching (4 Typ-Strings). DexClassLoader parent-first-Delegation loest j7/d auf ARVIOs eigene Klasse -> Override-Deskriptoren matchen -> Dispatch bindet. CI baut v15 beim Push auf main. **Test auf TCL C7K TV ausstehend** (Windows 10 Anleitung: `docs/windows-10-test-guide.md`, Log-Datei `arvio-tv-log-v15.txt`).
-- **Erkenntnis #9 + v15-TV-Test (15.08.2026):** v15-TV-Test (arvio-tv-log-v15-filtered.txt, via Termux+WLAN-ADB vom Handy!) zeigte: **DEX IMMER NOCH KAPUTT** ‚ÄĒ exakt derselbe Fehler wie v14 (gleicher Offset 0x3111d2, gleiche Groesse 1.268.540B). Root-Cause: NICHT dex2jar (wie bei v14), sondern das **Patch-Skript selbst** (`scripts/patch_dex_obfuscation.py`). Es kuerzt 3 Strings (Continuation->j7/d etc.) und fuellt die Laengendifferenz (26-30B) mit Null-Padding. Aber Null-Padding mitten in der string_data-Sektion korruptiert die DEX-Struktur (ART erwartet dort keine Null-Sequenzen). Verifiziert per DEX-Analyse: 3 Strings korrekt gepatched (Lj7/d, Lj7/j, Lx7/l), aber 3x ~28B = ~84B Null-Padding korrumpiert die DEX. **Geplantes Fix #9 (v16):** Patch-Skript umschreiben ‚Äî string_data-Sektion kompakt neu aufbauen (keine Luecken), string_ids-Offsets neu berechnen, Header aktualisieren. Noch nicht implementiert. Siehe "FIX #9" oben. **Wichtiger Neben-Erfolg:** Termux+WLAN-ADB vom Handy funktioniert einwandfrei fuer Logcat (save-tv-log.sh Ein-Klick-Skript in docs/). Laptop wird nicht mehr benoetigt.
-
-
-### ALTERNATIVER WEG: Nuvio-JS-Scraper (Recherche 14.08.2026) - umgeht R8-Problem komplett
-ARVIO hat ZWEI Plugin-Engines (verifiziert in `PluginRuntime.kt` @ v1.9.983):
-1. **.cs3/DEX** (unser Weg): DexClassLoader + cloudstream3-`MainAPI`. Ruft `load()`/`loadLinks()` (suspend) auf. **Betroffen vom R8-Obfuscation-Bug (Erkenntnis #7): Continuation->j7.d => Override bindet nicht => Parent laeuft => 0 Quellen. Betrifft ALLE externen .cs3-Plugins.** v14 DEX-Patching ist Workaround, aber Test ausstehend.
-2. **Nuvio-JS** (Alternative): QuickJS (`com.dokar.quickjs`). Ruft `getStreams(tmdbId, mediaType, season, episode)` auf. **KEIN R8-Problem** (JS wird interpretiert, keine Kotlin-Signaturen). **Bestaetigt lauffaehig in ARVIO.**
-
-**Beweis dass Nuvio-JS in ARVIO funktioniert:** GitHub Issue #459 (ProdigyV21/ARVIO) best√§tigt ausdr√ľcklich: das Nuvio-JS-Repo `saimuelbr/saimuel-nuvio-repo` (portugiesische Scraper FSHD/MegaEmbed/Peachify/RedeFlix, obfusziertes JS) **liefert in ARVIO tats√§chlich Streams** ("This raw Nuvio JS repository works in ARVIO"). Dasselbe Issue zeigt aber: komplexe Scraper (`patr0nq/nuvioaddons`) funktionieren NICHT in ARVIO (zu viele fetch chains, Promise.all, gro√üe HTML-Responses).
-
-**JS-Runtime-Interface (verifiziert in `PluginRuntime.kt`):**
-- Plugin exportiert `getStreams(tmdbId, type, season, episode)` ‚Üí returnt Array von `{url, quality, headers, name, title, group, provider}`.
-- ARVIO stellt im JS-Global bereit: `__native_fetch(url, method, headers, body)` (OkHttp-Bridge), `__cheerio_load/select/find/text/html/attr/next/prev` (Jsoup-Wrapper), `console.log/error`, CryptoJS, `fetch` (wrapped).
-- Manifest-Format: root `manifest.json` mit `scrapers: [{id, name, filename, supportedTypes:["movie","tv"], formats:["m3u8"], enabled:true}]`. NICHT das cloudstream3 `repo.json`/`plugins.json`-Format.
-- Kein Build noetig - .js-Dateien direkt auf GitHub raw gehostet.
-
-**Einschraenkungen der JS-Runtime (Issue #459):**
-- Response-Limit **256 KiB** (NuvioTV: 1 MiB) - gro√üe HTML-Seiten koennen abgeschnitten werden.
-- `__native_fetch` via async-OkHttp-Bridge (nicht synchron wie NuvioTV).
-- Kein IPv4-first DNS (vs NuvioTV).
-- Komplexe Multi-Fetch-Provider (patr0nq) laufen nicht; einfache (saimuelbr) schon.
-
-**Gefundene Referenz-Repos (Recherche 14.08.2026):**
-- `saimuelbr/saimuel-nuvio-repo`: **best√§tigt lauff√§hig in ARVIO** (Issue #459). Interface-Vorbild f√ľr `getStreams()`. Portugiesisch.
-- `odoreeci/ARVIO-scrapers`: JS- + .kt-Templates f√ľr Multi-Embed (vidking, 1embed, 2embed, vidlink, vidsrc, embed.su). README dokumentiert beide Wege. Nutzt **TMDB-ID-basierte Embed-Services**: `https://vidking.net/embed/movie/{tmdbId}` bzw. `/embed/tv/{tmdbId}/{season}/{episode}` ‚Üí HTML parsen ‚Üí m3u8/mp4. **Einfachster Weg zu Quellen** (kein Title-Matching, kein Scraper-Seiten-Scraping). Das `.kt`-Template (`MultiEmbedPlugin.kt`) nutzt dieselbe suspend-Override-Signatur wie wir ‚Üí wuerde am selben R8-Bug scheitern; der JS-Weg ist der lauff√§hige.
-- `patr0nq/nuvioaddons`: funktioniert NICHT in ARVIO (zu komplex f√ľr 256KiB-Limit).
-- `perfecplay/Brosvod-Nuvio-Arvio`: InatBox native JS-Test (T√ľrkisch).
-- `Real-Morpheus/arvio-android-tv`: alte vereinfachte ARVIO-Version, l√§dt nur Repo-Manifeste, kein DexClassLoader. Irrelevant.
-
-**Implikation f√ľr unsere Architektur (Entscheidung ausstehend):**
-- **Stalker-VOD (Modul 2)** braucht .cs3/DEX (Config-Seite, eigene Kataloge - das kann JS nicht: `getStreams` ist das EINZIGE was JS-Plugins tun). => Weiter v15-Weg.
-- **Web-Scraper (Modul 1)** k√∂nnte auf Nuvio-JS umgestellt werden ‚Üí w√ľrde **sofort funktionieren** (saimuelbr beweist es), kein R8-Risiko, keine stdlib-B√ľndelung. Filmpalast-Scraper von Kotlin nach JS portieren. Risiko: 256KiB-Limit bei Filmpalast-HTML.
-- **Empfohlener Hybrid-Ansatz:** Modul 1 (Web-Scraper) als Nuvio-JS ‚Üí lauff√§hige Quellen JETZT. Modul 2 (Stalker-VOD) bleibt .cs3/DEX. So hat der Nutzer schnell funktionierende Quellen, unabhaengig vom v14-Testergebnis.
-- **Schnellster Quellen-Weg (ohne eigene Scraper-Seite):** TMDB-ID-basierte Embed-Services (vidsrc.me, vidlink.org, 2embed.cc) wie `odoreeci` - bauen Embed-URL aus TMDB-ID, ziehen m3u8 aus Player-HTML. Laufen am ehesten im 256KiB-Limit. Nicht deutschspezifisch, aber robust.
+- **Erkenntnis #8 + v15 (14.08.2026):** v14-TV-Test (arvio-tv-log-v14.txt) zeigte: DEX ist KAPUTT — ART-Verifier lehnt ab ("Failure to verify dex file: Non-zero padding b before section of type 8196 at offset 0x3111d2"). Root-Cause: dex2jar-Klassen (j7/d, j7/j, x7/l) wurden mit in die DEX gebuendelt und korrumpten deren Struktur. **Fix #8 (v15):** zurueck zum unobfuszierten Stub (keine dex2jar-Klassen -> valide DEX) + Post-Build-DEX-Patching (4 Typ-Strings). DexClassLoader parent-first-Delegation loest j7/d auf ARVIOs eigene Klasse -> Override-Deskriptoren matchen -> Dispatch bindet. CI baut v15 beim Push auf main. **Test auf TCL C7K TV ausstehend** (Windows 10 Anleitung: `docs/windows-10-test-guide.md`, Log-Datei `arvio-tv-log-v16.txt`).
