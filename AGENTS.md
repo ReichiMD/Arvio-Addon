@@ -494,7 +494,20 @@ Verifiziert im ARVIO-DEX: j7/g hat 0 statische Felder; einziges Feld vom Typ j7/
 ### FIX #12 (IMPLEMENTIERT, 15.08.2026, v19): Fieldref-Rewrite ContinuationInterceptor.Key -> j7/f.i
 patch_class_obfuscation.py um Phase 2 erweitert: nach Utf8-Renames den Constant Pool walken, fuer jeden Fieldref (Class=j7/g, Name=Key, Type=Lj7/f;) die class_index+name_and_type_index umschreiben auf (Class=j7/f, Name=i, Type=Lj7/f). Class_info + NameAndType-Eintraege werden bei Bedarf am Pool-Ende angehaengt (bestehende Indizes bleiben stabil). WICHTIG: CONSTANT_Class_info nutzt internal-name (j7/g) nicht Deskriptor (Lj7/g;) in .class-Dateien.
 Verifiziert: ContinuationImpl.intercepted()/releaseIntercepted() machen jetzt sget-object Lj7/f;->i (war Lj7/g;->Key). Override-Signaturen korrekt. CI gruen. builds: v19.
-- **v19** (AKTUELL): Fieldref-Rewrite ContinuationInterceptor.Key->j7/f.i (Fix #12). Phase 2 constant-pool fieldref rewrite. CI gruen. builds: v19.
+### ERKENNTNIS #13 (15.08.2026, v19+v20-TV-Tests): okhttp3 + coroutine-Resume broken -> app.get unbrauchbar
+v19-TV-Test: ContinuationInterceptor.Key-Fehler WEG (Fieldref-Rewrite funktioniert). load() laeuft, TMDB parsed. ABER:
+NoSuchMethodError: get$default(...Lokhttp3/Interceptor;...Lj7/d;...) in com.lagradost.nicehttp.Requests
+Root cause: ARVIO obfuscated das GANZE okhttp3-Paket zu rb/* (nur ~3 Klassen erhalten). Unsere app.get-Aufrufsite nutzt unobfuscated okhttp3.Interceptor, ARVIOs get$default erwartet rb/c0 -> Signatur-Mismatch.
+v20-Fix: okhttp3/Interceptor -> rb/c0 zur RENAMES-Map hinzugefuegt. CI gruen. v20-TV-Test: okhttp-Fehler WEG, ABER:
+ClassCastException: k7.a cannot be cast to com.lagradost.nicehttp.NiceResponse
+k7/a ist ein 3-Wert-Enum. app.get (suspend, ARVIO-provided) resume-t nicht korrekt aus unserem externen Plugin -> gibt stray Enum statt NiceResponse zurueck. Die coroutine-Machinery ist fuer externe .cs3-Aufrufe von ARVIOs suspend-Funktionen grundsaetzlich gestoert (okhttp3 ~100 Klassen obfuscated, Whack-a-Mole endlos).
+
+### FIX #13 (IMPLEMENTIERT, 15.08.2026, v21): HTTP komplett auf java.net + jsoup umgestellt (app.get entfernt)
+Strategiewechsel: nicht mehr jede obfuscated okhttp/coroutine-Type einzeln jagen. Statt ARVIOs suspend app.get (NiceHttp/okhttp) nutzen wir plain java.net.HttpURLConnection (JDK, NIE obfuscated) + Jsoup.parse (jsoup von ARVIO unobfuscated kept, 330 Klassen verifiziert). Alle internen HTTP-Helfer (fetchTmdbMeta, searchFilmpalast, buildMovieResponse, genericResolve) -> httpGet()-Helper, nicht-suspend. withTimeoutOrNull entfernt (stattdessen java.net connect/read timeouts). load()/loadLinks()/search() bleiben suspend (cloudstream3 API-Vertrag, DEX-patched j7/d) aber haben keine inneren suspend-Aufrufe mehr (coroutine state machine trivial -> obfuscated-Type-Breakage umgangen). AUSNAHME: loadExtractor + newMovieLoadResponse/newTvSeriesLoadResponse bleiben suspend-Aufrufe (ARVIO->ARVIO intern, funktionieren wie ARVIOs eigene Scraper). Builds: v21. CI gruen.
+- **v21** (AKTUELL): HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21.
+
+### NEUE ARVIO-VERSION v1.9.994 (15.08.2026)
+ARVIO v1.9.994 heute veroeffentlicht. VERIFIZIERT: Obfuskations-Map UNVERAENDERT (j7/d immer noch Continuation, rb/c0 immer noch okhttp3.Interceptor) -> unsere DEX-Patches funktionieren weiterhin. Neue nuetzliche Features: "Refresh Add-ons"-Aktion (#511, Plugin-Update ohne Loeschen/Neu-Hinzufuegen), "Fixed release dependency injection for sideload builds" (#525). Release-Notes erwaehnen NICHT den Cloudstream3-.cs3-Plugin-Obfuskations-Bug -> Kernproblem von ARVIO nicht geloest, nur unsere Patches bleiben kompatibel. Nutzer kann auf 1.9.994 updaten (sicher).
 - Letzter Commit auf `main`: v17 (Fix #10, pre-d8 .class patching). Builds-Version: 17.
 
 ### Was fertig ist (unver–ď“ď–í”®ndert g–ď“ď–í—ėltig)
