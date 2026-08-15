@@ -15,7 +15,6 @@ import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
@@ -31,7 +30,7 @@ import org.jsoup.select.Elements
  * series collects every matching episode into a TvSeriesLoadResponse.
  *
  * `dataUrl`/Episode.data carries the full Filmpalast stream URL; loadLinks() fetches that
- * page and resolves each registered hoster via loadExtractor.
+ * page and resolves each hoster via our own non-suspend extractors (java.net + jsoup).
  */
 class FilmpalastProvider : TmdbProvider() {
     override var mainUrl = "https://filmpalast.to"
@@ -408,11 +407,12 @@ class FilmpalastProvider : TmdbProvider() {
      *  - a MovieLoadResponse.dataUrl = JSON {"links":[...]} (movie path), or
      *  - an Episode.data = the Filmpalast stream page URL (series path).
      *
-     * For each hoster link we first try cloudstream3's loadExtractor (matches built-in
-     * extractors by domain: Voe, Firestream, FileMoonSx, Supervideo, VidHidePro, ...).
-     * If no registered extractor handles the domain (Filmpalast rotates obscure hosters
-     * like vidaraa.cc, vidsonic.net, jabturfembitter.com), we fall back to a generic
-     * page-scrape that looks for direct mp4/m3u8 URLs in the embed page.
+     * For each hoster link we resolve it ourselves via resolveHost (hoster-specific extractors
+     * like VOE, plus a generic page-scrape for direct mp4/m3u8 URLs). We do NOT call
+     * cloudstream3's loadExtractor: it is an ARVIO-provided suspend function that is broken for
+     * external .cs3 plugins (coroutine resume returns a stray obfuscated object instead of
+     * Boolean -> ClassCastException, and callback emissions never reach ARVIO). All our hoster
+     * extraction is non-suspend (java.net + jsoup), sidestepping the ARVIO coroutine machinery.
      */
     override suspend fun loadLinks(
         data: String,
@@ -458,40 +458,141 @@ class FilmpalastProvider : TmdbProvider() {
                 DebugLog.w(dbg, "loadLinks: fixUrlNull null for '$link' -> skip")
                 continue
             }
-            try {
-                val matched = loadExtractor(fixed, "$mainUrl/", subtitleCallback, callback)
-                DebugLog.t(dbg, "loadLinks: loadExtractor('$fixed') -> matched=$matched")
-                if (matched) {
-                    any = true
-                } else {
-                    // No registered extractor for this domain: generic fallback.
-                    val fallback = genericResolve(fixed, "$mainUrl/", callback)
-                    DebugLog.t(dbg, "loadLinks: genericResolve('$fixed') -> found=$fallback")
-                    any = fallback || any
-                }
-            } catch (e: Exception) {
-                DebugLog.w(dbg, "loadLinks: loadExtractor('$fixed') threw ${e.javaClass.simpleName}: ${e.message} -> trying generic")
-                any = genericResolve(fixed, "$mainUrl/", callback) || any
-            }
+            // NOTE: cloudstream3's loadExtractor is an ARVIO-provided suspend function, and like
+            // app.get (Erkenntnis #13/#14) it is broken for external .cs3 plugins: the coroutine
+            // resume returns a stray obfuscated object (k7.a / d7.d0) instead of Boolean, throwing
+            // ClassCastException, and callback emissions never reach ARVIO ("0 links collected"
+            // despite any=true). So we resolve hosters ourselves with java.net + jsoup (no suspend,
+            // no ARVIO coroutine involvement) via resolveHost.
+            val found = resolveHost(fixed, callback)
+            DebugLog.t(dbg, "loadLinks: resolveHost('$fixed') -> found=$found")
+            any = found || any
         }
         DebugLog.t(dbg, "loadLinks: DONE, any=$any (any=true means at least one source emitted)")
         return any
     }
 
     /**
-     * Best-effort generic resolver for hoster embed pages that no cloudstream3 extractor
-     * covers. Fetches the embed page and scans for direct video URLs (mp4, m3u8) in
-     * common patterns: JSON sources arrays, hls.js player config, source tags.
+     * Resolve a hoster embed URL to direct video URLs, emitting ExtractorLinks via callback.
+     * Dispatches to hoster-specific extractors by domain, falling back to a generic page-scrape
+     * for direct mp4/m3u8 URLs. All non-suspend (java.net + jsoup) to avoid the broken ARVIO
+     * coroutine machinery for external .cs3 plugins (see loadExtractor note above).
+     */
+    private fun resolveHost(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        return try {
+            val host = java.net.URI(url).host?.lowercase() ?: ""
+            when {
+                host.contains("voe.") || host.endsWith("voe.sx") || host.contains("voe.sx") -> resolveVoe(url, callback)
+                // Add more hoster-specific extractors here as needed (odysseusa, vidsonic, ...).
+                else -> genericResolve(url, callback)
+            }
+        } catch (e: Exception) {
+            DebugLog.w(dbg, "resolveHost: '$url' threw ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * VOE (voe.sx and mirrors) extractor. The embed page contains an obfuscated JS blob; the
+     * video URL (m3u8) is stored in a JSON-ish `{"hls":"...","mp4":{"...":"..."}}` structure or
+     * a `var ... = [...];` array, often inside an eval'd / p.a.c.k.e.r'd script. We look for the
+     * hls/mp4 URLs directly in the page text and in base64-decoded / eval-unpacked script bodies.
+     */
+    private fun resolveVoe(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val res = httpGet(url, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to mobileUA))
+        if (res.code !in 200..299) {
+            DebugLog.w(dbg, "resolveVoe: GET $url -> HTTP ${res.code}")
+            return false
+        }
+        val text = res.text
+        var found = false
+
+        // 1. Direct hls/mp4 URLs in the page (newer VOE pages embed them in a JSON-ish blob).
+        //    Patterns: "hls":"https://...m3u8"  or  sources:[{"file":"...m3u8"}]  or  "src":"...mp4"
+        val urlPatterns = listOf(
+            Regex(""""hls"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)""""),
+            Regex(""""mp4"\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
+            Regex(""""file"\s*:\s*"(https?://[^"]+\.(?:m3u8|mp4)[^"]*)""""),
+            Regex(""""src"\s*:\s*"(https?://[^"]+\.(?:m3u8|mp4)[^"]*)""""),
+            Regex("""'(https?://[^']+\.m3u8[^']*)'"""),
+            Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)"""),
+            Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)""")
+        )
+        for (p in urlPatterns) {
+            p.findAll(text).forEach { m ->
+                emitLink("VOE", m.groupValues[1], callback)
+                found = true
+            }
+            if (found) break
+        }
+
+        // 2. P.a.c.k.e.r'd script: `eval(function(p,a,c,k,e,d){...}('...',..,..))` -> unpack.
+        if (!found) {
+            val packer = Regex("""eval\(function\(p,a,c,k,e,d\)\{[^}]*\}\('([^']+)'[^)]*\)\)""").find(text)
+            if (packer != null) {
+                val unpacked = unpackPacker(packer.groupValues[1])
+                for (p in urlPatterns) {
+                    p.findAll(unpacked).forEach { m ->
+                        emitLink("VOE", m.groupValues[1], callback)
+                        found = true
+                    }
+                    if (found) break
+                }
+            }
+        }
+
+        // 3. Base64-encoded body: `let xxx = "<base64>";` then `eval(atob(xxx))` or similar.
+        if (!found) {
+            val b64 = Regex("""['"]([A-Za-z0-9+/=]{200,})['"]""").findAll(text).toList()
+            for (m in b64) {
+                val decoded = try { String(android.util.Base64.decode(m.groupValues[1], android.util.Base64.DEFAULT), Charsets.UTF_8) } catch (_: Exception) { continue }
+                for (p in urlPatterns) {
+                    p.findAll(decoded).forEach { mm ->
+                        emitLink("VOE", mm.groupValues[1], callback)
+                        found = true
+                    }
+                    if (found) break
+                }
+                if (found) break
+            }
+        }
+
+        DebugLog.t(dbg, "resolveVoe: GET $url -> ${res.code}, len=${text.length}, found=$found")
+        return found
+    }
+
+    /** Minimal dean-edwards packer payload unpacker (`function(p,a,c,k,e,d)`). */
+    private fun unpackPacker(p: String): String {
+        return try {
+            val payload = Regex("""'([^']+)'\.split\('\|'\)""").find(p)?.groupValues?.get(1) ?: return p
+            val words = payload.split("|")
+            val sb = StringBuilder()
+            // Replace \w+ tokens: the packer replaces each token by words[token-as-base36].
+            Regex("""\b(\w+)\b""").findAll(p).forEach { m ->
+                val idx = m.groupValues[1].toIntOrNull(36)
+                if (idx != null && idx in words.indices && words[idx].isNotEmpty()) sb.append(words[idx])
+                else sb.append(m.groupValues[1])
+            }
+            sb.toString()
+        } catch (_: Exception) {
+            p
+        }
+    }
+
+    /**
+     * Best-effort generic resolver for hoster embed pages that no hoster-specific extractor
+     * covers. Fetches the embed page and scans for direct video URLs (mp4, m3u8) in common
+     * patterns: JSON sources arrays, hls.js player config, source tags.
      */
     private fun genericResolve(
         url: String,
-        referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            val res = httpGet(url, headers = mapOf("Referer" to referer, "User-Agent" to mobileUA))
+            val res = httpGet(url, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to mobileUA))
             val text = res.text
             val base = url.substringBeforeLast("/")
+            val root = url.substringBefore("/").dropLastWhile { it != '/' }
             var found = false
 
             // 1. Direct m3u8 URLs
@@ -504,14 +605,16 @@ class FilmpalastProvider : TmdbProvider() {
                 emitLink("Generic", m.groupValues[1], callback)
                 found = true
             }
-            // 3. Relative m3u8/mp4 paths resolved against base
-            Regex("""["'(]((?:/[^"')\s]+|\.\./[^"')\s]+|[^"')\s]+\.(?:m3u8|mp4))["')]""").findAll(text).forEach { m ->
+            // 3. Relative m3u8/mp4 paths resolved against base (balanced regex).
+            Regex("""["'(]([^"'\s)]+\.(?:m3u8|mp4)[^"'\s)]*)["')]""").findAll(text).forEach { m ->
                 val p = m.groupValues[1]
-                if (p.endsWith(".m3u8") || p.endsWith(".mp4")) {
-                    val abs = if (p.startsWith("http")) p else if (p.startsWith("/")) url.substringBefore("/").dropLastWhile { it != '/' } + p else "$base/$p"
-                    emitLink("Generic", abs, callback)
-                    found = true
+                val abs = when {
+                    p.startsWith("http") -> p
+                    p.startsWith("/") -> root + p
+                    else -> "$base/$p"
                 }
+                emitLink("Generic", abs, callback)
+                found = true
             }
             DebugLog.t(dbg, "genericResolve: GET $url -> ${res.code}, len=${text.length}, found=$found")
             found
