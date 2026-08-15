@@ -505,7 +505,43 @@ k7/a ist ein 3-Wert-Enum. app.get (suspend, ARVIO-provided) resume-t nicht korre
 ### FIX #13 (IMPLEMENTIERT, 15.08.2026, v21): HTTP komplett auf java.net + jsoup umgestellt (app.get entfernt)
 Strategiewechsel: nicht mehr jede obfuscated okhttp/coroutine-Type einzeln jagen. Statt ARVIOs suspend app.get (NiceHttp/okhttp) nutzen wir plain java.net.HttpURLConnection (JDK, NIE obfuscated) + Jsoup.parse (jsoup von ARVIO unobfuscated kept, 330 Klassen verifiziert). Alle internen HTTP-Helfer (fetchTmdbMeta, searchFilmpalast, buildMovieResponse, genericResolve) -> httpGet()-Helper, nicht-suspend. withTimeoutOrNull entfernt (stattdessen java.net connect/read timeouts). load()/loadLinks()/search() bleiben suspend (cloudstream3 API-Vertrag, DEX-patched j7/d) aber haben keine inneren suspend-Aufrufe mehr (coroutine state machine trivial -> obfuscated-Type-Breakage umgangen). AUSNAHME: loadExtractor + newMovieLoadResponse/newTvSeriesLoadResponse bleiben suspend-Aufrufe (ARVIO->ARVIO intern, funktionieren wie ARVIOs eigene Scraper). Builds: v21. CI gruen.
 - **v21**: HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21.
-- **v22** (AKTUELL): Jackson/parseJson durch org.json ersetzt (Fix #15). v21-TV-Test war MEGA-DURCHBRUCH (Dispatch bindet, httpGet funktioniert, TMDB-Meta geholt), aber parseJson<TmdbMeta> crashte wegen kotlin-reflect von R8 gestript ("This callable does not support a default call"). org.json = Android built-in, nie obfuscated, keine Reflection. CI gruen. builds: v22 (1478891 bytes). AUF TV/HANDY-TEST AUSSTEHEND (Stand 15.08.2026).
+- **v22**: Jackson/parseJson durch org.json ersetzt (Fix #15). v21-TV-Test war MEGA-DURCHBRUCH (Dispatch bindet, httpGet funktioniert, TMDB-Meta geholt), aber parseJson<TmdbMeta> crashte wegen kotlin-reflect von R8 gestript ("This callable does not support a default call"). org.json = Android built-in, nie obfuscated, keine Reflection. CI gruen. builds: v22 (1478891 bytes).
+- **v23** (AKTUELL): loadExtractor entfernt + eigene Hoster-Extraktion + Regex-Fix (Fix #16). v22-TV-Test: Scraper lief KOMPLETT durch (TMDB-Meta geparst, Filmpalast-Suche 5 Treffer, 4 Hoster-Links, MovieLoadResponse geladen, loadLinks aufgerufen), ABER loadExtractor crashte (ClassCastException k7.a/d7.d0 -> java.lang.Boolean, gleiches Problem wie app.get: ARVIO-suspend fuer externe Plugins broken) + genericResolve-Regex hatte unbalancierte Klammern. Fix: loadExtractor komplett entfernt, resolveHost() dispatcht per Domain zu eigenen non-suspend Extractoren (resolveVoe fuer voe.sx) mit generic page-scrape fallback. Regex fixiert. CI gruen. builds: v23 (1479448 bytes). AUF TV/HANDY-TEST AUSSTEHEND (Stand 15.08.2026).
+
+### ENTSCHEIDENDE ERKENNTNIS #16 (15.08.2026, v22-TV-Test): Scraper laeuft KOMPLETT durch + loadExtractor broken + Regex-Bug
+
+v22-TV-Test (arvio-tv-log-v22-filtered.txt) = weiterer MEGA-Fortschritt. Jackson-Fix (v22) funktioniert, Scraper laeuft KOMPLETT durch bis zur Hoster-Extraktion:
+- `load: TMDB meta -> title='Matrix' year=1999` -> org.json-Parsing klappt!
+- `searchFilmpalast: CSS selector matched 5 elements` -> Filmpalast-Suche laeuft!
+- `buildMovieResponse: collected 4 hoster links` (odysseusa.cc, voe.sx, vidsonic.net, flyfile.app) -> Hoster extrahiert!
+- `TmdbProvider Filmpalast: loaded MovieLoadResponse` + `loadLinks data={"links":[...]}` -> loadLinks aufgerufen!
+
+ABER zwei Probleme in loadLinks:
+
+**Problem 1 (CRASH): loadExtractor wirft ClassCastException**
+```
+loadExtractor('https://voe.sx/...') threw ClassCastException: k7.a cannot be cast to java.lang.Boolean
+loadExtractor('https://flyfile.app/...') threw ClassCastException: d7.d0 cannot be cast to java.lang.Boolean
+```
+- `loadExtractor` ist eine ARVIO-provided suspend-Funktion (liefert Boolean). **Gleiches Problem wie app.get (Erkenntnis #13/#14):** die Coroutine-Machinery ist fuer externe .cs3-Plugins broken - resume liefert stray obfuszierte Enum/Objekte (k7.a = 3-Wert-Enum, d7.d0) statt Boolean -> ClassCastException.
+- Zusaetzlich: `0 links collected` trotz `any=true` -> die callback-Emissionen erreichen ARVIO ebenfalls nicht (callback ist auch eine suspend-beteiligte Function1, deren Typ-Deskriptor mismatched).
+- Das beweist: **JEDE ARVIO-provided suspend-Funktion** ist fuer externe .cs3-Plugins broken (app.get, loadExtractor, und vermutlich alle anderen). Die Coroutine Continuation-Typen mismatchen (Erkenntnis #7).
+
+**Problem 2 (BUG): genericResolve-Regex unbalanciert**
+```
+PatternSyntaxException: Incorrectly nested parentheses near index 64
+["'(]((?:/[^"')\s]+|\.\./[^"')\s]+|[^"')\s]+\.(?:m3u8|mp4))["')]
+```
+- Der 3. Regex-Pattern hatte 3 oeffnende `(` aber nur 2 schliessende `)` - die `(?:` fuer die Alternation wurde nie geschlossen. War schon in v21 drin, wurde aber nie erreicht (weil v21 vorher crashte).
+
+**Fix #16 (IMPLEMENTIERT, 15.08.2026, v23):** Konsistent mit v21-Strategie (keine ARVIO-provided suspend-Funktionen aus unserem Plugin aufrufen):
+- **loadExtractor komplett entfernt.** Neue `resolveHost(url, callback)` dispatcht per Domain zu hoster-spezifischen non-suspend Extractoren.
+- **resolveVoe** fuer voe.sx (der haeufigste Filmpalast-Hoster): parst die VOE-Embed-Seite nach hls/mp4 URLs (JSON-ish `"hls":"..."`/`"file":"..."`/`"src":"..."` Blob, p.a.c.k.e.r'd script unpacking, base64-decoded body fallback).
+- **genericResolve** als Fallback fuer unbekannte Hoster: fetcht Embed-Seite, sucht direkte mp4/m3u8 URLs. Regex fixiert (balanciert).
+- **Alle Extraktion non-suspend** (java.net + jsoup), umgeht ARVIO-Coroutine-Machinery komplett.
+- Verifiziert: FilmPalast.cs3 v23 (1479448 bytes), **0 loadExtractor-Referenzen** in DEX, resolveVoe/resolveHost vorhanden, Override-Signaturen korrekt obfusziert. CI gruen. builds: v23.
+
+**Erwartung v23-Test:** loadExtractor-Crash weg. resolveHost/resolveVoe laufen. Falls VOE-Embed-Seite eine direkte m3u8-URL enthaelt (oder im p.a.c.k.e.r'd/base64-Body), erscheint eine VOE-Quelle in ARVIO. Falls nicht (VOE hat die URL tiefer verschachtelt): resolveVoe findet nichts, genericResolve versucht odysseusa/vidsonic/flyfile. Naechster moeglicher Fehler: Hoster-spezifische Extraktion trifft nicht (VOE aendert Obfuskations-Pattern) -> 0 Quellen aber KEIN Crash. Dann resolveVoe-Logik nachschaerfen (Logcat zeigt `resolveVoe: ... found=false` -> Embed-Seite-HTML analysieren).
 
 ### ENTSCHEIDENDE ERKENNTNIS #15 (15.08.2026, v21-TV-Test): DURCHBRUCH + Jackson/kotlin-reflect von R8 gestript
 
@@ -567,31 +603,31 @@ Nutzer kann ab sofort auch auf dem HANDY testen (UI-Bug behoben). Fuer Logcat oh
 
 ### NAECHSTE SCHRITTE (Stand 15.08.2026, fuer naechste Session)
 
-**Prio 1 - v22 am Geraet testen (Handy ODER TV):**
-- v22 steht auf builds (status=1, version=22, 1478891 bytes). CI gruen.
+**Prio 1 - v23 am Geraet testen (Handy ODER TV):**
+- v23 steht auf builds (status=1, version=23, 1479448 bytes). CI gruen.
 - Handy-Test jetzt moeglich (UI-Bug in 1.9.994 behoben). Logcat via LADB+Termux (docs/handy-logcat-ladb-termux.md) ODER weiterhin TV+Laptop WLAN-ADB.
-- Setup: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v22).
+- Setup: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v23).
 - Test: `logcat -c` -> Matrix (TMDB 603) suchen -> "Nach Quellen suchen" -> 15s warten -> Logcat holen.
-- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet fetchTmdbMeta searchFilmpalast matchResults buildMovieResponse collectHosterLinks loadExtractor default call`.
-- **Was im Log zu suchen (entscheidend nach v22-Jackson-Fix):**
-  - `fetchTmdbMeta: GET ... -> 200` ohne darauf folgenden `default call`-Fehler -> Jackson-Fix funktioniert! TMDB-Meta wird jetzt geparsed.
-  - `load: TMDB meta -> title='Matrix' year=...` -> Meta-Parsing erfolgreich (org.json klappt!).
-  - `searchFilmpalast: ... matched N elements` -> Filmpalast-Suche laeuft!
-  - `buildMovieResponse` + `collectHosterLinks` + `loadExtractor` -> Hoster-Extraktion laeuft.
-  - Filmpalast-Quellen in ARVIO-Quellenauswahl -> **ZIEL ERREICHT!**
-  - Falls `default call`-Fehler WIEDER auftaucht (woanders): noch eine Jackson-Referenz uebersehen (grep nach parseJson/toJson/JsonProperty im Code).
-  - Falls NEUER Fehler bei `newMovieLoadResponse`/`newTvSeriesLoadResponse`/`loadExtractor` (ARVIO-suspend-Funktionen): diese sind ARVIO->ARVIO intern, sollten wie ARVIOs eigene Scraper funktionieren. Falls sie intern Jackson nutzen und crashten: koennen wir nicht fixen (ARVIO-Code), aber unwahrscheinlich da ARVIOs eigene Scraper laufen.
-  - Falls `httpGet` schlaegt fehl (Timeout/Verbindungsfehler): Netzwerk/Bot-Schutz, nicht Obfuskation.
-  - Falls Scraper durchlaeuft aber 0 Quellen: Scraper-Logik (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz auf filmpalast.to).
+- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet fetchTmdbMeta searchFilmpalast matchResults buildMovieResponse collectHosterLinks loadLinks resolveHost resolveVoe genericResolve ClassCastException PatternSyntaxException`.
+- **Was im Log zu suchen (entscheidend nach v23-loadExtractor-Fix):**
+  - `resolveHost('https://voe.sx/...')` + `resolveVoe: GET ... -> 200, len=..., found=...` -> resolveHost/resolveVoe laufen (kein loadExtractor-Crash mehr!).
+  - `resolveVoe: ... found=true` -> VOE-Quelle extrahiert! **Quelle in ARVIO sichtbar = ZIEL ERREICHT!**
+  - `resolveVoe: ... found=false` -> VOE-Embed-Seite enthielt keine direkt-matchbare m3u8-URL. Naechster Schritt: Embed-Seiten-HTML analysieren (Logcat zeigt len=...; ggf. resolveVoe-Logik nachschaerfen - VOE aendert Obfuskations-Pattern oft).
+  - `genericResolve: ... found=true/false` -> Fallback fuer odysseusa/vidsonic/flyfile.
+  - `loadLinks: DONE, any=true` + ARVIO `N links collected` (N>0) -> **ERFOLG!**
+  - `loadLinks: DONE, any=false` -> keine Hoster-Quelle gefunden (Extraktion trifft nicht, aber KEIN Crash).
+  - Falls NEUER ClassCastException/NoSuchMethodError: noch eine ARVIO-suspend-Funktion gefunden die wir aufrufen (grep nach `loadExtractor`/suspend-Aufrufen im Code).
+  - Falls PatternSyntaxException WIEDER: noch ein Regex kaputt (diesmal nicht nur der 3.).
+  - Falls App-Crash (FATAL EXCEPTION): welcher Thread? Wenn `ArvioAddon`-Thread -> unsere Exception entwischt (Throwable-catch pruefen). Wenn ARVIO-Thread -> ARVIO-seitig nach 0 Quellen.
 
-**Prio 2 - Je nach v22-Logcat-Befund:**
-- Falls Scraper durchlaeuft aber 0 Quellen: Scraper-Logik debuggen (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz). Naechste Ebene - jetzt ist es "echtes" Scraping, kein Obfuskations-Problem mehr.
-- Falls loadExtractor crasht (suspend, ARVIO-provided): pruefen ob ARVIOs eigene Extractoren fuer die Filmpalast-Hoster registriert sind; ggf. eigenen non-suspend Extractor bauen (java.net statt loadExtractor).
-- Falls httpGet Timeout: mobileUA/Headers pruefen, ggf. Cloudflare/Bot-Schutz auf filmpalast.to.
+**Prio 2 - Je nach v23-Logcat-Befund:**
+- Falls resolveVoe found=false: VOE-Embed-Seite-HTML aus Logcat (len=...) oder direkt curl'n, Obfuskations-Pattern analysieren, resolveVoe-Regexes nachschaerfen. VOE nutzt oft `eval(function(p,a,c,k,e,d)` packer oder base64 - resolveVoe hat beide, aber Pattern koennte anders sein.
+- Falls genericResolve findet nichts fuer odysseusa.cc/vidsonic.net: hoster-spezifische Extractoren hinzufuegen (wie resolveVoe). Diese Hoster nutzen JWPlayer mit API-Call (`t.streaming_url`), nicht direkte URLs -> komplexer.
+- Falls 0 Quellen aber kein Crash: Hoster-Extraktion ist jetzt "echte Arbeit" (Ebene 2), kein Obfuskations-Problem mehr.
 
-**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v22-Befund):**
+**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v23-Befund):**
 Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereiten". Drei klare Bugs:
-1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 + stript kotlin-reflect -> externe .cs3-Plugins koennen suspend-Overrides, app.get UND Jackson-JSON-Parsing nicht nutzen (Haupt-Bug, Erkenntnis #7+#13+#15).
+1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 + stript kotlin-reflect -> externe .cs3-Plugins koennen suspend-Overrides, app.get, loadExtractor UND Jackson-JSON-Parsing nicht nutzen (Haupt-Bug, Erkenntnis #7+#13+#14+#15+#16).
 2. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (Erkenntnis #1).
 3. (ehemals Touch-Bug Add-Repo-Dialog - BEHOBEN in 1.9.994, Nutzer bestaetigt).
 AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]".
