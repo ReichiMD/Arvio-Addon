@@ -507,7 +507,31 @@ Strategiewechsel: nicht mehr jede obfuscated okhttp/coroutine-Type einzeln jagen
 - **v21**: HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21.
 - **v22**: Jackson/parseJson durch org.json ersetzt (Fix #15). v21-TV-Test war MEGA-DURCHBRUCH (Dispatch bindet, httpGet funktioniert, TMDB-Meta geholt), aber parseJson<TmdbMeta> crashte wegen kotlin-reflect von R8 gestript ("This callable does not support a default call"). org.json = Android built-in, nie obfuscated, keine Reflection. CI gruen. builds: v22 (1478891 bytes).
 - **v23**: loadExtractor entfernt + eigene Hoster-Extraktion + Regex-Fix (Fix #16). v22-TV-Test: Scraper lief KOMPLETT durch, ABER loadExtractor crashte (ClassCastException, ARVIO-suspend broken) + genericResolve-Regex unbalanciert. Fix: loadExtractor entfernt, resolveHost/resolveVoe, Regex fixiert. CI gruen. builds: v23 (1479448 bytes).
-- **v24** (AKTUELL): odysseusa.cc-Extractor (api/stream POST) + matchResults exakt-Match-Fix (Fix #17). v23-TV-Test: KEIN CRASH mehr! Scraper laeuft sauber durch, 0 Quellen, clean termination. Hoster-Analyse (live curl): odysseusa.cc hat /api/stream POST -> JSON streaming_url (master.m3u8, live getestet!), voe.sx = DDoS-Guard, vidsonic.net = obfuscated JS, flyfile.app = Cloudflare. Fix: resolveOdysseusa + httpPost + matchResults exakt-Match-Sort + resolveVoe status-tolerant. CI gruen. builds: v24 (1481193 bytes). AUF TV/HANDY-TEST AUSSTEHEND (Stand 15.08.2026).
+- **v24**: odysseusa.cc-Extractor (api/stream POST) + matchResults exakt-Match-Fix (Fix #17). v23-TV-Test: KEIN CRASH mehr! Scraper laeuft sauber durch, 0 Quellen, clean termination. Hoster-Analyse (live curl): odysseusa.cc hat /api/stream POST -> JSON streaming_url (master.m3u8, live getestet!), voe.sx = DDoS-Guard, vidsonic.net = obfuscated JS, flyfile.app = Cloudflare. Fix: resolveOdysseusa + httpPost + matchResults exakt-Match-Sort + resolveVoe status-tolerant. CI gruen. builds: v24 (1481193 bytes).
+- **v25** (AKTUELL): ExtractorLink primary ctor (no default-args) + catch Throwable (Fix #18). v24-TV-Test: FAST AM ZIEL! matchResults-Fix funktioniert (\"Matrix\" erster Match), richtige Seite geladen (stream/matrix), resolveOdysseusa funktioniert (httpPost -> 200, streaming_url = master.m3u8 extrahiert!). ABER \"0 links collected\" trotz extrahierter URL - Error \"No...\" (NoClassDefFoundError/NoSuchMethodError) bei ExtractorLink-Konstruktion (synthetischer DefaultConstructorMarker-ctor von R8 geschrumpft, wie MainPageData Erkenntnis #6). Fix: ExtractorLink primary ctor (9 positionale Args, keine Defaults), alle catch-Blocks Exception->Throwable (14 Bloecke), emitLink try/catch(Throwable). CI gruen. builds: v25 (1481491 bytes). AUF TV/HANDY-TEST AUSSTEHEND (Stand 15.08.2026).
+
+### ENTSCHEIDENDE ERKENNTNIS #18 (15.08.2026, v24-TV-Test): streaming_url extrahiert! Aber ExtractorLink-ctor von R8 geschrumpft
+
+v24-TV-Test (arvio-tv-log-v24-filtered.txt) = **FAST AM ZIEL!** Drei Fixes funktionieren:
+1. matchResults-Fix: `match: Matrix` ist jetzt ERSTER Match (war \"Matrix Revolutions\").
+2. buildMovieResponse laedt die richtige Seite: `GET https://filmpalast.to/stream/matrix` (war matrix-revolutions).
+3. **resolveOdysseusa funktioniert!** `httpPost: https://odysseusa.cc/api/stream -> 200 (426 bytes)` -> `resolveOdysseusa: streaming_url=https://s25-wyl1.s1q2105.com/hls/.../master.m3u8?token=...` -> **m3u8-URL extrahiert!**
+
+ABER: `0 links collected` trotz extrahierter streaming_url. Fehler: `TmdbProvider Filmpalast loadLinks error: No (0 links collected)` - das \"No\" ist trunciert (NoClassDefFoundError oder NoSuchMethodError).
+
+**Root-Cause (verifiziert an cloudstream3-JAR):** `ExtractorLink` hat 2 Konstruktoren:
+- Primary (9 Params, keine Defaults): `(String, String, String, String, int, Map, String, ExtractorLinkType, List)`
+- Synthetic (11 Params mit DefaultConstructorMarker): fuer Default-Args
+Unser Code nutzte named args (`source=`, `type=`) und liess `headers`/`extractorData`/`audioTracks` auf Defaults -> Kotlin generiert den synthetischen DefaultConstructorMarker-ctor -> **R8 hat diesen geschrumpft** (wie MainPageData, Erkenntnis #6) -> NoSuchMethodError.
+Zusaetzlich: der Error entwischt, weil `resolveHost`/`emitLink` nur `Exception` fingen - `NoSuchMethodError` ist ein **Error** (keine Exception), gleiche Fehlerklasse wie Erkenntnis #2/#3.
+
+**Fix #18 (IMPLEMENTIERT, v25):**
+- **ExtractorLink primary ctor**: alle 9 positionale Args (`source, name, url, mainUrl, Qualities.Unknown.value, emptyMap(), \"\", type, emptyList()`) - keine Defaults, kein DefaultConstructorMarker.
+- **Alle 14 catch-Blocks**: `Exception` -> `Throwable` (faengt nun NoClassDefFoundError/NoSuchMethodError).
+- **emitLink**: try/catch(Throwable) mit vollem Fehler-Logging (`t.javaClass.name`).
+- Verifiziert: v25 (1481491 bytes), emitLink-Signatur korrekt, loadExtractor=0 refs. CI gruen. builds: v25.
+
+**Erwartung v25-Test:** ExtractorLink-Konstruktion klappt (primary ctor ist von -keep retained). callback.invoke(link) emittiert die Quelle an ARVIO. `N links collected` (N>0) -> **Filmpalast-Quelle in ARVIO sichtbar = ZIEL ERREICHT!** Falls doch ein Error (neue geschrumpfte Klasse): try/catch(Throwable) faengt ihn, volles Logging im Logcat zeigt welche Klasse/Methode fehlt.
 
 ### ENTSCHEIDENDE ERKENNTNIS #17 (15.08.2026, v23-TV-Test + Hoster-Analyse): KEIN CRASH, echte Hoster-Extraktion, odysseusa-API gefunden
 
@@ -620,29 +644,28 @@ Nutzer kann ab sofort auch auf dem HANDY testen (UI-Bug behoben). Fuer Logcat oh
 
 ### NAECHSTE SCHRITTE (Stand 15.08.2026, fuer naechste Session)
 
-**Prio 1 - v24 am Geraet testen (Handy ODER TV):**
-- v24 steht auf builds (status=1, version=24, 1481193 bytes). CI gruen.
+**Prio 1 - v25 am Geraet testen (Handy ODER TV):**
+- v25 steht auf builds (status=1, version=25, 1481491 bytes). CI gruen.
 - Handy-Test jetzt moeglich (UI-Bug in 1.9.994 behoben). Logcat via LADB+Termux (docs/handy-logcat-ladb-termux.md) ODER weiterhin TV+Laptop WLAN-ADB.
-- Setup: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v24).
+- Setup: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v25).
 - Test: `logcat -c` -> Matrix (TMDB 603) suchen -> "Nach Quellen suchen" -> 15s warten -> Logcat holen.
-- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet httpPost fetchTmdbMeta searchFilmpalast matchResults buildMovieResponse collectHosterLinks loadLinks resolveHost resolveVoe resolveOdysseusa genericResolve streaming_url`.
-- **Was im Log zu suchen (entscheidend nach v24-odysseusa-Fix):**
-  - `match: Matrix | ...` als ERSTER match (statt Matrix Revolutions) -> matchResults-Fix funktioniert!
-  - `buildMovieResponse: GET https://filmpalast.to/stream/matrix` (statt matrix-revolutions) -> richtige Seite geladen.
-  - `resolveOdysseusa: streaming_url=https://...master.m3u8` -> **ERSTE FILMPALAST-QUELLE EXTRAHIRT! 🎯**
-  - `loadLinks: DONE, any=true` + ARVIO `N links collected` (N>0) -> **ERFOLG! Quelle in ARVIO sichtbar!**
-  - Falls `resolveOdysseusa: POST .../api/stream -> HTTP 403/401` -> API braucht zusaetzliche Header/Cookie (vom Client ggf. anders). Logcat analysieren.
-  - Falls `resolveOdysseusa: no streaming_url in response` -> API-Response leer (filecode falsch? Link abgelaufen?).
-  - `resolveVoe: ... found=false` (erwartet, DDoS-Guard) + `genericResolve: ... found=false` fuer vidsonic/flyfile (erwartet).
+- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet httpPost fetchTmdbMeta searchFilmpalast matchResults buildMovieResponse collectHosterLinks loadLinks resolveHost resolveVoe resolveOdysseusa genericResolve streaming_url emitLink links collected`.
+- **Was im Log zu suchen (entscheidend nach v25-ExtractorLink-Fix):**
+  - `resolveOdysseusa: streaming_url=https://...master.m3u8` (wie v24) -> m3u8 extrahiert.
+  - `loadLinks: DONE, any=true` + ARVIO `N links collected` (N>0) -> **ZIEL ERREICHT! Filmpalast-Quelle in ARVIO sichtbar! 🎯**
+  - Falls `emitLink: threw <classname>: <message>` -> ExtractorLink-ctor oder callback schlaegt fehl. Volles Logging zeigt welche Klasse/Methode. Falls NoClassDefFoundError: naechste R8-stripped cloudstream3-Klasse (z.B. ExtractorLinkType.M3U8 enum, Qualities.Unknown) -> workaround.
+  - Falls `resolveOdysseusa: POST .../api/stream -> HTTP 403` -> API braucht zusaetzliche Header (vom Geraet anders als vom Server). Logcat analysieren.
+  - Falls Quelle erscheint aber Playback nicht startet: m3u8-URL ist temporaer (token), evtl. abgelaufen ODER ARVIO braucht anderen Header.
 
-**Prio 2 - Je nach v24-Logcat-Befund:**
-- Falls odysseusa-Quelle erscheint: **ZIEL ERREICHT!** Weitere Hoster (vidsonic) koennen spaeter hinzugefuegt werden.
-- Falls odysseusa POST schlaegt fehl (403/leere Response): Headers/Cookies pruefen (ggf. erst Embed-Seite fetchen fuer Cookie, dann POST mit Cookie).
-- Falls 0 Quellen trotz resolveOdysseusa running: vidsonic-Extractor bauen (obfuscated JS analysieren) ODER VOE via WebView (komplex, ARVIO-intern).
+**Prio 2 - Je nach v25-Logcat-Befund:**
+- Falls Quelle in ARVIO sichtbar + playback klappt: **ZIEL ERREICHT!** Weitere Hoster (vidsonic, VOE) koennen spaeter hinzugefuegt werden.
+- Falls emitLink threw NoClassDefFoundError: die genannte Klasse workaround-en (z.B. ExtractorLinkType enum -> hardcoded int statt enum? oder andere cloudstream3-API).
+- Falls 0 links collected ohne emitLink-Error: callback.invoke(link) erreicht ARVIO nicht (Function1-Typ-Mismatch wie bei loadExtractor?). Dann: alternative Wege pruefen (direkte List-Rueckgabe? ARVIO-interne callback-Struktur?).
+- Falls odysseusa-POST schlaegt fehl: Headers/Cookies pruefen.
 
-**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v24-Befund):**
+**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v25-Befund):**
 Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereiten". Drei klare Bugs:
-1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 + stript kotlin-reflect -> externe .cs3-Plugins koennen suspend-Overrides, app.get, loadExtractor UND Jackson-JSON-Parsing nicht nutzen (Haupt-Bug, Erkenntnis #7+#13+#14+#15+#16).
+1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 + stript kotlin-reflect + stript DefaultConstructorMarker-ctors -> externe .cs3-Plugins koennen suspend-Overrides, app.get, loadExtractor, Jackson-JSON UND Default-Arg-Konstruktoren nicht nutzen (Haupt-Bug, Erkenntnis #7+#13+#14+#15+#16+#18).
 2. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (Erkenntnis #1).
 3. (ehemals Touch-Bug Add-Repo-Dialog - BEHOBEN in 1.9.994, Nutzer bestaetigt).
 AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]".
