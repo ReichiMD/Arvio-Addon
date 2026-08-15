@@ -104,13 +104,15 @@ subprojects {
     // input. The DexClassLoader then finds stdlib classes within the plugin's own DEX,
     // independent of the parent classloader.
     //
-    // The four suspend/coroutine types (kotlin.coroutines.Continuation, CoroutineContext,
-    // kotlin.jvm.functions.Function, Function1) ARE bundled here unobfuscated, then the
-    // post-build patch script renames their type-descriptor strings to ARVIO's obfuscated
-    // names (j7/d, j7/j, d7/o, x7/l). DexClassLoader uses parent-first delegation, so at
-    // runtime those obfuscated names resolve to ARVIO's OWN classes (our bundled copies are
-    // shadowed and unused) — but crucially the override METHOD DESCRIPTORS now use the
-    // obfuscated strings, so virtual dispatch binds our overrides instead of the parent.
+    // ARVIO's R8 also OBFUSCATES four suspend/coroutine types (kotlin.coroutines.Continuation
+    // -> j7.d, CoroutineContext -> j7.j, kotlin.jvm.functions.Function1 -> x7.l). Our overrides
+    // must use the OBFUSCATED names in their method descriptors or virtual dispatch falls back to
+    // the parent. We patch the .class constant_pool Utf8 entries (plugin + bundled stdlib) BEFORE
+    // d8 runs (scripts/patch_class_obfuscation.py), so d8 emits a correct, sorted, valid DEX with
+    // the obfuscated descriptors natively. Patching the finished DEX was tried in v14-v16 but is
+    // impossible to do correctly: renaming strings in-place breaks the DEX string_ids sort order
+    // ("Out-of-order string_ids"), and compact-repacking still left them unsorted. Pre-d8 .class
+    // patching lets d8 handle sorting/packing/checksums correctly.
     val bundleStdlib by configurations.creating
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlin:kotlin-stdlib:2.3.0")
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
@@ -145,23 +147,45 @@ subprojects {
         compileDexTask.input.from(extractedStdlibDir)
         compileDexTask.dependsOn(extractStdlib)
 
-        // After the .cs3 is built, patch the DEX to replace kotlin type descriptors with
-        // ARVIO's R8-obfuscated equivalents (kotlin.coroutines.Continuation→j7.d, etc.).
-        // This makes suspend-function override method signatures match ARVIO's runtime so
-        // virtual dispatch calls our overrides instead of the parent.
-        val makeTask = tasks.findByName("make") ?: tasks.findByName("makeCloudstreamPlugin")
-        makeTask?.doLast {
-            val cs3File = layout.buildDirectory.file("${project.name}.cs3").get().asFile
-            if (cs3File.exists()) {
-                val patchScript = rootProject.file("scripts/patch_dex_obfuscation.py")
-                if (patchScript.exists()) {
-                    logger.lifecycle("Patching DEX obfuscation in ${cs3File.name}...")
-                    project.exec {
-                        commandLine("python3", patchScript.absolutePath, cs3File.absolutePath)
-                    }
+        // Patch .class constant_pool Utf8 entries to rename the four suspend/coroutine types to
+        // ARVIO's R8-obfuscated names BEFORE d8 compiles them into the DEX. This produces a DEX
+        // whose override method descriptors already use the obfuscated names (so virtual dispatch
+        // binds our overrides) while letting d8 build a correctly sorted, valid DEX. Runs over
+        // BOTH the extracted stdlib dir and the plugin's own compiled-classes dir.
+        val patchClasses = tasks.create("patchClassesForObfuscation")
+        patchClasses.doLast {
+            val patchScript = rootProject.file("scripts/patch_class_obfuscation.py")
+            if (!patchScript.exists()) {
+                logger.warn("patch_class_obfuscation.py not found; skipping obfuscation patch")
+                return@doLast
+            }
+            val targets = mutableListOf<String>()
+            // 1) bundled stdlib classes
+            targets.add(extractedStdlibDir.get().asFile.absolutePath)
+            // 2) plugin's own compiled classes (compileDebugKotlin output dir)
+            val kotlinCompileTask = tasks.findByName("compileDebugKotlin")
+            if (kotlinCompileTask != null) {
+                // Use reflection to read destinationDirectory to avoid hard-coding a dependency
+                // on the Kotlin Gradle plugin's task type at script-compile time.
+                val destDir = try {
+                    val prop = kotlinCompileTask.javaClass.getMethod("getDestinationDirectory")
+                    (prop.invoke(kotlinCompileTask) as org.gradle.api.provider.Provider<*>).get() as java.io.File
+                } catch (e: Exception) {
+                    // Fallback: outputs.files first directory
+                    kotlinCompileTask.outputs.files.files.first { it.isDirectory }
                 }
+                targets.add(destDir.absolutePath)
+            }
+            logger.lifecycle("Patching .class obfuscation in: ${targets.joinToString()}")
+            project.exec {
+                commandLine("python3", patchScript.absolutePath, *targets.toTypedArray())
             }
         }
+        patchClasses.dependsOn(extractStdlib)
+        // Ensure plugin's own classes are compiled before patching.
+        tasks.findByName("compileDebugKotlin")?.let { patchClasses.dependsOn(it) }
+        // d8 must run AFTER patching so it sees the renamed descriptors.
+        compileDexTask.dependsOn(patchClasses)
     }
 }
 
