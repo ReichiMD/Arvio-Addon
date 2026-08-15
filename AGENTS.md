@@ -484,7 +484,17 @@ ABER zwei Runtime-Fehler blockieren (Ebene 2, Scraper-Logik):
 
 ### FIX #11 (IMPLEMENTIERT, 15.08.2026, v18): volle Obfuskations-Map + Serialization buendeln
 Map extrahiert aus ARVIO v1.9.983 APK (classes5.dex) durch Matchen der Methodensignaturen. patch_class_obfuscation.py RENAMES erweitert auf 35 Eintraege (alle kotlin.coroutines.* + kotlin.jvm.functions.*: Continuation->j7/d, CoroutineContext->j7/j, $Element->j7/j$a, $Key->j7/j$b, ContinuationInterceptor->j7/g, Function0..21->x7/a..x7/n, Function->d7/o). build.gradle.kts: kotlinx-serialization-core+-json gebuendelt. v18 verifiziert. CI gruen. builds: v18.
-- **v18** (AKTUELL): volle coroutine+function Obfuskations-Map (35 Eintraege) + kotlinx-serialization gebuendelt (Fix #11). CI gruen. builds: v18.
+### ERKENNTNIS #12 (15.08.2026, v18-TV-Test): ContinuationInterceptor.Key-Feld von R8 verschoben
+
+v18-TV-Test (arvio-tv-log-v18-filtered.txt): FEHLER #1 (KSerializer) WEG (Serialization-Bundle funktioniert!). load() laeuft, TMDB parsed, ABER:
+NoSuchFieldError: No static field Key of type Lj7/f; in class Lj7/g;
+Root cause: ARVIOs R8 hat das statische Companion-Feld "Key" auf ContinuationInterceptor (j7/g) ENTFERNT und das Key-Singleton als statisches Feld "i" auf der Key-Klasse selbst (j7/f) abgelegt. Unsere gebundelten kotlin.coroutines.ContinuationImpl + kotlinx-coroutines machen noch getstatic j7/g->Key (Klassenname umbenannt, Feldname nicht) -> ARVIOs j7/g hat kein Feld "Key" -> NoSuchFieldError. ARVIO hat ContinuationImpl GANZ entfernt (weder obfusziert noch unobfusziert) -> unsere gebundelte Version wird geladen -> sie hat den falschen Feld-Ref.
+Verifiziert im ARVIO-DEX: j7/g hat 0 statische Felder; einziges Feld vom Typ j7/f ist j7/f->i (Singleton, access 0x1019 public static final volatile).
+
+### FIX #12 (IMPLEMENTIERT, 15.08.2026, v19): Fieldref-Rewrite ContinuationInterceptor.Key -> j7/f.i
+patch_class_obfuscation.py um Phase 2 erweitert: nach Utf8-Renames den Constant Pool walken, fuer jeden Fieldref (Class=j7/g, Name=Key, Type=Lj7/f;) die class_index+name_and_type_index umschreiben auf (Class=j7/f, Name=i, Type=Lj7/f). Class_info + NameAndType-Eintraege werden bei Bedarf am Pool-Ende angehaengt (bestehende Indizes bleiben stabil). WICHTIG: CONSTANT_Class_info nutzt internal-name (j7/g) nicht Deskriptor (Lj7/g;) in .class-Dateien.
+Verifiziert: ContinuationImpl.intercepted()/releaseIntercepted() machen jetzt sget-object Lj7/f;->i (war Lj7/g;->Key). Override-Signaturen korrekt. CI gruen. builds: v19.
+- **v19** (AKTUELL): Fieldref-Rewrite ContinuationInterceptor.Key->j7/f.i (Fix #12). Phase 2 constant-pool fieldref rewrite. CI gruen. builds: v19.
 - Letzter Commit auf `main`: v17 (Fix #10, pre-d8 .class patching). Builds-Version: 17.
 
 ### Was fertig ist (unver–ď“ď–í”®ndert g–ď“ď–í—ėltig)
