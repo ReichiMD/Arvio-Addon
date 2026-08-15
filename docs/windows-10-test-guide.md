@@ -1,11 +1,13 @@
-# Windows 10: Filmpalast v14 auf TCL C7K TV testen — Schritt-für-Schritt
+# Windows 10: Filmpalast v15 auf TCL C7K TV testen — Schritt-für-Schritt
 
-Diese Anleitung führt dich durch den Test des neuen **Filmpalast v14** Plugins
+Diese Anleitung führt dich durch den Test des neuen **Filmpalast v15** Plugins
 auf deinem **TCL C7K 65" Google TV** über **WLAN-ADB** von einem **Windows 10 Laptop**.
 
-v14 ist der hoffentliche Durchbruch: Die Methoden-Signaturen wurden per DEX-Patching
-an ARVIOs R8-obfuszierte Runtime angepasst. Wenn ARVIO jetzt unseren `load()`-Override
-aufruft (statt der leeren Parent-Klasse), sollten Filmpalast-Quellen erscheinen.
+v15 kombiniert erstmals eine valide DEX-Struktur (keine dex2jar-Klassen) mit dem
+Post-Build-DEX-Patching der R8-obfuszierten Typen. Wenn ARVIO jetzt unseren
+`load()`-Override aufruft (statt der leeren Parent-Klasse), sollten Filmpalast-Quellen
+erscheinen. Siehe auch die Handy-Anleitung `docs/android-termux-logcat-guide.md` als
+Alternative ohne Laptop.
 
 ---
 
@@ -76,7 +78,7 @@ Du brauchst nur die `platform-tools` (~10 MB), keine vollständige Android-Studi
 
 ---
 
-## Schritt 4: v14 Plugin in ARVIO aktualisieren
+## Schritt 4: v15 Plugin in ARVIO aktualisieren
 
 ARVIO aktualisiert ein Plugin **nicht** automatisch, wenn man nur den Toggle an/aus
 schaltet (`toggleScraper` lädt die `.cs3` nicht neu). Du musst das Repository
@@ -91,7 +93,7 @@ schaltet (`toggleScraper` lädt die `.cs3` nicht neu). Du musst das Repository
    - URL: `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`
 5. ARVIO lädt das Repo → Filmpalast-Eintrag erscheint
 6. **Filmpalast einschalten** (Toggle AN)
-7. ARVIO lädt v14 `.cs3` herunter
+7. ARVIO lädt v15 `.cs3` herunter
 8. Warte bis der Download fertig ist (kurzer Ladebalken)
 9. ARVIO-Cloud-Sync sorgt dafür, dass es aufs TV synchronisiert wird
 
@@ -118,7 +120,7 @@ eine Quellensuche auslöst.
 
 2. **Jetzt losgelöst:** Logcat aufzeichnen in eine Datei:
    ```
-   adb logcat -v time > %USERPROFILE%\Desktop\arvio-tv-log-v14.txt
+   adb logcat -v time > %USERPROFILE%\Desktop\arvio-tv-log-v15.txt
    ```
    Das Fenster "hängt" jetzt — es zeichnet auf. **Lass es offen!**
 
@@ -137,7 +139,7 @@ eine Quellensuche auslöst.
 
 1. Gehe zurück zum cmd-Fenster
 2. Drücke **Strg+C** (stoppt die Aufzeichnung)
-3. Die Datei `arvio-tv-log-v14.txt` ist jetzt auf deinem Desktop
+3. Die Datei `arvio-tv-log-v15.txt` ist jetzt auf deinem Desktop
 4. Öffne die Datei und suche (Strg+F) nach:
    - **`Filmpalast`** — unsere Scraper-Referenzen
    - **`ArvioAddon`** — unsere Debug-Banner
@@ -150,7 +152,7 @@ eine Quellensuche auslöst.
 
 | Was du findest | Bedeutung |
 |---|---|
-| `Filmpalast` oder `ArvioAddon` im Log | **GUT!** ARVIO ruft unseren Code auf. v14 DEX-Patch hat funktioniert. |
+| `Filmpalast` oder `ArvioAddon` im Log | **GUT!** ARVIO ruft unseren Code auf. v15 DEX-Patch hat funktioniert. |
 | `ArvioAddon-Debug` Quellen im TV | **SUPER!** Unsere Diagnose-Quellen erscheinen → Scraper läuft. |
 | `No API loaded for scraper` | ARVIO kann Plugin-Klasse nicht laden — Klassen-Fehler. |
 | `ErrorLoadingException: No id found` | Parent load() wird noch aufgerufen — Patch hat nicht funktioniert. |
@@ -160,10 +162,10 @@ eine Quellensuche auslöst.
 
 ## Schritt 8: Log an mich senden
 
-1. Die Datei `arvio-tv-log-v14.txt` auf dem Desktop
+1. Die Datei `arvio-tv-log-v15.txt` auf dem Desktop
 2. Falls sie sehr groß ist (> 5MB): Nur die relevanten Zeilen filtern:
    ```
-   findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API.loaded load" %USERPROFILE%\Desktop\arvio-tv-log-v14.txt > %USERPROFILE%\Desktop\arvio-tv-log-v14-filtered.txt
+   findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API.loaded load verify dex" %USERPROFILE%\Desktop\arvio-tv-log-v15.txt > %USERPROFILE%\Desktop\arvio-tv-log-v15-filtered.txt
    ```
 3. Sende die (gefilterte) Log-Datei in der nächsten Session
 
@@ -180,14 +182,14 @@ adb connect <TV-IP>:<Port>
 adb logcat -c
 
 # 3. Aufzeichnen (läuft im Hintergrund)
-adb logcat -v time > %USERPROFILE%\Desktop\arvio-tv-log-v14.txt
+adb logcat -v time > %USERPROFILE%\Desktop\arvio-tv-log-v15.txt
 
 # 4. Auf dem TV: ARVIO → Film → Quellen suchen → 15s warten
 
 # 5. Strg+C im cmd-Fenster
 
 # 6. Filtern (optional)
-findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API" %USERPROFILE%\Desktop\arvio-tv-log-v14.txt > %USERPROFILE%\Desktop\arvio-tv-log-v14-filtered.txt
+findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API verify dex" %USERPROFILE%\Desktop\arvio-tv-log-v15.txt > %USERPROFILE%\Desktop\arvio-tv-log-v15-filtered.txt
 ```
 
 ---
@@ -222,7 +224,7 @@ findstr /i "Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API" %USERPR
 
 ---
 
-## Warum v14 anders ist als v6-v13
+## Warum v15 anders ist als v6-v13
 
 v6-v13 hatten Diagnose-Tooling (Debug-Quellen als Pseudo-Quellen, Debug-Server,
 Datei-Trace), aber **ARVIO hat den Plugin-Code nie ausgeführt** — die Methoden-
@@ -230,7 +232,7 @@ Signaturen stimmten nicht überein (R8-obfusziertes `j7.d` vs. unser
 `kotlin.coroutines.Continuation`). Der JVM Virtual Dispatch rief die leere
 Parent-Klasse auf statt unseres Overrides.
 
-**v14** patcht die DEX-Datei nach dem Build: die String-Tabelle wird so modifiziert,
+**v15** patcht die DEX-Datei nach dem Build: die String-Tabelle wird so modifiziert,
 dass `Lkotlin/coroutines/Continuation;` → `Lj7/d;` wird. Die Methoden-Signaturen
 matchen jetzt ARVIOs Runtime. Virtual Dispatch sollte endlich unseren Override
 aufrufen.
