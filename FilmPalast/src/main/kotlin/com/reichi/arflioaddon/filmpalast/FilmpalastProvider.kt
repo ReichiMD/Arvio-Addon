@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.fixUrlNull
 import com.lagradost.cloudstream3.metaproviders.TmdbProvider
@@ -20,7 +19,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
-import kotlinx.coroutines.withTimeoutOrNull
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
 
@@ -46,16 +45,62 @@ class FilmpalastProvider : TmdbProvider() {
 
     private val dbg = "Filmpalast"
     // Per-network-call timeout. ARVIO's scraper has a total timeout that covers load() +
-    // loadLinks(); if a single app.get() hangs, it would consume the whole budget and loadLinks
+    // loadLinks(); if a single call hangs, it would consume the whole budget and loadLinks
     // would never run. Keep each call well under ARVIO's total budget.
     private val NET_TIMEOUT_MS = 8000L
+
+    /**
+     * Plain-Java HTTP GET using java.net.HttpURLConnection (no okhttp / no suspend).
+     * ARVIO's R8 obfuscates okhttp3 + kotlin.coroutines, which breaks cloudstream3's suspend
+     * `app.get` for external .cs3 plugins (ClassCastException / NoSuchMethodError). Using
+     * java.net sidesteps that entirely: the JDK is never obfuscated, and we avoid inner
+     * suspend calls so the coroutine state machine of load()/loadLinks() stays trivial.
+     * jsoup (kept unobfuscated by ARVIO, 330 classes) parses the returned HTML.
+     */
+    private data class HttpResp(val code: Int, val text: String)
+
+    private fun httpGet(
+        url: String,
+        params: Map<String, String> = emptyMap(),
+        headers: Map<String, String> = emptyMap()
+    ): HttpResp {
+        val fullUrl = if (params.isEmpty()) url else {
+            val qs = params.entries.joinToString("&") {
+                "${java.net.URLEncoder.encode(it.key, "UTF-8")}=${java.net.URLEncoder.encode(it.value, "UTF-8")}"
+            }
+            "$url?$qs"
+        }
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            conn = (java.net.URL(fullUrl).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = NET_TIMEOUT_MS.toInt()
+                readTimeout = NET_TIMEOUT_MS.toInt()
+                instanceFollowRedirects = true
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", mobileUA)
+                setRequestProperty("Accept", "text/html,application/json,*/*")
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
+            }
+            conn.connect()
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            DebugLog.t(dbg, "httpGet: $fullUrl -> $code (${text.length} bytes)")
+            HttpResp(code, text)
+        } catch (e: Exception) {
+            DebugLog.w(dbg, "httpGet: $fullUrl threw ${e.javaClass.simpleName}: ${e.message}")
+            HttpResp(0, "")
+        } finally {
+            conn?.disconnect()
+        }
+    }
 
     data class LoadData(val links: List<String> = emptyList())
 
     // search() is still implemented so the classic CloudStream app (and ARVIOs search path
     // fallback) can use it. Returns the Filmpalast stream URL as the SearchResponse url.
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search/title/$query").document
+        val document = Jsoup.parse(httpGet("$mainUrl/search/title/$query").text)
         return document.select("#content .glowliste").mapNotNull { it.toSearchResponse() }
     }
 
@@ -151,15 +196,13 @@ class FilmpalastProvider : TmdbProvider() {
     private val tmdbApiKey = "e6333b32409e02a4a6eba6fb7ff866bb"
     private val tmdbApiUrl = "https://api.themoviedb.org/3"
 
-    private suspend fun fetchTmdbMeta(tmdbId: Int, isTv: Boolean): TmdbMeta? {
+    private fun fetchTmdbMeta(tmdbId: Int, isTv: Boolean): TmdbMeta? {
         val path = if (isTv) "/tv/$tmdbId" else "/movie/$tmdbId"
         val full = "$tmdbApiUrl$path"
         return try {
-            val res = withTimeoutOrNull(NET_TIMEOUT_MS) {
-                app.get(full, params = mapOf("api_key" to tmdbApiKey, "language" to "de-DE"))
-            }
-            if (res == null) {
-                DebugLog.e(dbg, "fetchTmdbMeta: TIMED OUT after ${NET_TIMEOUT_MS}ms (network hang?)")
+            val res = httpGet(full, params = mapOf("api_key" to tmdbApiKey, "language" to "de-DE"))
+            if (res.code !in 200..299) {
+                DebugLog.e(dbg, "fetchTmdbMeta: GET $full -> HTTP ${res.code}")
                 return null
             }
             DebugLog.t(dbg, "fetchTmdbMeta: GET $full -> ${res.code}")
@@ -207,16 +250,16 @@ class FilmpalastProvider : TmdbProvider() {
         return Triple(TvType.Movie, null, null)
     }
 
-    private suspend fun searchFilmpalast(query: String): List<FilmpalastEntry> {
+    private fun searchFilmpalast(query: String): List<FilmpalastEntry> {
         val searchUrl = "$mainUrl/search/title/${query.encode()}"
         return try {
-            val res = withTimeoutOrNull(NET_TIMEOUT_MS) { app.get(searchUrl) }
-            if (res == null) {
-                DebugLog.e(dbg, "searchFilmpalast: TIMED OUT after ${NET_TIMEOUT_MS}ms (network hang?)")
+            val res = httpGet(searchUrl)
+            if (res.code !in 200..299) {
+                DebugLog.e(dbg, "searchFilmpalast: GET $searchUrl -> HTTP ${res.code}")
                 return emptyList()
             }
             DebugLog.t(dbg, "searchFilmpalast: GET $searchUrl -> ${res.code}")
-            val document = res.document
+            val document = Jsoup.parse(res.text)
             val selected = document.select("#content article.liste, #content .glowliste")
             DebugLog.t(dbg, "searchFilmpalast: CSS selector matched ${selected.size} elements")
             if (selected.isEmpty()) {
@@ -256,12 +299,12 @@ class FilmpalastProvider : TmdbProvider() {
         }
     }
 
-    private suspend fun buildMovieResponse(entry: FilmpalastEntry, meta: TmdbMeta): LoadResponse? {
+    private fun buildMovieResponse(entry: FilmpalastEntry, meta: TmdbMeta): LoadResponse? {
         return try {
             DebugLog.t(dbg, "buildMovieResponse: GET ${entry.url}")
-            val res = app.get(entry.url)
+            val res = httpGet(entry.url)
             DebugLog.t(dbg, "buildMovieResponse: -> ${res.code}")
-            val doc = res.document.select("#content")
+            val doc = Jsoup.parse(res.text).select("#content")
             val detailTitle = doc.select("h2.rb.bgDark").text().ifEmpty { meta.displayTitle }
             val imagePath = doc.select(".detail.rb img.cover2").attr("src")
             val description = doc.select("span[itemprop=description]").text()
@@ -279,7 +322,7 @@ class FilmpalastProvider : TmdbProvider() {
             null
         }
     }
-    private suspend fun buildSeriesResponse(
+    private fun buildSeriesResponse(
         episodes: List<FilmpalastEntry>,
         meta: TmdbMeta
     ): LoadResponse? {
@@ -351,9 +394,9 @@ class FilmpalastProvider : TmdbProvider() {
             data.startsWith("http") -> {
                 try {
                     DebugLog.t(dbg, "loadLinks: series path, fetching episode page $data")
-                    val res = app.get(data)
+                    val res = httpGet(data)
                     DebugLog.t(dbg, "loadLinks: episode page -> ${res.code}")
-                    collectHosterLinks(res.document.select("#content"))
+                    collectHosterLinks(Jsoup.parse(res.text).select("#content"))
                 } catch (e: Exception) {
                     DebugLog.e(dbg, "loadLinks: fetching episode page threw ${e.javaClass.simpleName}: ${e.message}")
                     emptyList()
@@ -402,16 +445,13 @@ class FilmpalastProvider : TmdbProvider() {
      * covers. Fetches the embed page and scans for direct video URLs (mp4, m3u8) in
      * common patterns: JSON sources arrays, hls.js player config, source tags.
      */
-    private suspend fun genericResolve(
+    private fun genericResolve(
         url: String,
         referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            val res = app.get(
-                url,
-                headers = mapOf("Referer" to referer, "User-Agent" to mobileUA)
-            )
+            val res = httpGet(url, headers = mapOf("Referer" to referer, "User-Agent" to mobileUA))
             val text = res.text
             val base = url.substringBeforeLast("/")
             var found = false
