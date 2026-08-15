@@ -504,7 +504,28 @@ k7/a ist ein 3-Wert-Enum. app.get (suspend, ARVIO-provided) resume-t nicht korre
 
 ### FIX #13 (IMPLEMENTIERT, 15.08.2026, v21): HTTP komplett auf java.net + jsoup umgestellt (app.get entfernt)
 Strategiewechsel: nicht mehr jede obfuscated okhttp/coroutine-Type einzeln jagen. Statt ARVIOs suspend app.get (NiceHttp/okhttp) nutzen wir plain java.net.HttpURLConnection (JDK, NIE obfuscated) + Jsoup.parse (jsoup von ARVIO unobfuscated kept, 330 Klassen verifiziert). Alle internen HTTP-Helfer (fetchTmdbMeta, searchFilmpalast, buildMovieResponse, genericResolve) -> httpGet()-Helper, nicht-suspend. withTimeoutOrNull entfernt (stattdessen java.net connect/read timeouts). load()/loadLinks()/search() bleiben suspend (cloudstream3 API-Vertrag, DEX-patched j7/d) aber haben keine inneren suspend-Aufrufe mehr (coroutine state machine trivial -> obfuscated-Type-Breakage umgangen). AUSNAHME: loadExtractor + newMovieLoadResponse/newTvSeriesLoadResponse bleiben suspend-Aufrufe (ARVIO->ARVIO intern, funktionieren wie ARVIOs eigene Scraper). Builds: v21. CI gruen.
-- **v21** (AKTUELL): HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21. AUF TV-TEST AUSSTEHEND (Stand 15.08.2026 Ende Session).
+- **v21**: HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21.
+- **v22** (AKTUELL): Jackson/parseJson durch org.json ersetzt (Fix #15). v21-TV-Test war MEGA-DURCHBRUCH (Dispatch bindet, httpGet funktioniert, TMDB-Meta geholt), aber parseJson<TmdbMeta> crashte wegen kotlin-reflect von R8 gestript ("This callable does not support a default call"). org.json = Android built-in, nie obfuscated, keine Reflection. CI gruen. builds: v22 (1478891 bytes). AUF TV/HANDY-TEST AUSSTEHEND (Stand 15.08.2026).
+
+### ENTSCHEIDENDE ERKENNTNIS #15 (15.08.2026, v21-TV-Test): DURCHBRUCH + Jackson/kotlin-reflect von R8 gestript
+
+v21-TV-Test (arvio-tv-log-v21-filtered.txt) = MEGA-DURCHBRUCH. Erstmals laeuft der Scraper wirklich:
+- Download 1481547 bytes, plugin.load() ausgefuehrt, provider+extractors registriert.
+- **Dispatch bindet!** ARVIO ruft UNSERN load()-Override auf (DEX-Patch hat funktioniert!): `TmdbProvider Filmpalast: load({"id":603,"type":"movie"})` -> `load() called with url={"id":603,"type":"movie"}` -> `load: parsed tmdbId=603 isTv=false`.
+- **httpGet via java.net FUNKTIONIERT!** `httpGet: https://api.themoviedb.org/3/movie/603 -> 200 (1745 bytes)` + `fetchTmdbMeta: GET -> 200`. v21-Strategiewechsel (app.get entfernt) = Erfolg.
+- ABER dann: `load() threw t1: This callable does not support a default call: public constructor TmdbMeta(@JsonProperty id: Int? = ..., title: String? = ..., ...)`. Dann Fallback load(themoviedb.org/movie/603) -> derselbe Fehler -> `both load() paths failed` -> 0 results.
+
+**Root-Cause:** cloudstream3's `AppUtils.parseJson<T>` nutzt Jackson + `jackson-module-kotlin`. jackson-module-kotlin braucht **kotlin-reflect** (`KFunction.callBy()`), um Kotlin-Datenklassen mit Default-Args zu instanziieren. ARVIOs R8-Shrinking hat kotlin-reflect entfernt (gleiche Problemklasse wie frueher kotlin-stdlib: R8 stript alles, was ARVIO selbst nicht direkt nutzt). Jackson kann `TmdbMeta` nicht konstruieren -> `callBy()` schlaegt fehl -> "This callable does not support a default call".
+
+**Fix #15 (IMPLEMENTIERT, 15.08.2026, v22):** Alle parseJson/toJson durch `org.json` ersetzt. Konsistent mit v21-Strategie (JDK/Android built-ins statt ARVIO-provided libs, die geshrinkt sein koennen). org.json (JSONObject/JSONArray) ist Android-built-in, wird von ARVIOs Classloader bereitgestellt, wird NIE obfuscated/stripped, und braucht keine Reflection.
+- `TmdbInput` parse: `JSONObject(url)` statt `parseJson<TmdbInput>(url)`.
+- `TmdbMeta`: von `data class` mit `@JsonProperty` + Default-Args zu plain `class` (keine Default-Args, keine Jackson-Annotation). Geparst via `JSONObject(res.text).optString(...)`.
+- `LoadData.toJson()`: durch hand-built JSON-String `linksToJson(links)` (minimales JSON-Escaping).
+- `parseJson<LoadData>(data)`: durch `JSONObject(data).optJSONArray("links")` (parseLinksJson).
+- Entfernte Imports: `com.fasterxml.jackson.annotation.JsonProperty`, `AppUtils.parseJson`, `AppUtils.toJson`.
+- Verifiziert im Build: FilmPalast.cs3 v22 (1478891 bytes), **0 Jackson/AppUtils-Referenzen** in DEX (v21 hatte noch welche), org.json vorhanden (JSONObject, JSONArray). Override-Signaturen korrekt obfusziert (load=(String,j7/d), loadLinks=(String,Z,x7/l,x7,l,j7/d), search=(String,j7/d)). CI gruen. builds: v22.
+
+**Erwartung v22-Test:** Jackson-Fehler weg. load() parst TMDB-Meta, sucht Filmpalast, matcht, baut LoadResponse. Naechster moeglicher Fehler: Scraper-Logik (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz) oder naechste ARVIO-lib die geshrinkt ist (z.B. newMovieLoadResponse/newTvSeriesLoadResponse wenn sie intern Jackson nutzen - aber die sind ARVIO->ARVIO intern, sollten wie ARVIOs eigene Scraper funktionieren).
 
 ### ENTSCHEIDENDE ERKENNTNIS #14 (15.08.2026, v20-TV-Test-Log arvio-tv-log-v20-filtered.txt): k7.a ClassCastException = app.get fuer externe Plugins broken
 v19-fix (ContinuationInterceptor.Key fieldref) WIRKT: NoSuchFieldError WEG. v20-fix (okhttp3/Interceptor->rb/c0) WIRKT: NoSuchMethodError get$default WEG. load() laeuft, TMDB parsed ("parsed tmdbId=603 isTv=false"). ABER dann:
@@ -544,34 +565,35 @@ Nutzer kann ab sofort auch auf dem HANDY testen (UI-Bug behoben). Fuer Logcat oh
 - Vollstaendige Anleitung: docs/handy-logcat-ladb-termux.md
 - ACHTUNG: ARVIO auf Handy = gleiche sideload-APK wie TV -> gleiche Obfuskation -> Tests auf Handy repraesentativ fuer TV.
 
-### NAECHSTE SCHRITTE (Stand 15.08.2026 Ende Session, fuer naechste Session)
+### NAECHSTE SCHRITTE (Stand 15.08.2026, fuer naechste Session)
 
-**Prio 1 - v21 am Geraet testen (Handy ODER TV):**
-- v21 steht auf builds (status=1, version=21). CI gruen.
+**Prio 1 - v22 am Geraet testen (Handy ODER TV):**
+- v22 steht auf builds (status=1, version=22, 1478891 bytes). CI gruen.
 - Handy-Test jetzt moeglich (UI-Bug in 1.9.994 behoben). Logcat via LADB+Termux (docs/handy-logcat-ladb-termux.md) ODER weiterhin TV+Laptop WLAN-ADB.
-- Setup: Repo loeschen + neu hinzufugen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v21).
+- Setup: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v22).
 - Test: `logcat -c` -> Matrix (TMDB 603) suchen -> "Nach Quellen suchen" -> 15s warten -> Logcat holen.
-- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet fetchTmdbMeta searchFilmpalast buildMovieResponse collectHosterLinks loadExtractor`.
-- **Was im Log zu suchen (entscheidend nach v21-Strategiewechsel):**
-  - `httpGet: ... -> 200 (N bytes)` -> java.net-HTTP FUNKTIONIERT! Strategiewechsel erfolgreich.
-  - `fetchTmdbMeta: GET ... -> 200` + `parseJson` -> TMDB-Meta geholt.
+- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet fetchTmdbMeta searchFilmpalast matchResults buildMovieResponse collectHosterLinks loadExtractor default call`.
+- **Was im Log zu suchen (entscheidend nach v22-Jackson-Fix):**
+  - `fetchTmdbMeta: GET ... -> 200` ohne darauf folgenden `default call`-Fehler -> Jackson-Fix funktioniert! TMDB-Meta wird jetzt geparsed.
+  - `load: TMDB meta -> title='Matrix' year=...` -> Meta-Parsing erfolgreich (org.json klappt!).
   - `searchFilmpalast: ... matched N elements` -> Filmpalast-Suche laeuft!
   - `buildMovieResponse` + `collectHosterLinks` + `loadExtractor` -> Hoster-Extraktion laeuft.
-  - Filmpalast-Quellen in ARVIO-Quellenauswahl -> ZIEL ERREICHT.
-  - Falls NEUER Fehler bei `loadExtractor` oder `newMovieLoadResponse`/`newTvSeriesLoadResponse` (die noch ARVIO-suspend-Funktionen nutzen): naechste Ebene — diese sind ARVIO->ARVIO, sollten eigentlich wie ARVIOs eigene Scraper funktionieren, aber falls nicht: workaround pruefen.
+  - Filmpalast-Quellen in ARVIO-Quellenauswahl -> **ZIEL ERREICHT!**
+  - Falls `default call`-Fehler WIEDER auftaucht (woanders): noch eine Jackson-Referenz uebersehen (grep nach parseJson/toJson/JsonProperty im Code).
+  - Falls NEUER Fehler bei `newMovieLoadResponse`/`newTvSeriesLoadResponse`/`loadExtractor` (ARVIO-suspend-Funktionen): diese sind ARVIO->ARVIO intern, sollten wie ARVIOs eigene Scraper funktionieren. Falls sie intern Jackson nutzen und crashten: koennen wir nicht fixen (ARVIO-Code), aber unwahrscheinlich da ARVIOs eigene Scraper laufen.
   - Falls `httpGet` schlaegt fehl (Timeout/Verbindungsfehler): Netzwerk/Bot-Schutz, nicht Obfuskation.
-  - Falls `ClassCastException`/`NoSuchMethodError` WIEDER bei app.get-aehnlichem: v21 hat app.get nicht vollstaendig entfernt (grep pruefen).
+  - Falls Scraper durchlaeuft aber 0 Quellen: Scraper-Logik (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz auf filmpalast.to).
 
-**Prio 2 - Je nach v21-Logcat-Befund:**
-- Falls Scraper durchlaeuft aber 0 Quellen: Scraper-Logik debuggen (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz). Naechste Ebene — jetzt ist es "echtes" Scraping, kein Obfuskations-Problem mehr.
+**Prio 2 - Je nach v22-Logcat-Befund:**
+- Falls Scraper durchlaeuft aber 0 Quellen: Scraper-Logik debuggen (Jsoup-Selektoren, Hoster-Extraktion, Bot-Schutz). Naechste Ebene - jetzt ist es "echtes" Scraping, kein Obfuskations-Problem mehr.
 - Falls loadExtractor crasht (suspend, ARVIO-provided): pruefen ob ARVIOs eigene Extractoren fuer die Filmpalast-Hoster registriert sind; ggf. eigenen non-suspend Extractor bauen (java.net statt loadExtractor).
 - Falls httpGet Timeout: mobileUA/Headers pruefen, ggf. Cloudflare/Bot-Schutz auf filmpalast.to.
 
-**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v21-Befund):**
+**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v22-Befund):**
 Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereiten". Drei klare Bugs:
-1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 -> externe .cs3-Plugins koennen suspend-Overrides + app.get nicht nutzen (Haupt-Bug, Erkenntnis #7+#13).
+1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 + stript kotlin-reflect -> externe .cs3-Plugins koennen suspend-Overrides, app.get UND Jackson-JSON-Parsing nicht nutzen (Haupt-Bug, Erkenntnis #7+#13+#15).
 2. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (Erkenntnis #1).
-3. (ehemals Touch-Bug Add-Repo-Dialog — BEHOBEN in 1.9.994, Nutzer bestaetigt).
+3. (ehemals Touch-Bug Add-Repo-Dialog - BEHOBEN in 1.9.994, Nutzer bestaetigt).
 AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]".
 
 ### NEUE ARVIO-VERSION v1.9.994 (15.08.2026)
