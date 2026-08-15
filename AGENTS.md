@@ -472,7 +472,19 @@ Der professionellste Weg (so machen es `Himanth-reddy`/GSSoC-Teilnehmer, deren P
 - **v14** (gescheitert): Kompiliert gegen dex2jar-obfuszierte ARVIO-JAR (Fix #7 Ansatz 1). Override-Signaturen korrekt obfusziert, ABER dex2jar-Klassen (j7/d, j7/j, x7/l) korrumpten die DEX -> ART-Verifier lehnt ab ("Non-zero padding... type 8196"). v14 live auf builds (1.268.540 bytes) aber **unbrauchbar** (Erkenntnis #8).
 - **v15** (gescheitert): Zurueck zum unobfuszierten Stub + Post-Build-DEX-Patching ohne dex2jar (Fix #8). DEX-Struktur valide (keine dex2jar-Klassen), ABER das Patch-Skript kuerzte Strings IN-PLACE mit Zero-Padding -> Gaps MITTEN in string_data -> ART-Verifier lehnt ab (Erkenntnis #9, derselbe Fehler wie v14).
 - **v16** (gescheitert): string_data kompakt neu packen, Freed-Bytes als TRAILING-Nullen (Fix #9). Behob "Non-zero padding", aber ART lehnt ab mit "Out-of-order string_ids" - DEX string_ids MUSS sortiert sein, Umbenennen verschiebt Sortierposition. Post-Build-DEX-Patching prinzipiell unmoeglich (Erkenntnis #10).
-- **v17** (AKTUELL): .class constant_pool VOR d8 patchen statt DEX danach (Fix #10). d8 baut valide sortierte DEX mit obfuszierten Deskriptoren nativ. Override-Signaturen verifiziert: load(...Lj7/d;), loadLinks(...Lx7/l;Lx7/l;Lj7/d;), search(...Lj7/d;). CI gruen. builds: v17.
+### ENTSCHEIDENDE ERKENNTNIS #11 (15.08.2026, v17-TV-Test): DURCHBRUCH - Scraper laeuft! Zwei Runtime-Fehler auf Ebene 2
+
+v17-TV-Test (arvio-tv-log-v17-filtered.txt) = MEGA-DURCHBRUCH. Erstmals laeuft unser Code:
+- Download 1268062 bytes, plugin.load() ausgefuehrt, provider+extractors registriert.
+- ARVIO ruft UNSERN load()-Override auf (Dispatch bindet! DEX-Patch hat funktioniert!).
+- load() called with url={"id":603,"type":"movie"} und load: parsed tmdbId=603 isTv=false - UNSER Code laeuft.
+ABER zwei Runtime-Fehler blockieren (Ebene 2, Scraper-Logik):
+- Fehler 1: NoClassDefFoundError: Lkotlinx/serialization/KSerializer; (NiceHttp/cloudstream3 braucht es).
+- Fehler 2: NoSuchMethodError: get(Lkotlin/coroutines/CoroutineContext$Key;)Lkotlin/coroutines/CoroutineContext$Element; in class Lj7/j; (verschachtelte Coroutine-Typen in ARVIO auch obfiziert, v17 nur Top-Level umbenannt).
+
+### FIX #11 (IMPLEMENTIERT, 15.08.2026, v18): volle Obfuskations-Map + Serialization buendeln
+Map extrahiert aus ARVIO v1.9.983 APK (classes5.dex) durch Matchen der Methodensignaturen. patch_class_obfuscation.py RENAMES erweitert auf 35 Eintraege (alle kotlin.coroutines.* + kotlin.jvm.functions.*: Continuation->j7/d, CoroutineContext->j7/j, $Element->j7/j$a, $Key->j7/j$b, ContinuationInterceptor->j7/g, Function0..21->x7/a..x7/n, Function->d7/o). build.gradle.kts: kotlinx-serialization-core+-json gebuendelt. v18 verifiziert. CI gruen. builds: v18.
+- **v18** (AKTUELL): volle coroutine+function Obfuskations-Map (35 Eintraege) + kotlinx-serialization gebuendelt (Fix #11). CI gruen. builds: v18.
 - Letzter Commit auf `main`: v17 (Fix #10, pre-d8 .class patching). Builds-Version: 17.
 
 ### Was fertig ist (unver–ď“ď–í”®ndert g–ď“ď–í—ėltig)
