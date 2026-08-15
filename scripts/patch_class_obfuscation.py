@@ -115,33 +115,89 @@ _TAG_FIXED_SIZE = {
 # Tag 1 (Utf8): u2 length + bytes.
 
 
-def patch_class_bytes(data):
-    """Patch a single .class file's constant_pool Utf8 entries. Returns new bytes."""
-    if data[:4] != b'\xca\xfe\xba\xbe':
-        return data  # not a class file (e.g. module-info or resource)
-    out = bytearray(data)
+def _parse_cp(out):
+    """Parse the constant pool of a (possibly already Utf8-patched) class bytearray.
+    Returns (entries, end_offset) where entries[i] = (tag, offset, fields_tuple).
+    entries[0] is unused (1-based). Long/Double occupy 2 slots (second is None)."""
     cp_count = struct.unpack_from('>H', out, 8)[0]
-    pos = 10  # first constant_pool entry
+    pos = 10
+    entries = [None] * cp_count
+    i = 1
+    while i < cp_count:
+        tag = out[pos]
+        if tag == 1:  # Utf8
+            length = struct.unpack_from('>H', out, pos + 1)[0]
+            entries[i] = (tag, pos, ('utf8', bytes(out[pos + 3: pos + 3 + length])))
+            pos += 3 + length
+        else:
+            sz = _TAG_FIXED_SIZE[tag]
+            if tag == 7:  # Class: name_index
+                entries[i] = (tag, pos, ('name_index', struct.unpack_from('>H', out, pos + 1)[0]))
+            elif tag == 9:  # Fieldref: class_index, name_and_type_index
+                entries[i] = (tag, pos, ('class_index', 'nat_index',
+                                         struct.unpack_from('>H', out, pos + 1)[0],
+                                         struct.unpack_from('>H', out, pos + 3)[0]))
+            elif tag == 12:  # NameAndType: name_index, descriptor_index
+                entries[i] = (tag, pos, ('name_index', 'desc_index',
+                                         struct.unpack_from('>H', out, pos + 1)[0],
+                                         struct.unpack_from('>H', out, pos + 3)[0]))
+            else:
+                entries[i] = (tag, pos, ())
+            pos += 1 + sz
+            if tag in (5, 6):
+                i += 1
+        i += 1
+    return entries, pos
+
+
+def _utf8_value(entries, idx):
+    if idx is None or idx >= len(entries) or entries[idx] is None:
+        return None
+    tag, off, f = entries[idx]
+    if tag != 1:
+        return None
+    return f[1].decode('utf-8', errors='surrogateescape')
+
+
+# Fieldref rewrites: when our bundled code does getstatic ContinuationInterceptor.Key
+# (companion object singleton), ARVIO's R8 removed the 'Key' field from ContinuationInterceptor
+# (j7/g) and represents the Key singleton as a static field 'i' on the Key class itself (j7/f).
+# So getstatic j7/g -> Key : Lj7/f; must become getstatic j7/f -> i : Lj7/f;.
+# NOTE: in .class files, CONSTANT_Class_info holds the INTERNAL name (e.g. "j7/g"), NOT the
+# descriptor form ("Lj7/g;"). Field TYPE is a descriptor ("Lj7/f;").
+# (class_internal, field_name, field_type_desc) -> (new_class_internal, new_name, new_type)
+_FIELDREF_REWRITES = [
+    ("j7/g", "Key", "Lj7/f;", "j7/f", "i", "Lj7/f;"),
+]
+
+
+def patch_class_bytes(data):
+    """Patch a single .class file: (1) rename kotlin.coroutines.*/kotlin.jvm.functions.* Utf8
+    entries to ARVIO's obfuscated names, (2) rewrite ContinuationInterceptor.Key fieldrefs to
+    j7/f.i (the Key singleton, since ARVIO's R8 moved it). Returns (new_bytes, patched_count)."""
+    if data[:4] != b'\xca\xfe\xba\xbe':
+        return data, 0
+    out = bytearray(data)
+    # --- Phase 1: Utf8 renames (in-place, same-or-shorter length) ---
+    cp_count = struct.unpack_from('>H', out, 8)[0]
+    pos = 10
     patched = 0
     i = 1
     while i < cp_count:
         tag = out[pos]
-        if tag == 1:  # CONSTANT_Utf8
+        if tag == 1:
             length = struct.unpack_from('>H', out, pos + 1)[0]
             raw = bytes(out[pos + 3: pos + 3 + length])
             try:
                 s = raw.decode('utf-8')
             except UnicodeDecodeError:
-                # Modified UTF-8 (null encoded as 0xC0 0x80, supplementary chars as surrogate pairs).
-                # Decode leniently; our targets are ASCII so this path is just pass-through safety.
                 s = raw.decode('utf-8', errors='surrogateescape')
             new_s = rename_in_utf8(s)
             if new_s != s:
                 new_raw = new_s.encode('utf-8', errors='surrogateescape')
                 new_len = len(new_raw)
                 if new_len > 0xFFFF:
-                    raise ValueError("patched Utf8 exceeds 65535 bytes (shouldn't happen: names only shrink)")
-                # Replace: [tag(1) + len(2) + old_raw] -> [tag + new_len + new_raw]
+                    raise ValueError("patched Utf8 exceeds 65535 bytes")
                 old_entry_len = 3 + length
                 new_entry_len = 3 + new_len
                 out[pos: pos + old_entry_len] = struct.pack('>BH', tag, new_len) + new_raw
@@ -152,12 +208,94 @@ def patch_class_bytes(data):
         elif tag in _TAG_FIXED_SIZE:
             sz = _TAG_FIXED_SIZE[tag]
             pos += 1 + sz
-            if tag in (5, 6):  # Long/Double occupy 2 cp slots
+            if tag in (5, 6):
                 i += 1
         else:
-            # Unknown tag — bail to avoid corrupting the file.
             raise ValueError(f"unknown constant_pool tag {tag} at index {i} (pos {pos})")
         i += 1
+
+    # --- Phase 2: fieldref rewrites ---
+    entries, end_off = _parse_cp(out)
+    append_buf = bytearray()
+
+    def find_or_append_utf8(value):
+        nonlocal append_buf
+        vb = value.encode('utf-8', errors='surrogateescape')
+        for idx in range(1, len(entries)):
+            e = entries[idx]
+            if e is not None and e[0] == 1 and e[2][1] == vb:
+                return idx
+        idx = len(entries)
+        entries.append((1, None, ('utf8', vb)))
+        append_buf += struct.pack('>BH', 1, len(vb)) + vb
+        return idx
+
+    def find_or_append_class(internal_name):
+        # CONSTANT_Class_info uses internal name (e.g. "j7/f"), NOT descriptor.
+        nonlocal append_buf
+        for idx in range(1, len(entries)):
+            e = entries[idx]
+            if e is not None and e[0] == 7:
+                if _utf8_value(entries, e[2][1]) == internal_name:
+                    return idx
+        ni = find_or_append_utf8(internal_name)
+        idx = len(entries)
+        entries.append((7, None, ('name_index', ni)))
+        append_buf += struct.pack('>BH', 7, ni)
+        return idx
+
+    def find_or_append_nat(name, descriptor):
+        nonlocal append_buf
+        for idx in range(1, len(entries)):
+            e = entries[idx]
+            if e is not None and e[0] == 12:
+                if _utf8_value(entries, e[2][2]) == name and _utf8_value(entries, e[2][3]) == descriptor:
+                    return idx
+        ni = find_or_append_utf8(name)
+        di = find_or_append_utf8(descriptor)
+        idx = len(entries)
+        entries.append((12, None, ('name_index', 'desc_index', ni, di)))
+        append_buf += struct.pack('>BHH', 12, ni, di)
+        return idx
+
+    fieldref_patches = 0
+    for idx in range(1, len(entries)):
+        e = entries[idx]
+        if e is None or e[0] != 9:  # Fieldref
+            continue
+        _, off, _ = e
+        class_idx = struct.unpack_from('>H', out, off + 1)[0]
+        nat_idx = struct.unpack_from('>H', out, off + 3)[0]
+        # resolve class descriptor
+        cls_e = entries[class_idx]
+        if cls_e is None or cls_e[0] != 7:
+            continue
+        cls_desc = _utf8_value(entries, cls_e[2][1])
+        # resolve name+type (NameAndType fields tuple: ('name_index','desc_index', ni, di))
+        nat_e = entries[nat_idx]
+        if nat_e is None or nat_e[0] != 12:
+            continue
+        fname = _utf8_value(entries, nat_e[2][2])
+        ftype = _utf8_value(entries, nat_e[2][3])
+        for (cd, nm, ty, new_cd, new_nm, new_ty) in _FIELDREF_REWRITES:
+            if cls_desc == cd and fname == nm and ftype == ty:
+                new_class_idx = find_or_append_class(new_cd)
+                new_nat_idx = find_or_append_nat(new_nm, new_ty)
+                # patch the fieldref bytes in place (class_index, nat_index)
+                struct.pack_into('>HH', out, off + 1, new_class_idx, new_nat_idx)
+                fieldref_patches += 1
+                break
+
+    if append_buf:
+        # Append new constant_pool entries right after the existing pool (this shifts all
+        # offsets after the pool, which is fine since we rebuild `out` and constant_pool
+        # entries only reference other entries by index, never by absolute offset).
+        cp_end = end_off  # offset where pool ends (access_flags follow)
+        out[cp_end:cp_end] = append_buf
+        new_cp_count = len(entries)
+        struct.pack_into('>H', out, 8, new_cp_count)
+    patched += fieldref_patches
+
     return bytes(out), patched
 
 
