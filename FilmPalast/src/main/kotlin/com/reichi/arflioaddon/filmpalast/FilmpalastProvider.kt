@@ -92,6 +92,38 @@ class FilmpalastProvider : TmdbProvider() {
         }
     }
 
+    private fun httpPost(
+        url: String,
+        body: String,
+        headers: Map<String, String> = emptyMap()
+    ): HttpResp {
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = NET_TIMEOUT_MS.toInt()
+                readTimeout = NET_TIMEOUT_MS.toInt()
+                instanceFollowRedirects = true
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("User-Agent", mobileUA)
+                setRequestProperty("Accept", "application/json,*/*")
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
+            }
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            conn.connect()
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            DebugLog.t(dbg, "httpPost: $url -> $code (${text.length} bytes)")
+            HttpResp(code, text)
+        } catch (e: Exception) {
+            DebugLog.w(dbg, "httpPost: $url threw ${e.javaClass.simpleName}: ${e.message}")
+            HttpResp(0, "")
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     // Movie dataUrl payload: hand-built JSON (org.json) instead of AppUtils.toJson, to avoid
     // Jackson + kotlin-reflect dependency (see TmdbMeta note above).
     private fun linksToJson(links: List<String>): String {
@@ -325,13 +357,26 @@ class FilmpalastProvider : TmdbProvider() {
         val norm = { s: String -> s.lowercase()
             .replace(Regex("[^a-z0-9]+"), " ").trim() }
         val titleNorm = norm(title)
-        return results.filter { entry ->
+        val matched = results.filter { entry ->
             // Strip trailing S\dE\d / season markers when comparing the base name.
             val base = entry.title.replace(Regex("""\s*[Ss]\d{1,2}[Ee]\d{1,3}.*$"""), "").trim()
             val baseNorm = norm(base)
             val typeOk = if (isTv) entry.type == TvType.TvSeries else entry.type == TvType.Movie
             typeOk && (baseNorm == titleNorm || baseNorm.contains(titleNorm) || titleNorm.contains(baseNorm))
         }
+        // Prefer exact title match first (e.g. "Matrix" over "Matrix Revolutions"), then by
+        // year proximity if available, so buildMovieResponse loads the right stream page.
+        return matched.sortedWith(compareBy(
+            { if (norm(it.title) == titleNorm) 0 else 1 },
+            { yearDistance(it.title, year) }
+        ))
+    }
+
+    private fun yearDistance(title: String, year: Int?): Int {
+        if (year == null) return Int.MAX_VALUE
+        // Filmpalast titles sometimes embed a year (e.g. "Matrix (1999)").
+        val m = Regex("""\b(19\d{2}|20\d{2})\b""").find(title)?.groupValues?.get(1)?.toIntOrNull()
+        return if (m != null) kotlin.math.abs(m - year) else Int.MAX_VALUE
     }
 
     // newMovieLoadResponse/newTvSeriesLoadResponse are themselves suspend cloudstream3 API
@@ -483,13 +528,54 @@ class FilmpalastProvider : TmdbProvider() {
             val host = java.net.URI(url).host?.lowercase() ?: ""
             when {
                 host.contains("voe.") || host.endsWith("voe.sx") || host.contains("voe.sx") -> resolveVoe(url, callback)
-                // Add more hoster-specific extractors here as needed (odysseusa, vidsonic, ...).
+                // odysseusa.cc + similar JWPlayer hosters expose a /api/stream POST endpoint that
+                // returns JSON with a direct streaming_url (m3u8). Tested live (Aug 2026).
+                host.contains("odysseusa") -> resolveOdysseusa(url, callback)
+                // Add more hoster-specific extractors here as needed (vidsonic, ...).
                 else -> genericResolve(url, callback)
             }
         } catch (e: Exception) {
             DebugLog.w(dbg, "resolveHost: '$url' threw ${e.javaClass.simpleName}: ${e.message}")
             false
         }
+    }
+
+    /**
+     * odysseusa.cc (JWPlayer) extractor. The embed page at /e/<filecode> sets up a JWPlayer whose
+     * `streaming_url` is fetched via POST /api/stream with JSON body {"filecode":"...","device":"android"}.
+     * The response JSON contains `streaming_url` = a direct master.m3u8 URL with token.
+     */
+    private fun resolveOdysseusa(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val base = url.substringBefore("/e/")
+        val filecode = url.substringAfterLast("/e/").substringBefore("?").trim()
+        if (filecode.isEmpty()) {
+            DebugLog.w(dbg, "resolveOdysseusa: could not extract filecode from $url")
+            return false
+        }
+        val apiUrl = "$base/api/stream"
+        val body = """{"filecode":"$filecode","device":"android"}"""
+        val res = httpPost(apiUrl, body, headers = mapOf(
+            "Content-Type" to "application/json",
+            "Referer" to url,
+            "User-Agent" to mobileUA
+        ))
+        if (res.code !in 200..299) {
+            DebugLog.w(dbg, "resolveOdysseusa: POST $apiUrl -> HTTP ${res.code}")
+            return false
+        }
+        val streamUrl = try {
+            JSONObject(res.text).optString("streaming_url", "")
+        } catch (e: Exception) {
+            DebugLog.w(dbg, "resolveOdysseusa: could not parse JSON: ${e.message}")
+            return false
+        }
+        if (streamUrl.isEmpty() || !streamUrl.startsWith("http")) {
+            DebugLog.w(dbg, "resolveOdysseusa: no streaming_url in response")
+            return false
+        }
+        DebugLog.t(dbg, "resolveOdysseusa: streaming_url=$streamUrl")
+        emitLink("Odysseusa", streamUrl, callback)
+        return true
     }
 
     /**
@@ -500,10 +586,8 @@ class FilmpalastProvider : TmdbProvider() {
      */
     private fun resolveVoe(url: String, callback: (ExtractorLink) -> Unit): Boolean {
         val res = httpGet(url, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to mobileUA))
-        if (res.code !in 200..299) {
-            DebugLog.w(dbg, "resolveVoe: GET $url -> HTTP ${res.code}")
-            return false
-        }
+        // VOE (and mirrors) may return non-200 (DDoS-Guard challenge, soft-404) but still serve a
+        // page body; don't bail on status - scan the body regardless.
         val text = res.text
         var found = false
 
