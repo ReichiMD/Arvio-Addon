@@ -299,7 +299,9 @@ class FilmpalastProvider : TmdbProvider() {
         }
     }
 
-    private fun buildMovieResponse(entry: FilmpalastEntry, meta: TmdbMeta): LoadResponse? {
+    // newMovieLoadResponse/newTvSeriesLoadResponse are themselves suspend cloudstream3 API
+    // calls (ARVIO-provided, run ARVIO->ARVIO internally), so these builders stay suspend.
+    private suspend fun buildMovieResponse(entry: FilmpalastEntry, meta: TmdbMeta): LoadResponse? {
         return try {
             DebugLog.t(dbg, "buildMovieResponse: GET ${entry.url}")
             val res = httpGet(entry.url)
@@ -322,7 +324,7 @@ class FilmpalastProvider : TmdbProvider() {
             null
         }
     }
-    private fun buildSeriesResponse(
+    private suspend fun buildSeriesResponse(
         episodes: List<FilmpalastEntry>,
         meta: TmdbMeta
     ): LoadResponse? {
