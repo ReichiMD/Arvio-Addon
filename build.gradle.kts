@@ -116,6 +116,10 @@ subprojects {
     val bundleStdlib by configurations.creating
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlin:kotlin-stdlib:2.3.0")
     dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+    // kotlinx-serialization is referenced by NiceHttp / cloudstream3 data classes (KSerializer).
+    // ARVIO's R8-shrunk classloader lacks it, so bundle it too.
+    dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-serialization-core:1.7.3")
+    dependencies.add(bundleStdlib.name, "org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     val extractedStdlibDir = layout.buildDirectory.dir("intermediates/stdlib-classes/${project.name}")
 
