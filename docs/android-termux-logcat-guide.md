@@ -214,9 +214,8 @@ Die gefilterte Datei ist klein genug zum Weiterleiten.
 
 ## Schritt 7: Datei in den Download-Ordner kopieren (zum Weiterleiten)
 
-Der Termux-Ordner `~/` ist für andere Apps nicht direkt sichtbar. Damit du die
-Datei per E-Mail/WhatsApp/Telegram verschicken oder in eine andere App laden
-kannst, kopierst du sie in den **gemeinsamen Download-Ordner** des Handys.
+**Abkürzung: Ab jetzt reicht EIN Befehl.** Siehe „Ein-Klick-Skript" unten.
+Die folgende Einzel-Schritt-Version ist nur zur Erklärung, falls etwas schiefgeht.
 
 ### 7a. Freigabe erteilen (nur einmal nötig)
 
@@ -295,6 +294,76 @@ Schritt 6+7 (Datei), weil der Chat-formatierte Text besser lesbar ist.
 | `API loaded` / „Filmpalast"-Quellen | **Erfolg!** Override bindet, Scraper läuft |
 | `ErrorLoadingException: No id found` | Parent läuft noch → Patch/Dispatch nicht gebunden |
 | gar kein `Filmpalast`-Eintrag | Scraper wird gar nicht aufgerufen (Enable/Routing) |
+
+---
+
+## Ein-Klick-Skript: `save-tv-log` (alles in einem Befehl)
+
+Statt Schritt 5+6+7 jedesmal einzeln tippen, gibt es ein Skript, das alles macht:
+Logcat auslesen → filtern → in Download-Ordner kopieren → Medienscan (damit
+Chat-Apps die Datei finden) → Vorschau der ersten Zeilen.
+
+### Einmalig einrichten
+
+Das Skript liegt im Repo unter `docs/save-tv-log.sh`. Kopiere es nach Termux
+und mach es ausführbar. In Termux (einmalig):
+
+```
+# Wenn du das Repo geklont hast:
+cp docs/save-tv-log.sh ~/save-tv-log.sh
+
+# Sonst direkt aus GitHub raw laden:
+curl -sL https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/docs/save-tv-log.sh -o ~/save-tv-log.sh
+
+chmod +x ~/save-tv-log.sh
+```
+
+**IP anpassen (falls dein TV nicht 192.168.0.59 hat):**
+```
+nano ~/save-tv-log.sh
+```
+Zeile `TV_IP="192.168.0.59"` anpassen, speichern (Strg+O, Enter, Strg+X).
+
+### Künftig: nur noch das hier
+
+Nach dem Testen am TV (Suche ausgelöst, 15s gewartet) in Termux:
+
+```
+~/save-tv-log.sh
+```
+
+Das Skript macht automatisch:
+1. `adb connect 192.168.0.59:5555`
+2. Logcat auslesen → `arvio-tv-log-v15.txt`
+3. Filtern → `arvio-tv-log-v15-filtered.txt`
+4. Kopieren → `Download/arvio-logs/`
+5. Medienscan (Chat-Apps finden die Datei)
+6. Vorschau der ersten 20 Zeilen im Terminal
+
+Danach: Dateimanager → Downloads → arvio-logs → Datei lange drücken → Teilen.
+
+### Skript-Inhalt (falls du es manuell anlegen willst)
+
+```bash
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+TV_IP="192.168.0.59"
+TV_PORT="5555"
+LOG_RAW="$HOME/arvio-tv-log-v15.txt"
+LOG_FILTERED="arvio-tv-log-v15-filtered.txt"
+DOWNLOAD_DIR="$HOME/storage/downloads/arvio-logs"
+
+adb connect ${TV_IP}:${TV_PORT}
+adb logcat -d -v time > "$LOG_RAW"
+grep -iE "Filmpalast|ArvioAddon|ExternalExtension|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX" \
+  "$LOG_RAW" > "$HOME/${LOG_FILTERED}"
+mkdir -p "$DOWNLOAD_DIR"
+cp "$HOME/${LOG_FILTERED}" "$DOWNLOAD_DIR/"
+am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+  -d "file:///storage/emulated/0/Download/arvio-logs/${LOG_FILTERED}" 2>/dev/null
+echo "FERTIG: Download/arvio-logs/${LOG_FILTERED}"
+head -20 "$HOME/${LOG_FILTERED}"
+```
 
 ---
 
