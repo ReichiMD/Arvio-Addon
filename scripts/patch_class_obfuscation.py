@@ -69,6 +69,11 @@ RENAMES = [
     ("kotlin/jvm/functions/Function20", "x7/d"),
     ("kotlin/jvm/functions/Function21", "x7/n"),
     ("kotlin/jvm/functions/FunctionN", "x7/x"),
+    # okhttp3 (ARVIO obfuscates the okhttp3 package to rb/*; only ~3 classes kept).
+    # Our code references okhttp3.Interceptor only transitively via the cloudstream3
+    # `app.get` extension's get$default method descriptor. jsoup + com.lagradost.* are NOT
+    # obfuscated (kept by R8), so only okhttp3 types need remapping.
+    ("okhttp3/Interceptor", "rb/c0"),
 ]
 
 # Precompute descriptor-form and exact-form replacements for fast, safe substitution.
