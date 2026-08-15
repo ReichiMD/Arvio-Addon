@@ -84,8 +84,8 @@ class FilmpalastProvider : TmdbProvider() {
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             DebugLog.t(dbg, "httpGet: $fullUrl -> $code (${text.length} bytes)")
             HttpResp(code, text)
-        } catch (e: Exception) {
-            DebugLog.w(dbg, "httpGet: $fullUrl threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "httpGet: $fullUrl threw ${t.javaClass.name}: ${t.message}")
             HttpResp(0, "")
         } finally {
             conn?.disconnect()
@@ -116,8 +116,8 @@ class FilmpalastProvider : TmdbProvider() {
             val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
             DebugLog.t(dbg, "httpPost: $url -> $code (${text.length} bytes)")
             HttpResp(code, text)
-        } catch (e: Exception) {
-            DebugLog.w(dbg, "httpPost: $url threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "httpPost: $url threw ${t.javaClass.name}: ${t.message}")
             HttpResp(0, "")
         } finally {
             conn?.disconnect()
@@ -152,8 +152,8 @@ class FilmpalastProvider : TmdbProvider() {
         return try {
             val arr = JSONObject(data).optJSONArray("links") ?: return emptyList()
             (0 until arr.length()).mapNotNull { arr.optString(it) }.filter { it.isNotBlank() }
-        } catch (e: Exception) {
-            DebugLog.e(dbg, "loadLinks: could not parse movie links JSON: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.e(dbg, "loadLinks: could not parse movie links JSON: ${t.message}")
             emptyList()
         }
     }
@@ -176,8 +176,8 @@ class FilmpalastProvider : TmdbProvider() {
         DebugLog.t(dbg, "load() called with url=$url")
         return try {
             loadInternal(url)
-        } catch (e: Throwable) {
-            DebugLog.e(dbg, "load() threw ${e.javaClass.simpleName}: ${e.message}", e)
+        } catch (t: Throwable) {
+            DebugLog.e(dbg, "load() threw ${t.javaClass.name}: ${t.message}", t)
             null
         }
     }
@@ -274,8 +274,8 @@ class FilmpalastProvider : TmdbProvider() {
             val date = obj.optString("release_date", "").ifEmpty { obj.optString("first_air_date", "") }
             val year = date.take(4).toIntOrNull()
             TmdbMeta(obj.optInt("id", -1).takeIf { it >= 0 }, title.trim(), year)
-        } catch (e: Exception) {
-            DebugLog.e(dbg, "fetchTmdbMeta: request threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.e(dbg, "fetchTmdbMeta: request threw ${t.javaClass.name}: ${t.message}")
             null
         }
     }
@@ -333,8 +333,8 @@ class FilmpalastProvider : TmdbProvider() {
                 DebugLog.w(dbg, "searchFilmpalast: 0 elements matched. Page title/h2: ${document.select("title").text()} | first 300 chars: ${document.body().text().take(300)}")
             }
             selected.mapNotNull { it.toSearchEntry() }
-        } catch (e: Exception) {
-            DebugLog.e(dbg, "searchFilmpalast: GET threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.e(dbg, "searchFilmpalast: GET threw ${t.javaClass.name}: ${t.message}")
             emptyList()
         }
     }
@@ -399,8 +399,8 @@ class FilmpalastProvider : TmdbProvider() {
                 this.plot = description
                 this.year = meta.year
             }
-        } catch (e: Exception) {
-            DebugLog.e(dbg, "buildMovieResponse: threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.e(dbg, "buildMovieResponse: threw ${t.javaClass.name}: ${t.message}")
             null
         }
     }
@@ -433,8 +433,8 @@ class FilmpalastProvider : TmdbProvider() {
                 this.year = meta.year
                 this.plot = ""
             }
-        } catch (e: Exception) {
-            DebugLog.e(dbg, "buildSeriesResponse: threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.e(dbg, "buildSeriesResponse: threw ${t.javaClass.name}: ${t.message}")
             null
         }
     }
@@ -469,8 +469,8 @@ class FilmpalastProvider : TmdbProvider() {
 
         val links: List<String> = when {
             data.trimStart().startsWith("{") -> {
-                try { parseLinksJson(data) } catch (e: Exception) {
-                    DebugLog.e(dbg, "loadLinks: could not parse movie links JSON: ${e.message}")
+                try { parseLinksJson(data) } catch (t: Throwable) {
+                    DebugLog.e(dbg, "loadLinks: could not parse movie links JSON: ${t.message}")
                     emptyList()
                 }
             }
@@ -480,8 +480,8 @@ class FilmpalastProvider : TmdbProvider() {
                     val res = httpGet(data)
                     DebugLog.t(dbg, "loadLinks: episode page -> ${res.code}")
                     collectHosterLinks(Jsoup.parse(res.text).select("#content"))
-                } catch (e: Exception) {
-                    DebugLog.e(dbg, "loadLinks: fetching episode page threw ${e.javaClass.simpleName}: ${e.message}")
+                } catch (t: Throwable) {
+                    DebugLog.e(dbg, "loadLinks: fetching episode page threw ${t.javaClass.name}: ${t.message}")
                     emptyList()
                 }
             }
@@ -534,8 +534,10 @@ class FilmpalastProvider : TmdbProvider() {
                 // Add more hoster-specific extractors here as needed (vidsonic, ...).
                 else -> genericResolve(url, callback)
             }
-        } catch (e: Exception) {
-            DebugLog.w(dbg, "resolveHost: '$url' threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            // Catch Throwable (not Exception) - R8-stripping causes NoClassDefFoundError /
+            // NoSuchMethodError (Errors, not Exceptions) that would otherwise crash the app.
+            DebugLog.w(dbg, "resolveHost: '$url' threw ${t.javaClass.name}: ${t.message}")
             false
         }
     }
@@ -565,8 +567,8 @@ class FilmpalastProvider : TmdbProvider() {
         }
         val streamUrl = try {
             JSONObject(res.text).optString("streaming_url", "")
-        } catch (e: Exception) {
-            DebugLog.w(dbg, "resolveOdysseusa: could not parse JSON: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "resolveOdysseusa: could not parse JSON: ${t.message}")
             return false
         }
         if (streamUrl.isEmpty() || !streamUrl.startsWith("http")) {
@@ -702,24 +704,33 @@ class FilmpalastProvider : TmdbProvider() {
             }
             DebugLog.t(dbg, "genericResolve: GET $url -> ${res.code}, len=${text.length}, found=$found")
             found
-        } catch (e: Exception) {
-            DebugLog.w(dbg, "genericResolve: GET $url threw ${e.javaClass.simpleName}: ${e.message}")
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "genericResolve: GET $url threw ${t.javaClass.name}: ${t.message}")
             false
         }
     }
 
     private fun emitLink(source: String, url: String, callback: (ExtractorLink) -> Unit) {
-        val isM3u8 = url.contains(".m3u8")
-        callback.invoke(
-            ExtractorLink(
-                source = source,
-                name = source,
-                url = url,
-                referer = mainUrl,
-                quality = Qualities.Unknown.value,
-                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+        try {
+            val isM3u8 = url.contains(".m3u8")
+            // Use the PRIMARY constructor (all 9 positional args, no default-args) - R8 strips the
+            // synthetic DefaultConstructorMarker constructor (like MainPageData, Erkenntnis #6),
+            // so named-arg/default-arg construction throws NoSuchMethodError at runtime.
+            val link = ExtractorLink(
+                source,                                                          // source
+                source,                                                          // name
+                url,                                                             // url
+                mainUrl,                                                         // referer
+                Qualities.Unknown.value,                                         // quality
+                emptyMap(),                                                      // headers (was default)
+                "",                                                              // extractorData (was default)
+                if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO, // type
+                emptyList()                                                      // audioTracks (was default)
             )
-        )
+            callback.invoke(link)
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "emitLink: threw ${t.javaClass.name}: ${t.message}")
+        }
     }
 
     private val mobileUA =
