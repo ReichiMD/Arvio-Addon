@@ -506,7 +506,24 @@ k7/a ist ein 3-Wert-Enum. app.get (suspend, ARVIO-provided) resume-t nicht korre
 Strategiewechsel: nicht mehr jede obfuscated okhttp/coroutine-Type einzeln jagen. Statt ARVIOs suspend app.get (NiceHttp/okhttp) nutzen wir plain java.net.HttpURLConnection (JDK, NIE obfuscated) + Jsoup.parse (jsoup von ARVIO unobfuscated kept, 330 Klassen verifiziert). Alle internen HTTP-Helfer (fetchTmdbMeta, searchFilmpalast, buildMovieResponse, genericResolve) -> httpGet()-Helper, nicht-suspend. withTimeoutOrNull entfernt (stattdessen java.net connect/read timeouts). load()/loadLinks()/search() bleiben suspend (cloudstream3 API-Vertrag, DEX-patched j7/d) aber haben keine inneren suspend-Aufrufe mehr (coroutine state machine trivial -> obfuscated-Type-Breakage umgangen). AUSNAHME: loadExtractor + newMovieLoadResponse/newTvSeriesLoadResponse bleiben suspend-Aufrufe (ARVIO->ARVIO intern, funktionieren wie ARVIOs eigene Scraper). Builds: v21. CI gruen.
 - **v21**: HTTP auf java.net.HttpURLConnection + Jsoup.parse umgestellt, app.get entfernt (Fix #13). Umgeht okhttp3+coroutine-Obfuskation komplett. CI gruen. builds: v21.
 - **v22**: Jackson/parseJson durch org.json ersetzt (Fix #15). v21-TV-Test war MEGA-DURCHBRUCH (Dispatch bindet, httpGet funktioniert, TMDB-Meta geholt), aber parseJson<TmdbMeta> crashte wegen kotlin-reflect von R8 gestript ("This callable does not support a default call"). org.json = Android built-in, nie obfuscated, keine Reflection. CI gruen. builds: v22 (1478891 bytes).
-- **v23** (AKTUELL): loadExtractor entfernt + eigene Hoster-Extraktion + Regex-Fix (Fix #16). v22-TV-Test: Scraper lief KOMPLETT durch (TMDB-Meta geparst, Filmpalast-Suche 5 Treffer, 4 Hoster-Links, MovieLoadResponse geladen, loadLinks aufgerufen), ABER loadExtractor crashte (ClassCastException k7.a/d7.d0 -> java.lang.Boolean, gleiches Problem wie app.get: ARVIO-suspend fuer externe Plugins broken) + genericResolve-Regex hatte unbalancierte Klammern. Fix: loadExtractor komplett entfernt, resolveHost() dispatcht per Domain zu eigenen non-suspend Extractoren (resolveVoe fuer voe.sx) mit generic page-scrape fallback. Regex fixiert. CI gruen. builds: v23 (1479448 bytes). AUF TV/HANDY-TEST AUSSTEHEND (Stand 15.08.2026).
+- **v23**: loadExtractor entfernt + eigene Hoster-Extraktion + Regex-Fix (Fix #16). v22-TV-Test: Scraper lief KOMPLETT durch, ABER loadExtractor crashte (ClassCastException, ARVIO-suspend broken) + genericResolve-Regex unbalanciert. Fix: loadExtractor entfernt, resolveHost/resolveVoe, Regex fixiert. CI gruen. builds: v23 (1479448 bytes).
+- **v24** (AKTUELL): odysseusa.cc-Extractor (api/stream POST) + matchResults exakt-Match-Fix (Fix #17). v23-TV-Test: KEIN CRASH mehr! Scraper laeuft sauber durch, 0 Quellen, clean termination. Hoster-Analyse (live curl): odysseusa.cc hat /api/stream POST -> JSON streaming_url (master.m3u8, live getestet!), voe.sx = DDoS-Guard, vidsonic.net = obfuscated JS, flyfile.app = Cloudflare. Fix: resolveOdysseusa + httpPost + matchResults exakt-Match-Sort + resolveVoe status-tolerant. CI gruen. builds: v24 (1481193 bytes). AUF TV/HANDY-TEST AUSSTEHEND (Stand 15.08.2026).
+
+### ENTSCHEIDENDE ERKENNTNIS #17 (15.08.2026, v23-TV-Test + Hoster-Analyse): KEIN CRASH, echte Hoster-Extraktion, odysseusa-API gefunden
+
+v23-TV-Test (arvio-tv-log-v23-filtered.txt) = **KEIN CRASH mehr!** loadExtractor-Entfernung (Fix #16) funktioniert. Scraper laeuft sauber durch, alle 4 Hoster found=false (Extraktion trifft nicht, aber clean termination). **Voll auf Ebene 2 = echte Hoster-Extraktion, kein Obfuskations-Problem mehr.**
+
+**Hoster-Analyse (live curl aller 4 Embed-Seiten, 15.08.2026):**
+- **odysseusa.cc**: JWPlayer, POST `/api/stream` mit `{filecode,device}` -> JSON `streaming_url` (master.m3u8 mit token). **Live getestet, funktioniert!** -> resolveOdysseusa gebaut.
+- **voe.sx**: DDoS-Guard JS-Challenge (kein echtes 404). Nicht von java.net umgehbar. resolveVoe scannt jetzt Body auch bei non-200.
+- **vidsonic.net**: Stark obfusziertes JS (atob/charCodeAt), andere Platform, kein /api/stream. genericResolve.
+- **flyfile.app**: Cloudflare-Challenge. Nicht umgehbar. Skip.
+
+**Zusaetzlicher Bug: matchResults zu lax** -> nahm \"Matrix Revolutions\" statt \"Matrix\". Fix: sortiert nach exaktem Titel-Match + Jahr-Naehe.
+
+**Fix #17 (IMPLEMENTIERT, v24):** resolveOdysseusa (filecode + POST /api/stream + JSON streaming_url), httpPost helper, matchResults exakt-Match-Sort, resolveVoe status-tolerant. Verifiziert: v24 (1481193 bytes), loadExtractor=0 refs. CI gruen. builds: v24.
+
+**Erwartung v24-Test:** odysseusa.cc sollte die **ERSTE Filmpalast-Quelle** in ARVIO liefern! (`resolveOdysseusa: streaming_url=https://...master.m3u8` -> Quelle sichtbar). Plus korrekter Film gematcht.
 
 ### ENTSCHEIDENDE ERKENNTNIS #16 (15.08.2026, v22-TV-Test): Scraper laeuft KOMPLETT durch + loadExtractor broken + Regex-Bug
 
@@ -603,29 +620,27 @@ Nutzer kann ab sofort auch auf dem HANDY testen (UI-Bug behoben). Fuer Logcat oh
 
 ### NAECHSTE SCHRITTE (Stand 15.08.2026, fuer naechste Session)
 
-**Prio 1 - v23 am Geraet testen (Handy ODER TV):**
-- v23 steht auf builds (status=1, version=23, 1479448 bytes). CI gruen.
+**Prio 1 - v24 am Geraet testen (Handy ODER TV):**
+- v24 steht auf builds (status=1, version=24, 1481193 bytes). CI gruen.
 - Handy-Test jetzt moeglich (UI-Bug in 1.9.994 behoben). Logcat via LADB+Termux (docs/handy-logcat-ladb-termux.md) ODER weiterhin TV+Laptop WLAN-ADB.
-- Setup: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v23).
+- Setup: Repo loeschen + neu hinzufuegen DIREKT (NICHT Cloud-Sync! -> Erkenntnis #1): `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Filmpalast einschalten (v24).
 - Test: `logcat -c` -> Matrix (TMDB 603) suchen -> "Nach Quellen suchen" -> 15s warten -> Logcat holen.
-- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet fetchTmdbMeta searchFilmpalast matchResults buildMovieResponse collectHosterLinks loadLinks resolveHost resolveVoe genericResolve ClassCastException PatternSyntaxException`.
-- **Was im Log zu suchen (entscheidend nach v23-loadExtractor-Fix):**
-  - `resolveHost('https://voe.sx/...')` + `resolveVoe: GET ... -> 200, len=..., found=...` -> resolveHost/resolveVoe laufen (kein loadExtractor-Crash mehr!).
-  - `resolveVoe: ... found=true` -> VOE-Quelle extrahiert! **Quelle in ARVIO sichtbar = ZIEL ERREICHT!**
-  - `resolveVoe: ... found=false` -> VOE-Embed-Seite enthielt keine direkt-matchbare m3u8-URL. Naechster Schritt: Embed-Seiten-HTML analysieren (Logcat zeigt len=...; ggf. resolveVoe-Logik nachschaerfen - VOE aendert Obfuskations-Pattern oft).
-  - `genericResolve: ... found=true/false` -> Fallback fuer odysseusa/vidsonic/flyfile.
-  - `loadLinks: DONE, any=true` + ARVIO `N links collected` (N>0) -> **ERFOLG!**
-  - `loadLinks: DONE, any=false` -> keine Hoster-Quelle gefunden (Extraktion trifft nicht, aber KEIN Crash).
-  - Falls NEUER ClassCastException/NoSuchMethodError: noch eine ARVIO-suspend-Funktion gefunden die wir aufrufen (grep nach `loadExtractor`/suspend-Aufrufen im Code).
-  - Falls PatternSyntaxException WIEDER: noch ein Regex kaputt (diesmal nicht nur der 3.).
-  - Falls App-Crash (FATAL EXCEPTION): welcher Thread? Wenn `ArvioAddon`-Thread -> unsere Exception entwischt (Throwable-catch pruefen). Wenn ARVIO-Thread -> ARVIO-seitig nach 0 Quellen.
+- Log filtern: `Filmpalast ArvioAddon ExternalExtension ErrorLoading No.API load httpGet httpPost fetchTmdbMeta searchFilmpalast matchResults buildMovieResponse collectHosterLinks loadLinks resolveHost resolveVoe resolveOdysseusa genericResolve streaming_url`.
+- **Was im Log zu suchen (entscheidend nach v24-odysseusa-Fix):**
+  - `match: Matrix | ...` als ERSTER match (statt Matrix Revolutions) -> matchResults-Fix funktioniert!
+  - `buildMovieResponse: GET https://filmpalast.to/stream/matrix` (statt matrix-revolutions) -> richtige Seite geladen.
+  - `resolveOdysseusa: streaming_url=https://...master.m3u8` -> **ERSTE FILMPALAST-QUELLE EXTRAHIRT! 🎯**
+  - `loadLinks: DONE, any=true` + ARVIO `N links collected` (N>0) -> **ERFOLG! Quelle in ARVIO sichtbar!**
+  - Falls `resolveOdysseusa: POST .../api/stream -> HTTP 403/401` -> API braucht zusaetzliche Header/Cookie (vom Client ggf. anders). Logcat analysieren.
+  - Falls `resolveOdysseusa: no streaming_url in response` -> API-Response leer (filecode falsch? Link abgelaufen?).
+  - `resolveVoe: ... found=false` (erwartet, DDoS-Guard) + `genericResolve: ... found=false` fuer vidsonic/flyfile (erwartet).
 
-**Prio 2 - Je nach v23-Logcat-Befund:**
-- Falls resolveVoe found=false: VOE-Embed-Seite-HTML aus Logcat (len=...) oder direkt curl'n, Obfuskations-Pattern analysieren, resolveVoe-Regexes nachschaerfen. VOE nutzt oft `eval(function(p,a,c,k,e,d)` packer oder base64 - resolveVoe hat beide, aber Pattern koennte anders sein.
-- Falls genericResolve findet nichts fuer odysseusa.cc/vidsonic.net: hoster-spezifische Extractoren hinzufuegen (wie resolveVoe). Diese Hoster nutzen JWPlayer mit API-Call (`t.streaming_url`), nicht direkte URLs -> komplexer.
-- Falls 0 Quellen aber kein Crash: Hoster-Extraktion ist jetzt "echte Arbeit" (Ebene 2), kein Obfuskations-Problem mehr.
+**Prio 2 - Je nach v24-Logcat-Befund:**
+- Falls odysseusa-Quelle erscheint: **ZIEL ERREICHT!** Weitere Hoster (vidsonic) koennen spaeter hinzugefuegt werden.
+- Falls odysseusa POST schlaegt fehl (403/leere Response): Headers/Cookies pruefen (ggf. erst Embed-Seite fetchen fuer Cookie, dann POST mit Cookie).
+- Falls 0 Quellen trotz resolveOdysseusa running: vidsonic-Extractor bauen (obfuscated JS analysieren) ODER VOE via WebView (komplex, ARVIO-intern).
 
-**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v23-Befund):**
+**Prio 3 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen, erst nach v24-Befund):**
 Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereiten". Drei klare Bugs:
 1. R8 obfuscated kotlin.coroutines.Continuation + okhttp3 + stript kotlin-reflect -> externe .cs3-Plugins koennen suspend-Overrides, app.get, loadExtractor UND Jackson-JSON-Parsing nicht nutzen (Haupt-Bug, Erkenntnis #7+#13+#14+#15+#16).
 2. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (Erkenntnis #1).
