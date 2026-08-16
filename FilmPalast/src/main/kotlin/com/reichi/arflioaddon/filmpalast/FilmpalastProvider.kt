@@ -258,7 +258,13 @@ class FilmpalastProvider : TmdbProvider() {
     private val tmdbApiKey = "e6333b32409e02a4a6eba6fb7ff866bb"
     private val tmdbApiUrl = "https://api.themoviedb.org/3"
 
+    // JDK ConcurrentHashMap: thread-safe, never obfuscated by ARVIO's R8 (unlike okhttp/coroutines).
+    // ARVIO may call load() repeatedly for the same TMDB id during a source search; caching avoids
+    // a redundant ~300ms TMDB round-trip on repeated lookups (same movie re-searched, alt-titles retry).
+    private val tmdbCache = java.util.concurrent.ConcurrentHashMap<Int, TmdbMeta>()
+
     private fun fetchTmdbMeta(tmdbId: Int, isTv: Boolean): TmdbMeta? {
+        tmdbCache[tmdbId]?.let { return it }
         val path = if (isTv) "/tv/$tmdbId" else "/movie/$tmdbId"
         val full = "$tmdbApiUrl$path"
         return try {
@@ -273,7 +279,9 @@ class FilmpalastProvider : TmdbProvider() {
                 .ifEmpty { obj.optString("original_title", "") }.ifEmpty { obj.optString("original_name", "") }
             val date = obj.optString("release_date", "").ifEmpty { obj.optString("first_air_date", "") }
             val year = date.take(4).toIntOrNull()
-            TmdbMeta(obj.optInt("id", -1).takeIf { it >= 0 }, title.trim(), year)
+            val meta = TmdbMeta(obj.optInt("id", -1).takeIf { it >= 0 }, title.trim(), year)
+            tmdbCache[tmdbId] = meta
+            meta
         } catch (t: Throwable) {
             DebugLog.e(dbg, "fetchTmdbMeta: request threw ${t.javaClass.name}: ${t.message}")
             null
@@ -713,6 +721,8 @@ class FilmpalastProvider : TmdbProvider() {
     private fun emitLink(source: String, url: String, callback: (ExtractorLink) -> Unit) {
         try {
             val isM3u8 = url.contains(".m3u8")
+            val quality = detectQuality(url, isM3u8)
+            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8")
             // Use the PRIMARY constructor (all 9 positional args, no default-args) - R8 strips the
             // synthetic DefaultConstructorMarker constructor (like MainPageData, Erkenntnis #6),
             // so named-arg/default-arg construction throws NoSuchMethodError at runtime.
@@ -721,7 +731,7 @@ class FilmpalastProvider : TmdbProvider() {
                 source,                                                          // name
                 url,                                                             // url
                 mainUrl,                                                         // referer
-                Qualities.Unknown.value,                                         // quality
+                quality,                                                         // quality (detected, see detectQuality)
                 emptyMap(),                                                      // headers (was default)
                 "",                                                              // extractorData (was default)
                 if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO, // type
@@ -730,6 +740,38 @@ class FilmpalastProvider : TmdbProvider() {
             callback.invoke(link)
         } catch (t: Throwable) {
             DebugLog.w(dbg, "emitLink: threw ${t.javaClass.name}: ${t.message}")
+        }
+    }
+
+    /**
+     * Detect the real video quality so ARVIO shows "1080p"/"720p"/"4K" instead of "Unknown" and so
+     * ARVIO's Auto-Play scores the stream (qualityScoreForAutoPlay: 2160/4K->4, 1080p->3, 720p->2,
+     * 480p->1, else 0). With Qualities.Unknown (400 -> "" -> "Unknown") the Auto-Play score is 0,
+     * so ARVIO's 2s Auto-Play wait ignores the stream.
+     *
+     * For m3u8: fetch the manifest (Range 0-4096 to keep it small) and parse
+     * #EXT-X-STREAM-INF:BANDWIDTH=...,RESOLUTION=1920x1080. For mp4/other: default P720 (mp4 is
+     * usually DVD/HD). All non-suspend (java.net) and fully guarded - on any error default to P720
+     * (better than Unknown, never crashes). Qualities enum values (verified from cloudstream3):
+     * Unknown=400, P480=480, P720=720, P1080=1080, P2160=2160.
+     */
+    private fun detectQuality(url: String, isM3u8: Boolean): Int {
+        if (!isM3u8) return Qualities.P720.value
+        return try {
+            val res = httpGet(url, headers = mapOf("Range" to "bytes=0-8192"))
+            if (res.code !in 200..299 && res.code != 206) return Qualities.P720.value
+            val m = Regex("RESOLUTION=(\\d+)x(\\d+)", RegexOption.IGNORE_CASE).find(res.text)
+            val h = m?.groupValues?.get(2)?.toIntOrNull() ?: return Qualities.P720.value
+            when {
+                h >= 2160 -> Qualities.P2160.value
+                h >= 1080 -> Qualities.P1080.value
+                h >= 720 -> Qualities.P720.value
+                h >= 480 -> Qualities.P480.value
+                else -> Qualities.P360.value
+            }
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "detectQuality: '$url' threw ${t.javaClass.name}: ${t.message}")
+            Qualities.P720.value
         }
     }
 
