@@ -650,10 +650,17 @@ class SerienstreamProvider : TmdbProvider() {
             return HttpResp(0, "", redirectUrl)
         }
 
-        // 4. POST /r mit _token + t + altcha.
+        // 4. POST /r mit _token + t + altcha + cf-turnstile-response.
+        // The gate tier is "turnstile_altcha" — the form also has a Cloudflare Turnstile
+        // widget. Turnstile injects a hidden input "cf-turnstile-response" when rendered in
+        // a browser. We can't run Turnstile's JS (no browser engine), so we send an empty
+        // value. This only works if the server runs in non-strict mode (rare). If the server
+        // validates the token server-side, this fails and Serienstream is not solvable
+        // without a JS engine.
         val postBody = "_token=" + java.net.URLEncoder.encode(csrf, "UTF-8") +
             "&t=" + java.net.URLEncoder.encode(tToken, "UTF-8") +
-            "&altcha=" + java.net.URLEncoder.encode(payload, "UTF-8")
+            "&altcha=" + java.net.URLEncoder.encode(payload, "UTF-8") +
+            "&cf-turnstile-response="
         val postHeaders = HashMap(headers)
         postHeaders["Referer"] = episodePageUrl
         postHeaders["Origin"] = mainUrl
