@@ -605,6 +605,19 @@ class SerienstreamProvider : TmdbProvider() {
             DebugLog.w(dbg, "redirectGate: no CSRF _token on episode page")
             return epResp
         }
+
+        // 1b. Preflight: GET the /r?t=<token> redirect URL itself. The browser does this when
+        // the user clicks a hoster button — it loads the redirect-gate page (which embeds the
+        // ALTCHA widget). This request establishes the DDoS-Guard session cookies that the
+        // POST /r later requires. Without it the server rejects the ALTCHA solution with
+        // "Das hat leider nicht geklappt" even though the PoW is correct.
+        // instanceFollowRedirects stays true so we don't follow away to a hoster prematurely
+        // (the gate page returns 200 + JS, not a 3xx).
+        val preflightHeaders = HashMap(headers)
+        preflightHeaders["Referer"] = episodePageUrl
+        val preflightResp = doRequest(redirectUrl, preflightHeaders, cj)
+        DebugLog.t(dbg, "redirectGate: preflight /r?t= -> ${preflightResp.code} (${preflightResp.text.length}B) ddgCookies=${cj.hasAny("__ddg")}")
+
         // Der t-token aus der redirectUrl (/r?t=<urlencoded>). Dekodieren für das POST-Feld.
         val tToken = try {
             val raw = redirectUrl.substringAfter("t=").substringBefore("&")
