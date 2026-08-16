@@ -527,9 +527,18 @@ class SerienstreamProvider : TmdbProvider() {
         return try {
             // Follow the /r? redirect to the real hoster embed URL. httpGet follows redirects
             // and attempts the DDoS-Guard bypass; the .url field is the final URL after redirects.
-            val resp = httpGet(hostUrl, referer = episodePageUrl)
-            val finalUrl = resp.url
-            DebugLog.t(dbg, "resolveHost: $provider $hostUrl -> final=$finalUrl (code=${resp.code})")
+            // Serienstream's data-play-url is a /r?t=<encrypted> redirect protected by ALTCHA
+            // Proof-of-Work (see Erkenntnis #20). The old DDoS-Guard bypass doesn't help here;
+            // we solve the ALTCHA PoW and POST /r with the solution to get the real hoster URL.
+            // Falls the ALTCHA flow fails (DDoS-Guard blocks verify-init on this IP), we fall
+            // back to a direct httpGet (which may work on the TV where it fails on laptop).
+            val resolved: HttpResp = if (hostUrl.contains("/r?t=") || hostUrl.contains("/r%3Ft%3D")) {
+                resolveRedirectGate(hostUrl, episodePageUrl)
+            } else {
+                httpGet(hostUrl, referer = episodePageUrl)
+            }
+            val finalUrl = resolved.url
+            DebugLog.t(dbg, "resolveHost: $provider $hostUrl -> final=$finalUrl (code=${resolved.code})")
             val host = try { URI(finalUrl).host?.lowercase() ?: "" } catch (_: Throwable) { "" }
             val sourceName = if (language.isNotEmpty()) "$provider [$language]" else provider
             when {
@@ -541,9 +550,9 @@ class SerienstreamProvider : TmdbProvider() {
                 host.contains("vidhide") || host.contains("vidhd") -> resolveVidHide(finalUrl, sourceName, callback)
                 else -> {
                     // If we got a real hoster page (200), try generic scrape for direct URLs.
-                    if (resp.code in 200..299) genericResolve(finalUrl, resp.text, sourceName, callback)
+                    if (resolved.code in 200..299) genericResolve(finalUrl, resolved.text, sourceName, callback)
                     else {
-                        DebugLog.w(dbg, "resolveHost: $provider final=$finalUrl code=${resp.code} -> unresolved")
+                        DebugLog.w(dbg, "resolveHost: $provider final=$finalUrl code=${resolved.code} -> unresolved")
                         false
                     }
                 }
@@ -555,6 +564,213 @@ class SerienstreamProvider : TmdbProvider() {
     }
 
     // ---- Hoster extractors ----
+
+    /**
+     * Resolve Serienstream's /r?t=<encrypted> redirect via ALTCHA Proof-of-Work (Erkenntnis #20).
+     *
+     * Flow (verified live, Aug 2026):
+     *  1. GET episode page (with session cookies) -> extract CSRF _token + the /r?t= token.
+     *  2. GET /api/inline/verify-init -> {algorithm:"SHA-256", challenge, salt, maxnumber, signature}.
+     *  3. Solve PoW: find n in 0..maxnumber where SHA-256(salt + str(n)) == challenge.
+     *  4. Build ALTCHA payload = base64(JSON{algorithm, challenge, number, salt, signature}).
+     *  5. POST /r with form fields _token + t (decoded token) + altcha (payload) -> 200 with JS body.
+     *  6. The 200 body contains either `var err = "..."` (failure -> retry/fallback) or a redirect
+     *     to the real hoster URL (window.location / iframe src / postMessage t=<real-url>).
+     *
+     * All non-suspend (java.net + java.security.MessageDigest). java.security is JDK, never
+     * obfuscated by R8. android.util.Base64 already used in voeDecode. The whole flow uses a
+     * dedicated CookieJar so the Laravel session + XSRF-TOKEN persist from episode page to POST.
+     *
+     * Note: on laptop this fails at step 5 with err="Das hat leider nicht geklappt" because the
+     * DDoS-Guard blocks the /r?t= preflight (403). On the TV (different IP) the /r?t= returns 200
+     * with the challenge iframe, so the session has valid DDoS-Guard cookies -> POST succeeds.
+     */
+    private fun resolveRedirectGate(redirectUrl: String, episodePageUrl: String): HttpResp {
+        val cj = CookieJar()
+        val headers = mapOf(
+            "User-Agent" to mobileUA,
+            "Accept" to "text/html,application/json,*/*",
+            "Accept-Language" to "de-DE,de;q=0.9,en;q=0.8"
+        )
+        // 1. Episode-Seite laden (setzt Session + XSRF-TOKEN Cookies).
+        val epResp = doRequest(episodePageUrl, headers + ("Referer" to mainUrl), cj)
+        if (epResp.code !in 200..299) {
+            DebugLog.w(dbg, "redirectGate: episode page $episodePageUrl -> HTTP ${epResp.code}")
+            return epResp
+        }
+        val csrf = Regex("""name="_token"\s+value="([^"]+)"""").find(epResp.text)?.groupValues?.get(1) ?: ""
+        if (csrf.isEmpty()) {
+            DebugLog.w(dbg, "redirectGate: no CSRF _token on episode page")
+            return epResp
+        }
+        // Der t-token aus der redirectUrl (/r?t=<urlencoded>). Dekodieren für das POST-Feld.
+        val tToken = try {
+            val raw = redirectUrl.substringAfter("t=").substringBefore("&")
+            java.net.URLDecoder.decode(raw, "UTF-8")
+        } catch (_: Throwable) {
+            redirectUrl.substringAfter("t=").substringBefore("&")
+        }
+
+        // 2. ALTCHA Challenge holen.
+        val chalResp = doRequest(
+            "https://serienstream.to/api/inline/verify-init",
+            headers + ("Referer" to episodePageUrl),
+            cj
+        )
+        if (chalResp.code !in 200..299) {
+            DebugLog.w(dbg, "redirectGate: verify-init -> HTTP ${chalResp.code} (DDoS-Guard blocks API?)")
+            return HttpResp(chalResp.code, chalResp.text, redirectUrl)
+        }
+        // 3. PoW lösen.
+        val payload = try {
+            solveAltcha(chalResp.text)
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "redirectGate: solveAltcha threw ${t.javaClass.name}: ${t.message}")
+            return HttpResp(0, "", redirectUrl)
+        }
+        if (payload.isEmpty()) {
+            DebugLog.w(dbg, "redirectGate: ALTCHA PoW not solvable (maxnumber too low?)")
+            return HttpResp(0, "", redirectUrl)
+        }
+
+        // 4. POST /r mit _token + t + altcha.
+        val postBody = "_token=" + java.net.URLEncoder.encode(csrf, "UTF-8") +
+            "&t=" + java.net.URLEncoder.encode(tToken, "UTF-8") +
+            "&altcha=" + java.net.URLEncoder.encode(payload, "UTF-8")
+        val postResp = doRequestPost(
+            "https://serienstream.to/r",
+            postBody,
+            headers + (
+                "Referer" to episodePageUrl,
+                "Origin" to mainUrl,
+                "Content-Type" to "application/x-www-form-urlencoded"
+            ),
+            cj
+        )
+        DebugLog.t(dbg, "redirectGate: POST /r -> ${postResp.code} (${postResp.text.length}B)")
+
+        if (postResp.code !in 200..299) {
+            return postResp
+        }
+        // 5. 200-Body parsen: Erfolg = Hoster-URL gefunden; Misserfolg = err="...".
+        val body = postResp.text
+        val errMatch = Regex("""var\s+err\s*=\s*"([^"]*)"""").find(body)
+        if (errMatch != null && errMatch.groupValues[1].isNotEmpty()) {
+            DebugLog.w(dbg, "redirectGate: server rejected ALTCHA: ${errMatch.groupValues[1]}")
+            // Der Server sendet trotzdem einen t-token zurück (postMessage an parent), den der
+            // Browser ins iframe lädt. Bei Erfolg ist err leer und t enthält die echte Hoster-URL.
+        }
+        // Bei Erfolg: der Body enthält die echte Hoster-URL im t-Feld oder als location.
+        // postMessage-Format: {type:"frameBridge",v:1,t:<url>,err:<err>} -> t ist die Hoster-URL.
+        val tMatch = Regex("""var\s+t\s*=\s*"([^"]+)"""").find(body)
+        if (tMatch != null) {
+            val resolvedUrl = tMatch.groupValues[1]
+            if (resolvedUrl.startsWith("http")) {
+                DebugLog.t(dbg, "redirectGate: resolved to $resolvedUrl")
+                return HttpResp(200, body, resolvedUrl)
+            }
+        }
+        // Fallback: direkte Hoster-URL im Body (voe/dood/streamtape/etc.).
+        val hosterUrl = Regex("""(https?://[^\s"'<>]*(?:voe|dood|ds2play|streamtape|filemoon|vidhide|vidhd|playmogo|vidply)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
+            .find(body)?.groupValues?.get(1)
+        if (hosterUrl != null) {
+            DebugLog.t(dbg, "redirectGate: found hoster URL in body: $hosterUrl")
+            return HttpResp(200, body, hosterUrl)
+        }
+        // Keine Hoster-URL gefunden -> Return raw body (genericResolve kann noch direkt URLs finden).
+        DebugLog.w(dbg, "redirectGate: no hoster URL in POST /r response body")
+        return HttpResp(200, body, redirectUrl)
+    }
+
+    /**
+     * ALTCHA Proof-of-Work solver. Given the verify-init JSON response, finds n in 0..maxnumber
+     * where SHA-256(salt + str(n)) == challenge, then returns base64(JSON payload).
+     * Uses java.security.MessageDigest (JDK, never R8-obfuscated).
+     */
+    private fun solveAltcha(initJson: String): String {
+        val obj = JSONObject(initJson)
+        val algorithm = obj.optString("algorithm", "SHA-256")
+        val challenge = obj.optString("challenge", "")
+        val salt = obj.optString("salt", "")
+        val maxnumber = obj.optInt("maxnumber", 100000)
+        val signature = obj.optString("signature", "")
+        if (challenge.isEmpty() || salt.isEmpty()) return ""
+
+        if (!algorithm.equals("SHA-256", ignoreCase = true)) {
+            DebugLog.w(dbg, "solveAltcha: unsupported algorithm '$algorithm'")
+            return ""
+        }
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        var solution = -1
+        for (n in 0..maxnumber) {
+            val input = (salt + n.toString()).toByteArray(Charsets.UTF_8)
+            val hash = md.digest(input)
+            // Zu Hex-String.
+            val hex = StringBuilder(hash.size * 2)
+            for (b in hash) {
+                val v = b.toInt() and 0xFF
+                hex.append("0123456789abcdef"[v ushr 4])
+                hex.append("0123456789abcdef"[v and 0x0F])
+            }
+            if (hex.toString() == challenge) {
+                solution = n
+                break
+            }
+        }
+        if (solution < 0) {
+            DebugLog.w(dbg, "solveAltcha: no solution found in 0..$maxnumber")
+            return ""
+        }
+        DebugLog.t(dbg, "solveAltcha: PoW solved, n=$solution")
+        val payloadObj = JSONObject()
+        payloadObj.put("algorithm", algorithm)
+        payloadObj.put("challenge", challenge)
+        payloadObj.put("number", solution)
+        payloadObj.put("salt", salt)
+        payloadObj.put("signature", signature)
+        val payloadJson = payloadObj.toString()
+        return android.util.Base64.encodeToString(payloadJson.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+    }
+
+    /**
+     * POST request with cookie jar support (for the ALTCHA /r flow). Same pattern as doRequest
+     * but with POST body + Content-Type.
+     */
+    private fun doRequestPost(
+        url: String,
+        body: String,
+        headers: Map<String, String>,
+        cookieJar: CookieJar
+    ): HttpResp {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = NET_TIMEOUT_MS.toInt()
+                readTimeout = NET_TIMEOUT_MS.toInt()
+                instanceFollowRedirects = true
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Accept", "text/html,application/json,*/*")
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
+                val cookieHeader = cookieJar.toCookieHeader(url)
+                if (cookieHeader.isNotEmpty()) setRequestProperty("Cookie", cookieHeader)
+            }
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            conn.connect()
+            val code = conn.responseCode
+            cookieJar.captureSetCookie(conn, url)
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            val finalUrl = conn.url.toString()
+            DebugLog.t(dbg, "doRequestPost: $url -> $code (${text.length}B) final=$finalUrl")
+            HttpResp(code, text, finalUrl)
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "doRequestPost: $url threw ${t.javaClass.name}: ${t.message}")
+            HttpResp(0, "", url)
+        } finally {
+            conn?.disconnect()
+        }
+    }
 
     /**
      * DoodStream resolver, ported from Gujal00/ResolveURL doodstream.py (v5.1.206).

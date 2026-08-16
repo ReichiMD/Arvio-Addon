@@ -563,6 +563,40 @@ Zusaetzlich: der Error entwischt, weil `resolveHost`/`emitLink` nur `Exception` 
 - **ExtractorLink primary ctor** (9 Args, wie v25/Filmpalast). Alle catch Throwable.
 - Version 31. CI baut beim Push auf main. **TV-Test ausstehend.**
 
+### ENTSCHEIDENDE ERKENNTNIS #20 (16.08.2026, v31-TV-Test + ALTCHA-Analyse): /r?-Redirect nutzt ALTCHA Proof-of-Work, NICHT unüberwindbare DDoS-Guard-JS-Challenge
+
+**v31-TV-Test = MEGA-DURCHBRUCH.** Der Serienstream-Scraper läuft KOMPLETT durch:
+- Download 1485090 bytes, plugin.load(), Provider+Extractoren registriert.
+- **Dispatch bindet!** ARVIO ruft UNSERN load()-Override auf: `TmdbProvider Serienstream: load({"id":125988,"type":"tv"})`.
+- TMDB-Meta geholt: `title='Silo' year=2023`.
+- `searchSeries: 12 candidates` — Suche funktioniert.
+- `buildSeriesResponse: built 29 episodes` — alle 3 Staffeln + Episoden korrekt (S1E1 "Freiheitstag", S2E1 "Die Ingenieurin", etc.).
+- `loadLinks: 4 hoster buttons` — 4 Hoster gefunden (VOE Deutsch/Englisch, Provider Deutsch/Englisch).
+- `resolveHost: VOE/Provider https://serienstream.to/r?t=... -> final=https://serienstream.to/r?t=... (code=200)` — ABER final=gleiche URL, keine Weiterleitung zur echten Hoster-URL.
+- `genericResolve: ... found=false (html 883 chars)` — die 883-Byte-Antwort ist die DDoS-Guard-Challenge-Seite, keine echte Hoster-Embed-Seite.
+- `0 links collected` — keine Serienstream-Quelle.
+
+**ABER: Das ist NICHT das unüberwindbare DDoS-Guard-JS-Problem!** Analyse der 883/902-Byte-Antwort + der Episode-Seite enthüllte den echten Mechanismus:
+
+**Serienstream nutzt ALTCHA Proof-of-Work (statt DDoS-Guard-JS-Challenge) für /r?-Redirects:**
+1. Episode-Seite enthält: `<div id="episode-redirect-gate-root" data-redirect-gate-tier="turnstile_altcha" data-altcha-challenge-url="https://serienstream.to/api/inline/verify-init">` + `<form id="player-prepare-form" method="POST" action="/r"><input name="_token" value="<CSRF>"><input name="t" id="player-prepare-token"><input name="altcha"></form>`.
+2. `GET /api/inline/verify-init` liefert JSON: `{"algorithm":"SHA-256","challenge":"<hash>","maxnumber":100000,"salt":"<salt>","signature":"<sig>"}`.
+3. **PoW lösen:** finde n in 0..100000 sodass `SHA-256(salt + str(n)) == challenge`. **VERIFIZIERT:** n=77975/68285/88473/76262 (variiert pro Challenge) liefert exakt den Challenge-Hash. Trivial in Kotlin (java.security.MessageDigest, JDK, nie R8-obfuscated).
+4. `payload = base64(JSON{algorithm, challenge, number, salt, signature})`.
+5. `POST /r` mit Form-Fields `_token` (CSRF) + `t` (der /r?t= token, URL-decoded) + `altcha` (payload) → 200 mit JS-Body.
+6. Bei Erfolg: Body enthält `var t = "<echte-hoster-url>"` (postMessage an Parent-Frame) → das ist die echte Hoster-URL!
+7. Bei Misserfolg: Body enthält `var err = "Das hat leider nicht geklappt..."`.
+
+**Vom Laptop:** POST /r liefert 200 + `err="Das hat leider nicht geklappt"` — weil der Laptop die `/r?t=`-Preflight-Seite mit 403 (DDoS-Guard) bekommt und somit keine validen DDoS-Guard-Session-Cookies hat. **Am TV:** `/r?t=` liefert 200 (mit Challenge-iframe) → valide DDoS-Guard-Cookies → POST /r sollte success-body mit echter Hoster-URL liefern.
+
+**Fix #20 (IMPLEMENTIERT, v32): ALTCHA-PoW-Solver + POST /r-Flow in resolveRedirectGate**
+- `resolveRedirectGate(redirectUrl, episodePageUrl)`: lädt Episode-Seite (CookieJar für Session!), extrahiert CSRF _token + t-token, holt verify-init, löst PoW, POST /r mit _token+t+altcha, parst 200-Body nach `var t = "<hoster-url>"` / direkter Hoster-URL.
+- `solveAltcha(initJson)`: SHA-256-Loop (java.security.MessageDigest), baut base64(JSON)-Payload.
+- `doRequestPost(url, body, headers, cookieJar)`: POST mit CookieJar-Support (Session/XSRF-TOKEN müssen persistieren von Episode-Seite zu POST /r).
+- `resolveHost`: erkennt `/r?t=` → ruft `resolveRedirectGate` statt direktem `httpGet`.
+- CookieJar ist pro resolveRedirectGate-Aufruf (thread-safe für parallele Hoster-Auflösung).
+- Version 32. CI baut beim Push. **TV-Test entscheidend:** falls der TV (Wohn-IP) die `/r?t=`-Preflight mit 200 bekommt, liefert POST /r die echte Hoster-URL → erste Serienstream-Quelle!
+
 ### ENTSCHEIDENDE ERKENNTNIS #17 (15.08.2026, v23-TV-Test + Hoster-Analyse): KEIN CRASH, echte Hoster-Extraktion, odysseusa-API gefunden
 
 v23-TV-Test (arvio-tv-log-v23-filtered.txt) = **KEIN CRASH mehr!** loadExtractor-Entfernung (Fix #16) funktioniert. Scraper laeuft sauber durch, alle 4 Hoster found=false (Extraktion trifft nicht, aber clean termination). **Voll auf Ebene 2 = echte Hoster-Extraktion, kein Obfuskations-Problem mehr.**
