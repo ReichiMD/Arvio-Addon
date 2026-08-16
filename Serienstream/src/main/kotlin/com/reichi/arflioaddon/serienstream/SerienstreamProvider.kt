@@ -778,8 +778,8 @@ class SerienstreamProvider : TmdbProvider() {
         else baseUrl.substringBeforeLast("/") + "/" + maybeRelative
     }
 
-    private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        try {
+    private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit): Boolean {
+        return try {
             val isM3u8 = url.contains(".m3u8")
             val quality = detectQuality(url, isM3u8)
             DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8")
@@ -797,8 +797,10 @@ class SerienstreamProvider : TmdbProvider() {
                 emptyList()                                                      // audioTracks
             )
             callback.invoke(link)
+            true
         } catch (t: Throwable) {
             DebugLog.w(dbg, "emitLink: threw ${t.javaClass.name}: ${t.message}")
+            false
         }
     }
 
