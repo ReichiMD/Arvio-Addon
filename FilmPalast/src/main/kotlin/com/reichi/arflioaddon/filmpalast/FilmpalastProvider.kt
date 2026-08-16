@@ -560,7 +560,10 @@ class FilmpalastProvider : TmdbProvider() {
                 // odysseusa.cc + similar JWPlayer hosters expose a /api/stream POST endpoint that
                 // returns JSON with a direct streaming_url (m3u8). Tested live (Aug 2026).
                 host.contains("odysseusa") -> resolveOdysseusa(url, callback)
-                // Add more hoster-specific extractors here as needed (vidsonic, ...).
+                // vidsonic.net embeds the direct m3u8 URL as a hex-encoded + reversed string in a
+                // `const _0x1 = '...'` JS variable. Algorithm from Gujal00/ResolveURL vidsonic.py.
+                host.contains("vidsonic") -> resolveVidsonic(url, callback)
+                // Add more hoster-specific extractors here as needed.
                 else -> genericResolve(url, callback)
             }
         } catch (t: Throwable) {
@@ -569,6 +572,56 @@ class FilmpalastProvider : TmdbProvider() {
             DebugLog.w(dbg, "resolveHost: '$url' threw ${t.javaClass.name}: ${t.message}")
             false
         }
+    }
+
+    /**
+     * vidsonic.net extractor. The embed page at /e/<mediaId> contains a JS variable
+     * `const _0x1 = '<hex-with-pipe-separators>'`. Decoding: strip pipes, hex-decode to ASCII,
+     * reverse the string -> the direct master.m3u8 URL (with server_id/expires/md5 token).
+     * Algorithm verified live (Aug 2026) and matches Gujal00/ResolveURL vidsonic.py.
+     */
+    private fun resolveVidsonic(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val ref = url.substringBefore("/e/") + "/"
+        val res = httpGet(url, headers = mapOf(
+            "Referer" to ref,
+            "Origin" to ref.trimEnd('/'),
+            "User-Agent" to mobileUA
+        ))
+        if (res.code !in 200..299) {
+            DebugLog.w(dbg, "resolveVidsonic: GET $url -> HTTP ${res.code}")
+            return false
+        }
+        val hex = try {
+            Regex("const\\s*_0x1\\s*=\\s*'([^']+)'").find(res.text)?.groupValues?.get(1)
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "resolveVidsonic: regex threw ${t.javaClass.name}: ${t.message}")
+            null
+        }
+        if (hex.isNullOrBlank()) {
+            DebugLog.w(dbg, "resolveVidsonic: no _0x1 hex variable found in page")
+            return false
+        }
+        val streamUrl = try {
+            // hex-decode (strip pipe separators first), then reverse -> m3u8 URL.
+            val cleanHex = hex.replace("|", "")
+            val decoded = StringBuilder(cleanHex.length / 2)
+            var i = 0
+            while (i + 1 < cleanHex.length) {
+                decoded.append(cleanHex.substring(i, i + 2).toInt(16).toChar())
+                i += 2
+            }
+            decoded.reverse().toString()
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "resolveVidsonic: hex-decode/reverse threw ${t.javaClass.name}: ${t.message}")
+            return false
+        }
+        if (!streamUrl.startsWith("http")) {
+            DebugLog.w(dbg, "resolveVidsonic: decoded URL does not start with http: '$streamUrl'")
+            return false
+        }
+        DebugLog.t(dbg, "resolveVidsonic: streaming_url=$streamUrl")
+        emitLink("Vidsonic", streamUrl, ref, callback)
+        return true
     }
 
     /**
@@ -740,10 +793,14 @@ class FilmpalastProvider : TmdbProvider() {
     }
 
     private fun emitLink(source: String, url: String, callback: (ExtractorLink) -> Unit) {
+        emitLink(source, url, mainUrl, callback)
+    }
+
+    private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit) {
         try {
             val isM3u8 = url.contains(".m3u8")
             val quality = detectQuality(url, isM3u8)
-            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8")
+            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 referer=$referer")
             // Use the PRIMARY constructor (all 9 positional args, no default-args) - R8 strips the
             // synthetic DefaultConstructorMarker constructor (like MainPageData, Erkenntnis #6),
             // so named-arg/default-arg construction throws NoSuchMethodError at runtime.
@@ -751,7 +808,7 @@ class FilmpalastProvider : TmdbProvider() {
                 source,                                                          // source
                 source,                                                          // name
                 url,                                                             // url
-                mainUrl,                                                         // referer
+                referer,                                                         // referer
                 quality,                                                         // quality (detected, see detectQuality)
                 emptyMap(),                                                      // headers (was default)
                 "",                                                              // extractorData (was default)
