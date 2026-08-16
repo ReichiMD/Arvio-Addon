@@ -1618,3 +1618,88 @@ Langfristig sollen **alle Scraper im .cs3-Plugin** konsolidiert werden (ein Syst
 - **Obfuskations-Map (verifiziert, v1.9.983 + v1.9.994 identisch):** kotlin.coroutines.Continuation→j7/d, CoroutineContext→j7/j, Function1→x7/l, Function→d7/o, okhttp3.Interceptor→rb/c0, ContinuationInterceptor→j7/g, ContinuationInterceptor.Key→j7/f.i (Feld verschoben). Siehe ERKENNTNIS #7-#12.
 - **ARVIO StalkerApi** (`app/src/main/kotlin/com/arflix/tv/data/api/StalkerApi.kt`): nur 4 Methoden (handshake, getProfile, getChannels, resolveStreamUrl) — nur Live-TV, kein VOD.
 - **ARVIO IptvRepository** (`app/src/main/kotlin/com/arflix/tv/data/repository/IptvRepository.kt`, 8249+ Zeilen): Xtream Codes VOD (getVodCategories, getSeriesCategories) — aber Xtream, nicht Stalker. Stalker-VOD fehlt komplett.
+
+---
+
+## –ď“ď–í“õ–ď“ď–í¬† HANDY + TERMUX: TV-LOGCAT AUSLESEN (Standard-Workflow des Nutzers, Stand 16.08.2026)
+
+### Setup (einmalig)
+Der Nutzer liest die ARVIO-Logs vom TCL C7K TV **direkt am Handy** aus (kein Laptop nötig). Setup-Dokumentation siehe `docs/android-termux-logcat-guide.md` (ausführlich, 350+ Zeilen).
+
+**Braucht:** Android-Handy mit WLAN (im selben Netz wie der TV) + Termux (NUR von F-Droid, NICHT Play Store — Play-Store-Version ist veraltet/kaputt).
+
+**Einmalige Schritte:**
+1. **F-Droid** installieren: https://f-droid.org → Termux suchen + installieren.
+2. In Termux: `pkg update` + `pkg install android-tools` (installiert echtes `adb`).
+3. **Einmalig pairen** (nur 1x nötig): Am TV Entwickleroptionen (Build 7x tippen) → USB-Debugging AN → Wireless Debugging AN → „Mit Gerät paaren" → zeigt 6-stelligen Code + IP:Paar-Port. In Termux: `adb pair <IP>:<Paar-Port>` → Code eingeben. Pairing-Key bleibt gespeichert.
+4. **Download-Ordner-Freigabe** (1x): `termux-setup-storage` → Dialog bestätigen. Oder `mkdir -p /storage/emulated/0/Download/arvio-logs` + „Erlauben" antippen.
+5. **save-tv-log-Skript** installieren (1x): `curl -sL https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/docs/save-tv-log.sh -o ~/save-tv-log.sh && chmod +x ~/save-tv-log.sh`. Falls TV-IP nicht `192.168.0.59`: `nano ~/save-tv-log.sh` → `TV_IP=` anpassen.
+
+### Standard-Test-Ablauf (jede Session, wenn TV-IP gepaired)
+1. Falls TV neu gestartet: am TV Wireless Debugging wieder AN stellen (kein neues Paaren nötig).
+2. In Termux verbinden: `adb connect 192.168.0.59:5555` (IP anpassen, Port meist 5555).
+3. Test-Verbindung: `adb devices` → sollte `device` zeigen (nicht `unauthorized`).
+4. Log-Puffer leeren: `adb logcat -c`.
+5. **Am TV:** Repo löschen + neu hinzufügen DIREKT (NICHT Cloud-Sync!) → URL `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` → Scraper einschalten.
+6. **Am TV:** Film/Serie öffnen (z.B. Matrix oder Silo) → „nach Quellen suchen" → 15s warten.
+7. **In Termux (EIN Befehl):** `~/save-tv-log.sh v32` (Version anpassen, z.B. v32 für Serienstream v32-Test). Das Skript macht automatisch:
+   - `adb connect` (falls disconnected)
+   - `adb logcat -d -v time` → rohe Log-Datei (`~/arvio-tv-log-v32.txt`)
+   - Filtern (grep) → `arvio-tv-log-v32-filtered.txt`
+   - Kopieren nach `Download/arvio-logs/`
+   - Medienscan (Chat-Apps finden die Datei)
+   - Vorschau: erste 20 gefilterte Zeilen im Terminal
+8. **Weiterleiten:** Dateimanager → Downloads → arvio-logs → Datei lange drücken → Teilen → in Chat hochladen.
+
+### Der Filter (im save-tv-log.sh, deckt BEIDE Scraper ab)
+```
+grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|ddg|ddos|guard|resolveHost|resolveVoe|resolveDoodstream|resolveStreamtape|resolveFileMoon|resolveVidHide|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|buildSeriesResponse|collectEpisodes|httpGet|httpPost|doRequest|CookieJar|voeDecode|detectQuality"
+```
+- FilmPalast-Filter: `Filmpalast|ArvioAddon|ExternalExtension|...`
+- Serienstream-Filter: `Serienstream|resolveHost|resolveVoe|resolveDoodstream|...|CookieJar|voeDecode`
+- ARVIO-Engine: `PluginManager|No API loaded|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX`
+- Falls ein NEUER Scraper dazukommt (KinoGer, Vavoo): Filter im Skript um `KinoGer|Vavoo|mediahubmx|resolveOdysseusa` erweitern.
+
+### Manuelle Alternative (ohne Skript, falls Skript fehlt)
+```
+adb connect 192.168.0.59:5555
+adb logcat -c
+# ... am TV Suche auslösen, 15s warten ...
+adb logcat -d -v time | grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|No API loaded|verify dex" > ~/arvio-tv-log-v32-filtered.txt
+cp ~/arvio-tv-log-v32-filtered.txt ~/storage/downloads/arvio-logs/
+```
+
+### Schnell-Check (ohne Datei, nur im Terminal lesen)
+```
+adb logcat -d -v time | grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|No API loaded|verify dex"
+```
+
+### Was die Log-Einträge bedeuten (Kurzauswertung)
+| Im Log gesehen | Bedeutung |
+|---|---|
+| `Executing DEX scraper: FilmPalast` | Scraper wird aufgerufen — gut |
+| `Downloaded extension …: N bytes` | Download geklappt |
+| `Failure to verify dex file …` | DEX kaputt → Patch-Skript-Problem |
+| `No API loaded for scraper: …` | Plugin-Klasse konnte nicht geladen werden |
+| `MISSING CLASS` / `NoClassDefFoundError` | fehlt eine Kotlin/cloudstream3-Klasse (R8) |
+| `API loaded` / Filmpalast-Quellen | **Erfolg!** Override bindet, Scraper läuft |
+| `ErrorLoadingException: No id found` | Parent läuft noch → Dispatch nicht gebunden |
+| `solveAltcha: PoW solved` (Serienstream) | ALTCHA-PoW funktioniert |
+| `redirectGate: POST /r -> 200` (Serienstream) | POST erfolgreich |
+| `redirectGate: resolved to https://…` (Serienstream) | **ERSTE SERIENSTREAM-QUELLE!** |
+| gar kein Scraper-Eintrag | Scraper wird nicht aufgerufen (Enable/Routing/Download) |
+
+### TV-IP: 192.168.0.59 (TCL C7K, verifiziert)
+Die TV-IP steht hartkodiert im `save-tv-log.sh` als `TV_IP="192.168.0.59"`. Falls sich die IP ändert (Router-Neustart etc.): TV-IP in Netzwerk-Einstellungen am TV nachschauen + `nano ~/save-tv-log.sh` anpassen.
+
+### Dateien
+- `docs/android-termux-logcat-guide.md` — ausführliche Schritt-für-Schritt-Anleitung (350+ Zeilen, mit Pairing, Troubleshooting, Kurzauswertung).
+- `docs/save-tv-log.sh` — Ein-Klick-Skript (Logcat auslesen + filtern + kopieren + Medienscan + Vorschau).
+- `docs/handy-logcat-ladb-termux.md` — Alternative mit LADB/Shizuku (falls WLAN-ADB mal nicht klappt; LADB-Pairing war früher zickig, siehe unten).
+- `docs/windows-10-test-guide.md` — Laptop-Alternative (USB/WLAN-ADB am Windows-PC).
+
+### Bekannte Probleme / Hinweise
+- **LADB-App** (Alternative ohne WLAN): Pairing scheiterte früher am 30s-Timer („no devices/emulators found"). WLAN-ADB via Termux ist zuverlässiger. Shizuku (gratis) als stabilere Alternative zu LADB dokumentiert.
+- **TV neu gestartet** → Wireless Debugging schaltet sich AB. Am TV wieder AN stellen (kein neues Paaren nötig — Pairing-Key bleibt), dann `adb connect` wiederholen.
+- **`unauthorized`** bei `adb devices` → TV zeigt „USB-Debugging zulassen?"-Dialog, am TV bestätigen.
+- **ARVIO auf Handy** = gleiche sideload-APK wie TV → gleiche Obfuskation → Tests auf Handy repräsentativ für TV (aber Handy-UI-Bug bei Add-Repo behoben in v1.9.994, siehe unten).
