@@ -785,16 +785,94 @@ SuperVideo-Algorithmus:
 
 **VIDSONIC ist jetzt Prio 2** weil der resolveurl-Code zeigt: es ist TRIVIAL (hex-decode + reverse = direkte URL, 3 Zeilen Kotlin)! Voher als "schwer obfusziertes JS" bewertet — aber resolveurl hat schon die Loesung.
 
-**NAECHSTE SESSION: Erst vidsonic (trivial!), dann VOE (Prio 1 fuer Haeufigkeit), dann firestream.**
+### NAECHSTE SESSION: ERST QUALITAET + SPEED, DANN NEUE HOSTER (Nutzer-Entscheidung 15.08.2026)
 
-**Prio 2 - Playback verifizieren:**
-- v25: Nutzer bestaetigt "Ja ich kann das Video starten." -> **PLAYBACK FUNKTIONIERT! Ziel komplett erreicht.**
-- m3u8-URL mit token (IP-gebunden + timestamp) funktioniert fuer sofortiges Playback.
+**Nutzer hat entschieden: Erst alles richtig einstellen (Qualitaet + Speed), BEVOR neue Hoster hinzugefuegt werden.**
 
-**Prio 3 - Weitere Hoster (FileMoon, VidHide, etc.):**
-- Siehe oben "HOSTER-PRIORITAETEN"-Tabelle. Jeder Hoster: resolveurl Python lesen (Methode D) -> Kotlin portieren -> curl testen.
-- 227 resolveurl-Plugins verfuegbar — die meisten Hoster auf deutschen Scraper-Seiten haben bereits fertige Resolver.
-- `ls /tmp/resolveurl/script.module.resolveurl/lib/resolveurl/plugins/` zeigt alle verfuegbaren Resolver.
+Reihenfolge (Prio 1-3 vor neuen Hostern):
+
+#### PRIO 1: Qualitaetserkennung — echte Aufloesung senden statt Unknown (notwendig fuer Auto-Play)
+
+**Problem:** Aktuell senden wir `Qualities.Unknown.value` (400) → ARVIO zeigt "Unknown" → Auto-Play-Score = 0 → ARVIOs Auto-Play zaudert (2s Timeout, kein Score-bewerteter Stream). Nutzer will echte Qualitaet sehen (1080p, 720p, 4K) UND Auto-Play soll funktionieren.
+
+**ARVIO Auto-Play-Logik (verifiziert in AutoPlaySourcePlanner.kt, v1.9.994):**
+- `qualityScoreForAutoPlay(stream)`: prueft stream.quality-String auf "2160p"/"4K"→4, "1080p"→3, "720p"→2, "480p"→1, sonst 0.
+- `bestAutoPlayStream`: filtert streams mit score >= minQualityThreshold (default "Any"→0), sortiert absteigend.
+- `AUTOPLAY_MAX_WAIT_MS = 2000` (2s Timeout). Wenn kein Score-bewerteter Stream in 2s: Auto-Play bricht ab → Quellenauswahl.
+- Unsere `Qualities.Unknown` (400) → `getStringByInt(400)` = "" → `ifEmpty{null}` → `toStreamSource`: quality="Unknown" → score=0. Auto-Play ignoriert uns effektiv.
+
+**Qualities-Enum-Werte (verifiziert aus cloudstream3.jar Bytecode):**
+```
+Unknown = 400, P144 = 144, P240 = 240, P360 = 360, P480 = 480,
+P720 = 720, P1080 = 1080, P1440 = 1440, P2160 = 2160
+```
+`getStringByInt(value)`: 0→"Auto", 400→""(empty→null→"Unknown"), 2160→"4K", sonst→"<value>p" (z.B. 1080→"1080p").
+
+**Implementierung (~50 Zeilen):**
+1. `emitLink` erweitern: vor dem Emit bei m3u8-URLs das HLS-Manifest fetchen (httpGet, ~1-2 KB).
+2. Aus dem Manifest `#EXT-X-STREAM-INF:BANDWIDTH=...,RESOLUTION=1920x1080` parsen.
+3. Auf Qualities-Wert mappen: height >= 2160 → P2160 (4K), >= 1080 → P1080, >= 720 → P720, >= 480 → P480, sonst Unknown.
+4. Bei mp4/unknown: Default P720 (besser als Unknown — mp4 ist meist DVD/HD-Qualitaet).
+5. `emitLink` bekommt quality-Parameter, nutzt ihn im ExtractorLink statt `Qualities.Unknown.value`.
+6. ARVIO zeigt dann "1080p" / "720p" → Auto-Play-Score 3/2 → Auto-Play erkennt Quelle → spielt direkt ab.
+
+**Aufloesung aus m3u8 parsen (Code-Skizze):**
+```kotlin
+private fun detectQuality(url: String): Int {
+    if (!url.contains(".m3u8")) return Qualities.P720.value // mp4 default
+    return try {
+        val res = httpGet(url, headers = mapOf("Range" to "bytes=0-4096")) // nur Header
+        val m = Regex("RESOLUTION=(\\d+)x(\\d+)").find(res.text)
+        val h = m?.groupValues?.get(2)?.toIntOrNull() ?: return Qualities.P720.value
+        when {
+            h >= 2160 -> Qualities.P2160.value
+            h >= 1080 -> Qualities.P1080.value
+            h >= 720 -> Qualities.P720.value
+            h >= 480 -> Qualities.P480.value
+            else -> Qualities.P360.value
+        }
+    } catch (_: Throwable) { Qualities.P720.value }
+}
+```
+Wichtig: Range-Header `bytes=0-4096` damit wir nur die ersten 4KB laden (m3u8 hat RESOLUTION in den ersten Zeilen). Falls Server kein Range unterstuetzt: volle Datei (klein, ~5-20KB).
+
+**Nachteile:** +100ms pro m3u8-Stream (ein zusaetzlicher GET). Aber: noetig fuer Auto-Play, und wenn wir Speed-Optimierungen (Prio 2+3) machen, gleicht sich das aus.
+
+#### PRIO 2: TMDB-Cache (~15 Zeilen, gratis Ersparnis)
+- `private val tmdbCache = java.util.concurrent.ConcurrentHashMap<Int, TmdbMeta>()`
+- In `fetchTmdbMeta`: erst `tmdbCache[tmdbId]` checken, falls vorhanden → return (0ms statt 300ms).
+- Bei Treffer: `tmdbCache[tmdbId] = meta`.
+- ConcurrentHashMap = JDK, nie obfuscated, thread-safe.
+- Ersparnis: ~300ms bei wiederholter Suche (selber Film). Erste Suche = Cache-Miss = keine Ersparnis.
+- Nachteile: keine echte. Memory: vernachlaessigbar (einige Eintraege).
+
+#### PRIO 3: Hoster parallel auflösen (~30 Zeilen, bringt unter 2s Auto-Play-Timeout)
+- Aktuell: `for (link in links) { resolveHost(fixed, callback) }` — SEQUENTIELL. 3 Hoster = ~900ms+350ms load() = ~1.6s + 100ms quality = ~2.6s.
+- Neu: `java.util.concurrent.Executors.newFixedThreadPool(3)`, jeder `resolveHost` als Callable, mit `invokeAll(2s timeout)` sammeln.
+- Alle Hoster parallel → statt 900ms nur ~350ms (laengster einzelner).
+- Ersparnis: ~500ms bei 3 Hostern.
+- Nachteile: Thread-Pool-Komplexitaet (mit `finally { pool.shutdown() }` lösbar). Thread-Sicherheit: callback ist nur eine Funktion (`(ExtractorLink) -> Unit`), sollte thread-safe sein (ARVIO sammelt in einer Thread-safe Collection). java.util.concurrent = JDK, nie obfuscated.
+- Code-Skizze:
+```kotlin
+val pool = Executors.newFixedThreadPool(minOf(links.size, 3))
+try {
+    val futures = links.mapNotNull { fixUrlNull(it) }.map { link ->
+        pool.submit<Boolean> { resolveHost(link, callback) }
+    }
+    futures.forEach { f -> try { f.get(2, TimeUnit.SECONDS) } catch (_: Throwable) {} }
+} finally { pool.shutdown() }
+```
+
+#### KOMBINIERTE WIRKUNG:
+```
+Aktuell:  ~2.6s (3 Hoster sequenziell, keine Qualitaet, kein Cache)
+Prio 1-3: ~1.8s (3 Hoster parallel, TMDB-Cache, + Qualitaetserkennung)
+          → unter 2s Auto-Play-Timeout → Auto-Play funktioniert!
+```
+
+#### PRIO 4 (danach): Neue Hoster (vidsonic, VOE, firestream)
+- Siehe unten "HOSTER-PRIORITAETEN"-Tabelle. Reihenfolge: vidsonic (trivial!) → VOE (Prio 1 fuer Haeufigkeit) → firestream.
+- Jeder Hoster: resolveurl Python lesen (Methode D) → Kotlin portieren → curl testen.
 
 **Prio 4 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen):**
 Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereiten". Drei klare Bugs:
