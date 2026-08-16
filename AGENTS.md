@@ -3,6 +3,24 @@
 Dieses Repo baut ein **Cloudstream3-kompatibles Plugin** f–ď“ď–í—ėr die **ARVIO** Android-TV-App (sideload-APK).
 Ziel: Ventix-Funktionalit–ď“ď–í”®t (deutsche Web-Scraper + Stalker-VOD) als Plugin in ARVIO laufen lassen –ď—ě–í“Ė–í‚Äú clientseitig, ohne Server.
 
+## ‼ÔłŹ WICHTIG F–ď—ě–í"ĪR ALLE SESSIONS: NUTZER-PROFIL & KOMMUNIKATION
+
+**Der Nutzer ist KEIN Programmierer.** Er erkl–ď“ď–í”®rt sich selbst als Laie im technischen Bereich und bittet darum:
+- **Einfache, verst–ď“ď–í”®ndliche Sprache** verwenden — keine unerklaerten Fachbegriffe, keine Code-Snippets ohne Erklaerung, was sie bewirken.
+- **Schritt-fuer-Schritt-Anleitungen** fuer alles, was der Nutzer am TV/Handy/Termux tun muss — mit genauen Befehlen, die er 1:1 kopieren kann.
+- **Ergebnisse in Alltagssprache** zusammenfassen — "Es funktioniert jetzt" oder "Es klappt noch nicht, weil X" statt technische Details ohne Kontext.
+- **Geduld**, wenn technische Konzepte erklaert werden muessen — der Nutzer fragt nach, wenn etwas unklar ist.
+- Der **Nutzer testet selbst am TV** (TCL C7K, WLAN-ADB via Termux/Handy) und schickt Logcat-Dateien. Die Analyse macht die AI.
+- Der Nutzer entscheidet ueber Prioritaeten und genehmigt Ans–ď“ď–í”®tze (z.B. "Option A zuerst, Option B nur falls scheitert").
+
+## ‼ÔłŹ KURZ-STAND (Stand 16.08.2026, fuer naechste Session — LESEN BEVOR ARBEIT BEGINNT)
+
+**Aktueller Stand:** Serienstream-Scraper v32 ist gebaut und auf `builds`-Branch. **TV-Test ausstehend.**
+- v31-TV-Test (16.08.) zeigte: Scraper laeuft KOMPLETT durch (load, search, 29 Episoden, 4 Hoster gefunden), ABER `/r?t=`-Redirects lieferten nur die Challenge-Seite (883 Bytes) → 0 Quellen.
+- **Erkenntnis #20:** Serienstream nutzt **ALTCHA Proof-of-Work** (NICHT die unueberwindbare DDoS-Guard-JS-Challenge) fuer `/r?`-Redirects. PoW ist trivial loesbar: `SHA-256(salt + n) == challenge`, n in 0..100000. V32 implementiert den Solver (`solveAltcha` + `resolveRedirectGate` + `doRequestPost`).
+- **Hypothese:** Am TV funktioniert es (TV bekommt `/r?t=` mit 200 + valide DDoS-Guard-Cookies → POST /r liefert echte Hoster-URL). Am Laptop schlaegt es fehl (`/r?t=` = 403 → keine DDoS-Guard-Session → POST /r = "hat nicht geklappt").
+- **N–ď“ď–í¬§chster Schritt = v32 am TV testen.** Siehe "AKTUELLER STAND" ganz unten + "EMPFOHLENE SCHRITTWEISE STRATEGIE" fuer Details.
+
 ## –ď—ě–í”Į–í“ó AKTUELLER STAND & N–ď“ď–í‚ÄěCHSTE SCHRITTE (Stand 14.08.2026 –ď—ě–í“Ė–í‚Äú LOGCAT-ERKENNTNIS)
 
 ### ENTSCHEIDENDE ERKENNTNIS (14.08.2026, Logcat via USB+adb auf Pixel 7): Die .cs3-Dateien werden NIE heruntergeladen
@@ -597,6 +615,41 @@ Zusaetzlich: der Error entwischt, weil `resolveHost`/`emitLink` nur `Exception` 
 - CookieJar ist pro resolveRedirectGate-Aufruf (thread-safe für parallele Hoster-Auflösung).
 - Version 32. CI baut beim Push. **TV-Test entscheidend:** falls der TV (Wohn-IP) die `/r?t=`-Preflight mit 200 bekommt, liefert POST /r die echte Hoster-URL → erste Serienstream-Quelle!
 
+**OFFIZIELLE ALTCHA-QUELLEN (für nächste Session, falls der Flow angepasst werden muss):**
+- **ALTCHA Spec (offiziell):** https://altcha.org/docs/v2/proof-of-work-captcha — PoW v2 nutzt KDFs (PBKDF2/Argon2id), aber Serienstream nutzt die **v1 (legacy)** Variante: `hash(salt + n) == challenge` (einfaches SHA-256, keine KDF). Die v1 ist unter "_v1/V1" suffix dokumentiert.
+- **ALTCHA Python-Library (Referenz-Implementierung):** https://github.com/altcha-org/altcha-lib-py — `create_challenge(algorithm="SHA-256", max_number=1000000)`, verify: `hash(salt + str(number)) == challenge`.
+- **ALTCHA Bypass-Doku (2captcha, erklärt den Flow gut):** https://2captcha.com/h/how-to-bypass-altcha — "Server sends JSON with challenge/difficulty/salt/algorithm, browser iterates nonce until hash meets condition, validation is stateless/mathematical."
+- **Serienstream-spezifisch:** `episode-redirect-gate-C_Px7kjn.js` (https://serienstream.to/build/assets/episode-redirect-gate-C_Px7kjn.js) — lädt `altcha-BhBXWxP7.js` Widget, das die Challenge löst und als Form-Feld `name="altcha"` (base64 JSON) an `POST /r` sendet.
+- **verify-init Endpoint:** `GET https://serienstream.to/api/inline/verify-init` → `{"algorithm":"SHA-256","challenge":"<64-char-hex>","maxnumber":100000,"salt":"<20-char>","signature":"<64-char-hex>"}`.
+
+**LIVE-TEST-BEFUND (Laptop, 16.08.2026, Python-Curl):**
+- `GET /api/inline/verify-init` → 200, Challenge params geliefert. ✅ (Laptop darf die API)
+- PoW gelöst: n=77975/68285/88473/76262 (variiert pro Challenge, alle ~50k-90k Iterationen). ✅
+- `POST /r` mit `_token`+`t`+`altcha` → **200**, aber Body: `var err = "Das hat leider nicht geklappt. Bitte versuche es erneut."` ❌
+- **Warum am Laptop fehlgeschlagen:** `/r?t=` liefert vom Laptop 403 (DDoS-Guard blockt) → keine validen DDoS-Guard-Session-Cookies (`__ddg1_`, `__ddg8_`, `__ddg9_`, `__ddg10_`) → POST /r lehnt ab. Ohne vorherigen 200-Besuch der `/r?t=`-Preflight-Seite fehlt die DDoS-Guard-Session.
+- **Warum am TV funktionieren sollte:** v31-Log zeigte `/r?t=` liefert am TV **200** (883 Bytes, Challenge-iframe) → TV hat valide DDoS-Guard-Cookies → POST /r sollte success-body (`var t = "<hoster-url>"`) liefern. Das ist die Hypothese, die v32-TV-Test verifiziert.
+
+**WICHTIG für ALTCHA-Debugging (falls v32-TV-Test scheitert):**
+- Falls `redirectGate: server rejected ALTCHA: ...` im Log → PoW akzeptiert, aber Token ungültig. Mögliche Ursachen: (a) `t`-Token ist an Session gebunden und verfällt, (b) Turnstile-Token fehlt (das Gate ist `turnstile_altcha` — vielleicht braucht Cloudflare-Turnstile UND ALTCHA), (c) `t` muss als URL-encoded statt decoded gesendet werden.
+- Falls `redirectGate: verify-init -> HTTP 403` → DDoS-Guard blockt die API am TV (unwahrscheinlich, da Episode-Seite durchkam).
+- Falls `solveAltcha: no solution found` → Challenge nicht in 0..100000 lösbar (Server hat maxnumber geändert? Algorithmus gewechselt?).
+- Falls POST /r 200 + `var t = "<url>"` aber URL ist keine Hoster-URL → postMessage-Format anders als erwartet, Body-Parser anpassen.
+- **Turnstile-Hypothese (Prio für Fallback):** Das Gate heißt `turnstile_altcha` — möglicherweise braucht Serienstream BEIDE: Cloudflare-Turnstile (CAPTCHA) UND ALTCHA (PoW). Falls ja, ist Turnstile ohne Browser nicht lösbar → dann wäre Serienstream doch nicht umgehbar. v32-Log zeigt ob ALTCHA allein reicht.
+
+### AKTUELLER STAND (Stand 16.08.2026, Ende Session)
+
+**Builds-Branch:**
+- **FilmPalast.cs3 v30** (1.486.293 Bytes, status=1, Movie+TvSeries) — funktioniert, liefert odysseusa/vidsonic-Quellen.
+- **Serienstream.cs3 v32** (1.488.388 Bytes, status=1, TvSeries) — NEU: ALTCHA-PoW-Solver implementiert. TV-Test ausstehend.
+- `plugins.json` auf builds enthält beide Module.
+
+**Quellcode-Stand:**
+- Letzter Commit auf `main`: `8274717` (fix: HashMap statt Map+Pair Syntax).
+- CI grün (Run 31942452533).
+- Serienstream-Provider: `Serienstream/src/main/kotlin/com/reichi/arflioaddon/serienstream/SerienstreamProvider.kt` (~860 Zeilen) — enthält `resolveRedirectGate`, `solveAltcha`, `doRequestPost` für den ALTCHA-Flow.
+
+**Was als nächstes passiert: NUTZER TESTET v32 AM TCL C7K TV**
+
 ### ENTSCHEIDENDE ERKENNTNIS #17 (15.08.2026, v23-TV-Test + Hoster-Analyse): KEIN CRASH, echte Hoster-Extraktion, odysseusa-API gefunden
 
 v23-TV-Test (arvio-tv-log-v23-filtered.txt) = **KEIN CRASH mehr!** loadExtractor-Entfernung (Fix #16) funktioniert. Scraper laeuft sauber durch, alle 4 Hoster found=false (Extraktion trifft nicht, aber clean termination). **Voll auf Ebene 2 = echte Hoster-Extraktion, kein Obfuskations-Problem mehr.**
@@ -954,18 +1007,36 @@ AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) o
 
 **REIHENFOLGE (aktualisiert):**
 
-#### PHASE 0 — Serienstream-TV-Test (JETZT, naechste Session, entscheidend)
-Warum vor Prio 4: Das gerade gebaute Serienstream-Modul (v31, Option A) ist der kritische Pfad. Der DDoS-Guard-Bypass wurde nur vom Laptop getestet (dort blockiert — Erkenntnis #19). Ob der TV durchkommt (andere IP/Wohn-IP), entscheidet, ob wir Serienstream-Quellen haben und ob Option B noetig wird.
-1. Nutzer folgt `docs/windows-10-test-guide.md` (WLAN-ADB + Logcat am TCL C7K).
-2. In ARVIO: **Repo loeschen + neu hinzufuegen DIREKT** (nicht Cloud-Sync — Erkenntnis #1) mit `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`.
-3. `adb logcat -c`, Serienstream-Scraper einschalten.
-4. Serie suchen (z.B. „Silo"), Quellensuche ausloesen, 15s warten.
-5. Log speichern (`~/save-tv-log.sh` oder `adb logcat -v time > arvio-tv-log-v31.txt`), filtern: `findstr /i "Serienstream ArvioAddon ExtExt Error No.API load verify dex DDoS ddg resolve"`.
-6. **Entscheidung anhand des Logs:**
-   - `Serienstream`/`ArvioAddon`-Eintraege -> Scraper laeuft.
-   - `resolveHost: ... final=<hoster-URL>` -> DDoS-Guard durchbrochen! (Option A erfolgreich) -> Quelle emittiert -> ZIEL.
-   - `0 links collected` / `final=...serienstream.to/r?...` -> DDoS-Guard blockt weiterhin -> **Option B noetig** (Prio 4b).
-   - `Failure to verify dex` / `No API loaded` -> DEX/Dispatch-Problem (unwahrscheinlich, gleiche Bau-Config wie FilmPalast v30).
+#### PHASE 0 — Serienstream v32-TV-Test (JETZT, naechste Session, entscheidend)
+Warum vor Prio 4: Das gerade gebaute Serienstream-Modul (v32) mit ALTCHA-PoW-Solver ist der kritische Pfad. v31 zeigte der Scraper laeuft komplett durch, aber `/r?t=`-Redirects blockten. v32 loest die ALTCHA-Challenge. Ob der POST /r-Flow am TV durchkommt (am Laptop schlaegt er fehl wegen 403-Preflight), entscheidet, ob wir Serienstream-Quellen haben.
+
+**Schritt-fuer-Schritt fuer den Nutzer (am TV, mit Handy+Termux):**
+1. Auf dem Handy (Termux): zuerst das aktualisierte Log-Skript holen (wichtig — das alte filtert nicht Serienstream!):
+   ```
+   curl -sL https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/docs/save-tv-log.sh -o ~/save-tv-log.sh && chmod +x ~/save-tv-log.sh
+   ```
+2. In ARVIO am TV: **Plugins & Extensions → Ventix Arvio Addon → Repo L–ď“ď–í¬∂SCHEN** (beide: FilmPalast + Serienstream).
+   - WICHTIG: Repo loeschen, nicht nur updaten! Sonst laedt ARVIO die neue .cs3 nicht herunter (Erkenntnis #1: Cloud-Sync/Profil laedt keine .cs3-Dateien).
+3. In ARVIO: **Add Repository DIREKT auf dem Geraet** (NICHT Cloud-Sync!) → URL eingeben:
+   ```
+   https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json
+   ```
+   → ARVIO laedt beide .cs3-Dateien herunter (FilmPalast v30 + Serienstream v32).
+4. In ARVIO: **Serienstream-Scraper einschalten** (Toggle auf AN).
+5. Auf dem Handy (Termux): `adb logcat -c` (Log-Puffer leeren).
+6. In ARVIO am TV: eine Serie suchen, z.B. **„Silo"** → auf eine Episode gehen → **„nach Quellen suchen"** → 15 Sekunden warten.
+7. Auf dem Handy (Termux): `~/save-tv-log.sh v32` aufrufen (liest Logcat aus, filtert nach Serienstream+ALTCHA, speichert in Downloads).
+8. Log-Datei an die AI weiterleiten: Dateimanager → Downloads → arvio-logs → `arvio-tv-log-v32-filtered.txt` → lange druecken → Teilen → in den Chat hochladen (Plus-Symbol → Datei).
+
+**Was die AI im Log sucht (entscheidend):**
+- `solveAltcha: PoW solved, n=...` → ALTCHA-PoW funktioniert! (die „Zahlensuche" war erfolgreich)
+- `redirectGate: POST /r -> 200` → POST erfolgreich (Serienstream hat die Loesung akzeptiert)
+- `redirectGate: resolved to https://voe.sx/...` (oder doodstream/streamtape/etc.) → **ERSTE SERIENSTREAM-QUELLE!** 🎯 Ziel erreicht!
+- `redirectGate: server rejected ALTCHA: Das hat leider nicht geklappt...` → PoW akzeptiert aber Token ungültig → Hypothese: Turnstile (CAPTCHA) fehlt → dann Fallback-Suche
+- `redirectGate: verify-init -> HTTP 403` → DDoS-Guard blockt die API am TV
+- `solveAltcha: no solution found` → Challenge nicht loesbar
+- `0 links collected` → keine Quelle emittiert (Flow irgendwo gescheitert)
+- Gar kein `Serienstream`-Eintrag → Scraper wird nicht aufgerufen (Enable/Routing/Download-Problem)
 
 #### PRIO 4a — Weitere FilmPalast-Hoster (niedrig, bei Bedarf)
 Reihenfolge laut HOSTER-PRIORITAETEN-Tabelle: VOE (✅ v30), vidsonic (✅ v29), firestream (✅ v30). Verbleibend: Supervideo/VidHide/FileMoon nur falls neue Filmpalast-Hoster-Domains auftreten. Workflow: resolveurl Python lesen -> Kotlin portieren -> curl testen.
