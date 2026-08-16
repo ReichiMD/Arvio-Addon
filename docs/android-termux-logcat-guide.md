@@ -199,7 +199,7 @@ Die rohe Datei ist riesig und voller anderer App-Logs. Für die Diagnose
 brauchen wir nur die ARVIO/Filmpalast-Zeilen.
 
 ```
-grep -iE "Filmpalast|ArvioAddon|ExternalExtension|PluginManager|No API loaded|ErrorLoading|verify dex" ~/arvio-tv-log-v15.txt > ~/arvio-tv-log-v15-filtered.txt
+grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|PluginManager|No API loaded|ErrorLoading|verify dex" ~/arvio-tv-log-v15.txt > ~/arvio-tv-log-v15-filtered.txt
 ```
 
 Prüfen:
@@ -274,7 +274,7 @@ oder in einen Chat pasten.
 Falls du nur schnell wissen willst, ob's läuft, ohne eine Datei zu speichern:
 
 ```
-adb logcat -d -v time | grep -iE "Filmpalast|ExternalExtension|No API loaded|verify dex"
+adb logcat -d -v time | grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|No API loaded|verify dex"
 ```
 
 Das zeigt die Treffer direkt im Termux-Fenster. Zum Weiterleiten aber lieber
@@ -329,13 +329,16 @@ Zeile `TV_IP="192.168.0.59"` anpassen, speichern (Strg+O, Enter, Strg+X).
 Nach dem Testen am TV (Suche ausgelöst, 15s gewartet) in Termux:
 
 ```
-~/save-tv-log.sh
+~/save-tv-log.sh              # Default-Version (aktuell v31)
+~/save-tv-log.sh v31          # explizit
+~/save-tv-log.sh v32          # nächste Version dann
 ```
 
 Das Skript macht automatisch:
 1. `adb connect 192.168.0.59:5555`
-2. Logcat auslesen → `arvio-tv-log-v15.txt`
-3. Filtern → `arvio-tv-log-v15-filtered.txt`
+2. Logcat auslesen → `arvio-tv-log-v31.txt`
+3. Filtern → `arvio-tv-log-v31-filtered.txt` (Filter: FilmPalast **+ Serienstream**
+   + DDoS-Guard/resolve-Helfer — deckt BEIDE Scraper ab)
 4. Kopieren → `Download/arvio-logs/`
 5. Medienscan (Chat-Apps finden die Datei)
 6. Vorschau der ersten 20 Zeilen im Terminal
@@ -344,18 +347,24 @@ Danach: Dateimanager → Downloads → arvio-logs → Datei lange drücken → T
 
 ### Skript-Inhalt (falls du es manuell anlegen willst)
 
+Das aktuelle Skript liegt im Repo unter `docs/save-tv-log.sh` (immer die
+autoritative Quelle — hier nur ein Auszug zum Verständnis). Es nimmt die
+Version als Argument (`save-tv-log v31`) und filtert nach FilmPalast **+
+Serienstream** + DDoS-Guard/resolve-Helfer.
+
 ```bash
 #!/data/data/com.termux/files/usr/bin/bash
 set -e
 TV_IP="192.168.0.59"
 TV_PORT="5555"
-LOG_RAW="$HOME/arvio-tv-log-v15.txt"
-LOG_FILTERED="arvio-tv-log-v15-filtered.txt"
+VERSION="${1:-v31}"
+LOG_RAW="$HOME/arvio-tv-log-${VERSION}.txt"
+LOG_FILTERED="arvio-tv-log-${VERSION}-filtered.txt"
 DOWNLOAD_DIR="$HOME/storage/downloads/arvio-logs"
 
 adb connect ${TV_IP}:${TV_PORT}
 adb logcat -d -v time > "$LOG_RAW"
-grep -iE "Filmpalast|ArvioAddon|ExternalExtension|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX" \
+grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|ddg|ddos|guard|resolveHost|resolveVoe|resolveDoodstream|resolveStreamtape|resolveFileMoon|resolveVidHide|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|buildSeriesResponse|collectEpisodes|httpGet|httpPost|doRequest|CookieJar|voeDecode|detectQuality" \
   "$LOG_RAW" > "$HOME/${LOG_FILTERED}"
 mkdir -p "$DOWNLOAD_DIR"
 cp "$HOME/${LOG_FILTERED}" "$DOWNLOAD_DIR/"
@@ -376,7 +385,7 @@ adb connect 192.168.1.42:5555      # verbinden (TV muss an + WDebug an)
 adb logcat -c                      # Puffer leeren
 # → am TV: Matrix suchen, 15s warten
 adb logcat -d -v time > ~/arvio-tv-log-v15.txt
-grep -iE "Filmpalast|ExternalExtension|No API loaded|verify dex" ~/arvio-tv-log-v15.txt > ~/arvio-tv-log-v15-filtered.txt
+grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|No API loaded|verify dex" ~/arvio-tv-log-v15.txt > ~/arvio-tv-log-v15-filtered.txt
 cp ~/arvio-tv-log-v15-filtered.txt /storage/emulated/0/Download/arvio-logs/
 ```
 

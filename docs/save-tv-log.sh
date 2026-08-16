@@ -2,15 +2,20 @@
 # ============================================================
 # ARVIO TV-Log speichern + filtern + in Download-Ordner legen
 # Aufruf in Termux NACH dem Testen am TV:
-#   save-tv-log
-# (oder: bash ~/save-tv-log.sh)
+#   save-tv-log           # -> Version aus Dateiname (Default v31)
+#   save-tv-log v31       # -> explizite Version
+#   save-tv-log v32       # -> naechste Version
+# (oder: bash ~/save-tv-log.sh v31)
 # ============================================================
 
 set -e
 TV_IP="192.168.0.59"      # <-- ggf. an deine TV-IP anpassen
 TV_PORT="5555"
-LOG_RAW="$HOME/arvio-tv-log-v15.txt"
-LOG_FILTERED="arvio-tv-log-v15-filtered.txt"
+
+# Version aus erstem Argument, Default v31
+VERSION="${1:-v31}"
+LOG_RAW="$HOME/arvio-tv-log-${VERSION}.txt"
+LOG_FILTERED="arvio-tv-log-${VERSION}-filtered.txt"
 DOWNLOAD_DIR="$HOME/storage/downloads/arvio-logs"
 
 echo "=== 1/5 Verbinde mit TV ==="
@@ -23,8 +28,11 @@ LINES=$(wc -l < "$LOG_RAW")
 echo "Gelesen: ${LINES} Zeilen -> ${LOG_RAW}"
 echo
 
-echo "=== 3/5 Filtere (nur ARVIO/Filmpalast) ==="
-grep -iE "Filmpalast|ArvioAddon|ExternalExtension|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX" \
+echo "=== 3/5 Filtere (ARVIO + FilmPalast + Serienstream + DDoS-Guard) ==="
+# Filter deckt BEIDE Scraper ab: FilmPalast UND Serienstream, plus ARVIO-Engine-Logs
+# und die Serienstream-spezifischen DDoS-Guard/resolve-Helfer (Erkenntnis #19).
+# Eine Zeile (keine Zeilenfortsetzung) fuer maximale Termux/bash-Kompatibilitaet.
+grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|ddg|ddos|guard|resolveHost|resolveVoe|resolveDoodstream|resolveStreamtape|resolveFileMoon|resolveVidHide|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|buildSeriesResponse|collectEpisodes|httpGet|httpPost|doRequest|CookieJar|voeDecode|detectQuality" \
   "$LOG_RAW" > "$HOME/${LOG_FILTERED}"
 FLINES=$(wc -l < "$HOME/${LOG_FILTERED}")
 echo "Gefiltert: ${FLINES} Zeilen -> ${LOG_FILTERED}"
@@ -44,7 +52,8 @@ echo
 
 echo "=============================================="
 echo "FERTIG!"
-echo "Datei: Download/arvio-logs/${LOG_FILTERED}"
+echo "Version: ${VERSION}"
+echo "Datei:   Download/arvio-logs/${LOG_FILTERED}"
 echo "Gefiltert: ${FLINES} Zeilen"
 echo
 echo "So weiterleiten:"
