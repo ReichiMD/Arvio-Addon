@@ -593,7 +593,9 @@ class SerienstreamProvider : TmdbProvider() {
             "Accept-Language" to "de-DE,de;q=0.9,en;q=0.8"
         )
         // 1. Episode-Seite laden (setzt Session + XSRF-TOKEN Cookies).
-        val epResp = doRequest(episodePageUrl, headers + ("Referer" to mainUrl), cj)
+        val epHeaders = HashMap(headers)
+        epHeaders["Referer"] = mainUrl
+        val epResp = doRequest(episodePageUrl, epHeaders, cj)
         if (epResp.code !in 200..299) {
             DebugLog.w(dbg, "redirectGate: episode page $episodePageUrl -> HTTP ${epResp.code}")
             return epResp
@@ -612,9 +614,11 @@ class SerienstreamProvider : TmdbProvider() {
         }
 
         // 2. ALTCHA Challenge holen.
+        val chalHeaders = HashMap(headers)
+        chalHeaders["Referer"] = episodePageUrl
         val chalResp = doRequest(
             "https://serienstream.to/api/inline/verify-init",
-            headers + ("Referer" to episodePageUrl),
+            chalHeaders,
             cj
         )
         if (chalResp.code !in 200..299) {
@@ -637,14 +641,14 @@ class SerienstreamProvider : TmdbProvider() {
         val postBody = "_token=" + java.net.URLEncoder.encode(csrf, "UTF-8") +
             "&t=" + java.net.URLEncoder.encode(tToken, "UTF-8") +
             "&altcha=" + java.net.URLEncoder.encode(payload, "UTF-8")
+        val postHeaders = HashMap(headers)
+        postHeaders["Referer"] = episodePageUrl
+        postHeaders["Origin"] = mainUrl
+        postHeaders["Content-Type"] = "application/x-www-form-urlencoded"
         val postResp = doRequestPost(
             "https://serienstream.to/r",
             postBody,
-            headers + (
-                "Referer" to episodePageUrl,
-                "Origin" to mainUrl,
-                "Content-Type" to "application/x-www-form-urlencoded"
-            ),
+            postHeaders,
             cj
         )
         DebugLog.t(dbg, "redirectGate: POST /r -> ${postResp.code} (${postResp.text.length}B)")
