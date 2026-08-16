@@ -15,11 +15,18 @@ Ziel: Ventix-Funktionalit–ď“ď–í”®t (deutsche Web-Scraper + Stalker-V
 
 ## ‼ÔłŹ KURZ-STAND (Stand 16.08.2026, fuer naechste Session — LESEN BEVOR ARBEIT BEGINNT)
 
-**Aktueller Stand:** Serienstream-Scraper v32 ist gebaut und auf `builds`-Branch. **TV-Test ausstehend.**
-- v31-TV-Test (16.08.) zeigte: Scraper laeuft KOMPLETT durch (load, search, 29 Episoden, 4 Hoster gefunden), ABER `/r?t=`-Redirects lieferten nur die Challenge-Seite (883 Bytes) → 0 Quellen.
-- **Erkenntnis #20:** Serienstream nutzt **ALTCHA Proof-of-Work** (NICHT die unueberwindbare DDoS-Guard-JS-Challenge) fuer `/r?`-Redirects. PoW ist trivial loesbar: `SHA-256(salt + n) == challenge`, n in 0..100000. V32 implementiert den Solver (`solveAltcha` + `resolveRedirectGate` + `doRequestPost`).
-- **Hypothese:** Am TV funktioniert es (TV bekommt `/r?t=` mit 200 + valide DDoS-Guard-Cookies → POST /r liefert echte Hoster-URL). Am Laptop schlaegt es fehl (`/r?t=` = 403 → keine DDoS-Guard-Session → POST /r = "hat nicht geklappt").
-- **N–ď“ď–í¬§chster Schritt = v32 am TV testen.** Siehe "AKTUELLER STAND" ganz unten + "EMPFOHLENE SCHRITTWEISE STRATEGIE" fuer Details.
+**Aktueller Stand:** Drei Scraper-Module auf `builds`-Branch (FilmPalast v30 ✅ funktioniert, Serienstream v32 TV-Test ausstehend, **Kinoger v2 TV-Test ausstehend**). **Handy-Logcat erfolgreich eingerichtet** (Termux + adb, keine LADB/Shizuku nötig).
+
+**AKTUELLSTE PRIORITÄT: Kinoger v2 am Handy/TV testen.**
+- v1-TV-Test (16.08., Handy-Logcat) zeigte: Scraper läuft KOMPLETT durch (Download, plugin.load, `TmdbProvider Kinoger: load({"id":603})`, TMDB-Meta, HTTP-Search `200`), ABER `searchKinoger: CSS selector matched 0 elements` → 0 Quellen.
+- **v2-Fix:** KinoGer-Suchergebnisse sind in `div.content_text.searchresult_img` (NICHT `section.post`!), Titel im `<img alt>`, Link `a[href*=/stream/]`. Live validiert: 6 Ergebnisse für „Matrix", korrekter Match „Matrix (1999)".
+- **Nächster Schritt:** Nutzer testet v2 (Repo löschen + neu hinzufügen DIREKT, Matrix-Suche), schickt Log via `~/save-handy-log.sh kinoger2`. Erwartung: `resolveIncvideo: [1080p]https://…mp4` = erste KinoGer-Quelle.
+
+**Zweit-Priorität: Serienstream v32-TV-Test** (ALTCHA-PoW-Solver). v31 zeigte Scraper läuft komplett durch (29 Episoden, 4 Hoster), aber `/r?t=`-Redirects blockten. v32 implementiert ALTCHA-PoW (`solveAltcha` + `resolveRedirectGate` + `doRequestPost`). Hypothese: am TV (Wohn-IP) kommt `/r?t=` mit 200 durch, am Laptop 403.
+
+**Handy-Logcat-Setup (erfolgreich, 16.08.):** Nur Termux + adb (robuste Methode, keine LADB/Shizuku). Einrichtung: `pkg install android-tools` → `adb pair <IP>:<PairingPort>` → **WICHTIG: `adb connect <IP>:5555`** (nicht Pairing-Port!) → `adb shell pm grant com.termux android.permission.READ_LOGS` → `adb disconnect`. Danach nur noch `logcat` (ohne adb). Prüfen: `logcat -d | head` → „beginning of kernel" = Berechtigung da. Details siehe „HANDY-LOGCAT-SETUP" im AKTUELLER STAND-Abschnitt + `docs/handy-logcat-ladb-termux.md`.
+
+Siehe „AKTUELLER STAND" ganz unten fuer volle Details.
 
 ## –ď—ě–í”Į–í“ó AKTUELLER STAND & N–ď“ď–í‚ÄěCHSTE SCHRITTE (Stand 14.08.2026 –ď—ě–í“Ė–í‚Äú LOGCAT-ERKENNTNIS)
 
@@ -636,22 +643,27 @@ Zusaetzlich: der Error entwischt, weil `resolveHost`/`emitLink` nur `Exception` 
 - Falls POST /r 200 + `var t = "<url>"` aber URL ist keine Hoster-URL → postMessage-Format anders als erwartet, Body-Parser anpassen.
 - **Turnstile-Hypothese (Prio für Fallback):** Das Gate heißt `turnstile_altcha` — möglicherweise braucht Serienstream BEIDE: Cloudflare-Turnstile (CAPTCHA) UND ALTCHA (PoW). Falls ja, ist Turnstile ohne Browser nicht lösbar → dann wäre Serienstream doch nicht umgehbar. v32-Log zeigt ob ALTCHA allein reicht.
 
-### AKTUELLER STAND (Stand 16.08.2026, KinoGer-Modul Phase 1 gebaut)
+### AKTUELLER STAND (Stand 16.08.2026, KinoGer v2 + Handy-Logcat-Setup erfolgreich)
 
-**Builds-Branch (Stand vor KinoGer-Push):**
-- **FilmPalast.cs3 v30** (1.486.293 Bytes, status=1, Movie+TvSeries) — funktioniert, liefert odysseusa/vidsonic-Quellen.
+**Builds-Branch:**
+- **FilmPalast.cs3 v30** (1.486.293 Bytes, status=1, Movie+TvSeries) — funktioniert, liefert odysseusa+vidsonic-Quellen.
 - **Serienstream.cs3 v32** (1.488.388 Bytes, status=1, TvSeries) — ALTCHA-PoW-Solver implementiert. TV-Test ausstehend.
-- `plugins.json` auf builds enthält beide Module.
+- **Kinoger.cs3 v2** (1.486.572 Bytes, status=1, Movie+TvSeries) — v2 mit korrigiertem Such-Parser (v1 hatte falschen CSS-Selektor). **TV-Test ausstehend.**
+- `plugins.json` auf builds enthält alle 3 Module.
 
-**NEU: KinoGer-Modul (Phase 1 der Konsolidierung, lokal gebaut, NOCH NICHT auf builds):**
-- **Kinoger.cs3 v1** (1.486.489 Bytes, status=1, Movie+TvSeries) — lokal gebaut + verifiziert, **NOCH NICHT gepusht** (wartet auf Nutzer-Genehmigung / Commit auf main -> CI baut dann auf builds).
-- `Kinoger/src/main/kotlin/com/reichi/arflioaddon/kinoger/KinogerProvider.kt` (~600 Zeilen) — TmdbProvider, java.net-HTTP, eigene `resolveIncvideo` für fsst.online/incvideo1.online.
-- Override-Signaturen verifiziert obfusziert (load=(String,j7/d), loadLinks=(String,Z,x7/l,x7/l,j7/d), search=(String,j7/d)) -> Dispatch bindet.
-- Parse-Logik live validiert (Silo: 3 Staffeln, 27 Episoden, 4 Hoster/Episode korrekt gemerged; Matrix-Suche: korrekter Match "Matrix (1999)"; fsst.online: 360p/720p/1080p MP4-URLs extrahiert).
+**MEILENSTEIN (16.08.2026): KinoGer-Scraper läuft KOMPLETT durch, Dispatch bindet, nur Such-Parser war falsch (v2 fixt das).**
+- Handy-Logcat erfolgreich eingerichtet (Termux + adb pair/connect + READ_LOGS-Berechtigung).
+- KinoGer v1-TV-Test zeigte: Download klappt, plugin.load() läuft, `TmdbProvider Kinoger: load({"id":603,"type":"movie"})` wird aufgerufen, TMDB-Meta geholt (`title='Matrix' year=1999`), HTTP-Search läuft (`kinoger.com/?do=search... -> 200 (98900 bytes)`).
+- **ABER v1-Bug:** `searchKinoger: CSS selector matched 0 elements` — v1 suchte `section.post` + `h2 a`, aber KinoGer nutzt `div.content_text.searchresult_img` + `<img alt="...">`. v2 korrigiert (live validiert: 6 Ergebnisse für "Matrix", korrekter Match "Matrix (1999)").
+- **NÄCHSTER SCHRITT: Nutzer testet v2 am Handy/TV** (Repo löschen + neu hinzufügen DIREKT, Matrix-Suche).
 
-**KinoGer-Seitenstruktur (live verifiziert, 16.08.2026):**
+**KinoGer-Seitenstruktur (live verifiziert, 16.08.2026, KORRIGIERT für v2):**
 - KinoGer ist von der Heim-IP erreichbar (HTTP 200, kein 403 wie bei Render-Server-IP) — bestätigt die Konsolidierungs-Hypothese.
-- Suche `/index.php?do=search&subaction=search&titleonly=3&story=<q>` -> `section.post` mit `h2/h3 a[href]`. **WICHTIG: Desktop-UA nötig** — mobiles UA liefert JS-only-Template OHNE Hoster-Arrays.
+- Suche: `https://kinoger.com/?do=search&subaction=search&titleonly=3&story=<query>&x=0&y=0&submit=submit` -> HTML mit `div.content_text.searchresult_img`-Blöcken.
+  - **Selektor v2:** `doc.select("div.content_text.searchresult_img")` (NICHT `section.post`!).
+  - **Titel:** `<img alt="Matrix (1999)">` Attribut im Block (NICHT `h2 a` text!).
+  - **Link:** `selectFirst("a[href*=/stream/]")`, `#comment`-Suffix strippen.
+  - **WICHTIG: Desktop-UA nötig** — mobiles UA liefert JS-only-Template OHNE Hoster-Arrays (httpGet nutzt Desktop-UA).
 - Stream-Seite: Hoster in `<script>` als `VAR.init(); VAR.show(SEASON, [[[S1E1_hosters...],[...]],...], 0.2)` — 3D-Array Staffeln×Episoden×Hoster. Alle 4 Player-Vars (pw, fsst, go, ollhd) zeigen dieselbe Struktur mit verschiedenen Hoster-Domains.
 - **fsst.online/embed/<id>** leitet zu **incvideo1.online** weiter und enthält Playerjs-Config `file:"[360p]url/,[720p]url/,[1080p]url/"` -> DIREKTE MP4-URLs, kein JS nötig. Das ist die Hauptquelle (resolveIncvideo).
 - Andere Hosters (kinoger.pw, kinoger.embed4me.vip, kinoger.seekplays.pro) -> genericResolve (voraussichtlich leer, Phase 3-Hoster).
@@ -663,18 +675,46 @@ Zusaetzlich: der Error entwischt, weil `resolveHost`/`emitLink` nur `Exception` 
 | kinoger.pw | genericResolve | ? | Phase 3 |
 | kinoger.embed4me.vip | genericResolve | ? | Phase 3 |
 | kinoger.seekplays.pro | genericResolve | ? | Phase 3 |
-| kinoger.re (VidStack), kinoger.be (VidHidePro), kinoger.ru (Voe) | GermanProviders-Aliase, in meinen Daten nicht gesehen | - | ggf. später |
 
 **Quellcode-Stand:**
 - KinoGer-Modul komplett in `Kinoger/` (build.gradle.kts + KinogerPlugin.kt + KinogerProvider.kt + DebugLog.kt).
 - settings.gradle.kts auto-include findet das Modul (keine Änderung nötig).
-- Build: `./gradlew make makePluginsJson` -> alle 3 Module (FilmPalast + Serienstream + Kinoger) bauen grün.
-- **Lokaler Build erfordert:** JDK 21 (openjdk-21-jdk-headless, Debian Trixie hat kein 17) + Android SDK 35 (cmdline-tools + platforms;android-35 + build-tools;35.0.0) + `local.properties` (sdk.dir).
+- Build: `./gradlew make makePluginsJson` -> alle 3 Module bauen grün.
+- **Lokaler Build erfordert:** JDK 21 (openjdk-21-jdk-headless, Debian Trixie hat kein 17) + Android SDK 35 (cmdline-tools + platforms;android-35 + build-tools;35.0.0) + `local.properties` (sdk.dir). JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64.
+- CI auf GitHub nutzt JDK 17 (setup-java@v4 distribution=adopt), funktioniert dort auch.
 
-**Was als nächstes passiert:**
-1. **Commit auf main** (nach Nutzer-Genehmigung) -> CI baut Kinoger.cs3 v1 auf builds-Branch.
-2. **Nutzer testet KinoGer am TV** (Repo löschen + neu hinzufügen DIREKT, Matrix-Suche) — wenn `resolveIncvideo` durchläuft, ERSTE KinoGer-Quelle (1080p MP4) in ARVIO sichtbar.
-3. Parallel: Serienstream v32-TV-Test (ALTCHA-PoW) läuft noch aus.
+**HANDY-LOGCAT-SETUP ERFOLGREICH (16.08.2026, Pixel 7, ARVIO 1.9.994 sideload):**
+- **Methode: Nur Termux + adb (keine LADB/Shizuku nötig).** Das ist die robusteste Methode.
+- Einrichtung dokumentiert in `docs/handy-logcat-ladb-termux.md` (Abschnitt „Nur mit Termux").
+- **Einmalige Schritte:** `pkg install android-tools` -> Entwickleroptionen „Drahtloses Debugging" AN -> „Gerät mit Pairing-Code koppeln" -> `adb pair <IP>:<Pairing-Port>` -> Code eingeben -> **WICHTIG: danach `adb connect <IP>:5555` (oder der Port aus den Entwickleroptionen, NICHT der Pairing-Port!)** -> `adb shell pm grant com.termux android.permission.READ_LOGS` -> `adb disconnect`.
+- **Der häufigste Fehler (Nutzer erlebt):** Nach `adb pair` vergessen, `adb connect` aufzurufen -> `adb shell` sagt „no devices". Pairing ≠ Verbindung. Pairing-Port (z. B. 45357) ≠ Verbindungs-Port (meist 5555 oder 3xxxx, steht oben in Entwickleroptionen).
+- **READ_LOGS-Berechtigung wird erst nach Prozess-Neustart aktiv:** `pm grant` setzt die Berechtigung aufs Paket, aber der laufende Termux-Prozess merkt es erst nach „Beenden erzwingen" (Einstellungen → Apps → Termux → Beenden erzwingen) + neu öffnen. Vorher sieht man nur Termux-eigene Logs („beginning of main" + ImeTracker), danach sieht man „beginning of kernel" + System-Logs = Berechtigung aktiv.
+- **Prüfen ob Berechtigung da:** `logcat -d | head` -> „beginning of kernel" + trusty/faceauth-Zeilen = JA; nur Termux-Logs = NEIN.
+- **Einmal eingerichtet, braucht man NIE WIEDER adb** — nur noch `logcat` (ohne `adb` davor) im Test-Ablauf.
+- **Fertig-Skripte:**
+  - `docs/save-handy-log.sh` (Handy-Logcat, kein TV): `~/save-handy-log.sh kinoger2` — installierbar via `curl -sL https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/docs/save-handy-log.sh -o ~/save-handy-log.sh && chmod +x ~/save-handy-log.sh`. Braucht einmalig `termux-setup-storage`.
+  - `docs/save-tv-log.sh` (TV-Logcat via WLAN-ADB): `~/save-tv-log.sh v32` — verbindet sich mit TV (192.168.0.59:5555).
+- **Voller Befehl ohne Skript:** `logcat -d -v time | grep -iE "Filmpalast|Serienstream|Kinoger|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|resolveHost|resolveIncvideo|resolveVoe|resolveDoodstream|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|searchKinoger|buildSeriesResponse|parseShowArrays|httpGet|httpPost|detectQuality" > ~/storage/downloads/arvio-logs/arvio-handy-log.txt`
+
+**TEST-ABLAUF FÜR NÄCHSTE SESSION (Handy, Standard):**
+1. In ARVIO: Repo LÖSCHEN + neu hinzufügen DIREKT (NICHT Cloud-Sync!) -> URL: `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` -> Scraper einschalten.
+2. In Termux: `logcat -c`
+3. In ARVIO: Film/Serie suchen (z. B. Matrix) -> „Nach Quellen suchen" -> 15s warten.
+4. In Termux: `~/save-handy-log.sh kinoger2` (oder voller Befehl oben).
+5. Datei aus Downloads/arvio-logs/ teilen.
+
+**ERWARTUNG v2-TEST (was im Log stehen sollte):**
+- `searchKinoger: CSS selector matched 6 elements` (statt 0 wie bei v1) -> Parser fixt.
+- `match: Matrix (1999) | https://kinoger.com/stream/1499-matrix-1999.html` -> korrekter Match.
+- `buildMovieResponse: GET https://kinoger.com/stream/1499-matrix-1999.html -> 200` -> Stream-Seite geladen.
+- `resolveIncvideo: … [1080p]https://…mp4` -> ERSTE KINOGER-QUELLE! 🎯
+- Falls neue Fehler (Jsoup-Selektor auf Stream-Seite falsch, Hoster-Extraktion trifft nicht): Logcat zeigt wo, dann gezielt fixen.
+
+**NAECHSTE SCHRITTE (Stand 16.08.2026, fuer naechste Session):**
+1. **Prio 1: v2-TV/Handy-Test** — Nutzer testet Kinoger v2, schickt Log. Wenn `resolveIncvideo` durchläuft, erste KinoGer-Quelle (1080p MP4) in ARVIO sichtbar.
+2. **Prio 2: Serienstream v32-TV-Test** — ALTCHA-PoW-Solver, noch ausstehend.
+3. **Prio 3 (je nach v2-Befund):** Falls Stream-Seite-Parse-Fehler (show()-Arrays, Hoster-Extraktion): Selektoren/Regex anpassen. Falls neue R8-Stripped-Klasse: wie früher workarounden.
+4. **Prio 4: GitHub-Issue bei ARVIO** (noch NICHT eroeffnen — erst nach Tests). Drei Bugs dokumentiert (R8-Obfuskation, Cloud-Sync-Download, ehem. Touch-Bug behoben).
 
 ### ENTSCHEIDENDE ERKENNTNIS #17 (15.08.2026, v23-TV-Test + Hoster-Analyse): KEIN CRASH, echte Hoster-Extraktion, odysseusa-API gefunden
 
