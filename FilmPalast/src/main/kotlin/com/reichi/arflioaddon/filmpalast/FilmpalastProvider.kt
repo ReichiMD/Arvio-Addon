@@ -563,6 +563,8 @@ class FilmpalastProvider : TmdbProvider() {
                 // vidsonic.net embeds the direct m3u8 URL as a hex-encoded + reversed string in a
                 // `const _0x1 = '...'` JS variable. Algorithm from Gujal00/ResolveURL vidsonic.py.
                 host.contains("vidsonic") -> resolveVidsonic(url, callback)
+                // firestream.to: token-blob in embed page -> POST /api/videos/<id>/resolve -> signedVideoUrl.
+                host.contains("firestream") -> resolveFirestream(url, callback)
                 // Add more hoster-specific extractors here as needed.
                 else -> genericResolve(url, callback)
             }
@@ -663,63 +665,87 @@ class FilmpalastProvider : TmdbProvider() {
     }
 
     /**
-     * VOE (voe.sx and mirrors) extractor. The embed page contains an obfuscated JS blob; the
-     * video URL (m3u8) is stored in a JSON-ish `{"hls":"...","mp4":{"...":"..."}}` structure or
-     * a `var ... = [...];` array, often inside an eval'd / p.a.c.k.e.r'd script. We look for the
-     * hls/mp4 URLs directly in the page text and in base64-decoded / eval-unpacked script bodies.
+     * VOE (voe.sx and mirrors) extractor, ported from Gujal00/ResolveURL voesx.py.
+     *
+     * Primary path (Pattern 1): the page contains `json">["<encoded>"]</script><script src="<jsUrl>`.
+     * The JS file at jsUrl contains a LUT (lookup table). voe_decode(encoded, lut) reverses the
+     * obfuscation: ROT-shift letters -> strip LUT elements -> base64-decode -> Caesar -3 ->
+     * base64-decode reversed -> JSON {file, source, direct_access_url}. We pick the m3u8 (source)
+     * if present, else mp4 (file).
+     *
+     * Fallback path: direct hls/mp4 regexes in the page (for VOE variants that embed URLs plainly).
+     * VOE may return non-200 (DDoS-Guard challenge, soft-404) but still serve a page body; we scan
+     * the body regardless of status. Note: DDoS-Guard can block non-browser clients (403 from a
+     * laptop); the TV gets a body more often, so detection there may succeed where curl fails.
      */
     private fun resolveVoe(url: String, callback: (ExtractorLink) -> Unit): Boolean {
-        val res = httpGet(url, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to mobileUA))
-        // VOE (and mirrors) may return non-200 (DDoS-Guard challenge, soft-404) but still serve a
-        // page body; don't bail on status - scan the body regardless.
+        val res = httpGet(url, headers = mapOf("User-Agent" to mobileUA))
         val text = res.text
         var found = false
 
-        // 1. Direct hls/mp4 URLs in the page (newer VOE pages embed them in a JSON-ish blob).
-        //    Patterns: "hls":"https://...m3u8"  or  sources:[{"file":"...m3u8"}]  or  "src":"...mp4"
-        val urlPatterns = listOf(
-            Regex(""""hls"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)""""),
-            Regex(""""mp4"\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
-            Regex(""""file"\s*:\s*"(https?://[^"]+\.(?:m3u8|mp4)[^"]*)""""),
-            Regex(""""src"\s*:\s*"(https?://[^"]+\.(?:m3u8|mp4)[^"]*)""""),
-            Regex("""'(https?://[^']+\.m3u8[^']*)'"""),
-            Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)"""),
-            Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)""")
-        )
-        for (p in urlPatterns) {
-            p.findAll(text).forEach { m ->
-                emitLink("VOE", m.groupValues[1], callback)
-                found = true
-            }
-            if (found) break
+        // --- Pattern 1: voe_decode path ---
+        // Redirect loop: while 'const currentUrl' in html, follow window.location.href.
+        var currentUrl = url
+        var currentText = text
+        var redirects = 0
+        while (currentText.contains("const currentUrl") && redirects < 5) {
+            val r = Regex("""window\.location\.href\s*=\s*'([^']+)'""").find(currentText)
+            if (r == null) break
+            currentUrl = r.groupValues[1]
+            val r2 = httpGet(currentUrl, headers = mapOf("User-Agent" to mobileUA))
+            currentText = r2.text
+            redirects++
         }
+        if (redirects > 0) DebugLog.t(dbg, "resolveVoe: followed $redirects redirects to $currentUrl")
 
-        // 2. P.a.c.k.e.r'd script: `eval(function(p,a,c,k,e,d){...}('...',..,..))` -> unpack.
-        if (!found) {
-            val packer = Regex("""eval\(function\(p,a,c,k,e,d\)\{[^}]*\}\('([^']+)'[^)]*\)\)""").find(text)
-            if (packer != null) {
-                val unpacked = unpackPacker(packer.groupValues[1])
-                for (p in urlPatterns) {
-                    p.findAll(unpacked).forEach { m ->
-                        emitLink("VOE", m.groupValues[1], callback)
-                        found = true
-                    }
-                    if (found) break
+        val p1 = Regex("""json">\["([^"]+)"\]</script>\s*<script\s*src="([^"]+)""")
+        val m1 = p1.find(currentText)
+        if (m1 != null) {
+            val ct = m1.groupValues[1]
+            val jsUrlRaw = m1.groupValues[2]
+            val jsUrl = if (jsUrlRaw.startsWith("http")) jsUrlRaw else "$currentUrl/$jsUrlRaw".replace("//", "/")
+            DebugLog.t(dbg, "resolveVoe: Pattern 1 match, ct len=${ct.length}, jsUrl=$jsUrl")
+            val jsRes = httpGet(jsUrl, headers = mapOf("User-Agent" to mobileUA))
+            val lutMatch = Regex("""(\[(?:'\W{2}'[,\]]){1,9})""").find(jsRes.text)
+            if (lutMatch != null) {
+                val luts = lutMatch.groupValues[1]
+                DebugLog.t(dbg, "resolveVoe: LUT found: $luts")
+                val decoded = try { voeDecode(ct, luts) } catch (t: Throwable) {
+                    DebugLog.w(dbg, "resolveVoe: voe_decode threw ${t.javaClass.name}: ${t.message}")
+                    null
                 }
+                if (decoded != null) {
+                    // Prefer m3u8 (source), then mp4 (file), then direct_access_url.
+                    val source = decoded.optString("source", "")
+                    val file = decoded.optString("file", "")
+                    val direct = decoded.optString("direct_access_url", "")
+                    when {
+                        source.startsWith("http") -> { emitLink("VOE", source, "https://voe.sx/", callback); found = true }
+                        file.startsWith("http") -> { emitLink("VOE", file, "https://voe.sx/", callback); found = true }
+                        direct.startsWith("http") -> { emitLink("VOE", direct, "https://voe.sx/", callback); found = true }
+                    }
+                    DebugLog.t(dbg, "resolveVoe: voe_decode -> source=$source file=$file direct=$direct found=$found")
+                }
+            } else {
+                DebugLog.w(dbg, "resolveVoe: Pattern 1 matched but no LUT in JS file")
             }
+        } else {
+            DebugLog.t(dbg, "resolveVoe: Pattern 1 no match (trying fallback regexes)")
         }
 
-        // 3. Base64-encoded body: `let xxx = "<base64>";` then `eval(atob(xxx))` or similar.
+        // --- Fallback: direct hls/mp4 URLs in the page (for VOE variants that embed plainly) ---
         if (!found) {
-            val b64 = Regex("""['"]([A-Za-z0-9+/=]{200,})['"]""").findAll(text).toList()
-            for (m in b64) {
-                val decoded = try { String(android.util.Base64.decode(m.groupValues[1], android.util.Base64.DEFAULT), Charsets.UTF_8) } catch (_: Exception) { continue }
-                for (p in urlPatterns) {
-                    p.findAll(decoded).forEach { mm ->
-                        emitLink("VOE", mm.groupValues[1], callback)
-                        found = true
-                    }
-                    if (found) break
+            val urlPatterns = listOf(
+                Regex(""""hls"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)""""),
+                Regex(""""mp4"\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
+                Regex(""""file"\s*:\s*"(https?://[^"]+\.(?:m3u8|mp4)[^"]*)""""),
+                Regex("""'(https?://[^']+\.m3u8[^']*)'"""),
+                Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)"""),
+                Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)""")
+            )
+            for (p in urlPatterns) {
+                p.findAll(text).forEach { m ->
+                    emitLink("VOE", m.groupValues[1], "https://voe.sx/", callback); found = true
                 }
                 if (found) break
             }
@@ -729,22 +755,124 @@ class FilmpalastProvider : TmdbProvider() {
         return found
     }
 
-    /** Minimal dean-edwards packer payload unpacker (`function(p,a,c,k,e,d)`). */
-    private fun unpackPacker(p: String): String {
-        return try {
-            val payload = Regex("""'([^']+)'\.split\('\|'\)""").find(p)?.groupValues?.get(1) ?: return p
-            val words = payload.split("|")
-            val sb = StringBuilder()
-            // Replace \w+ tokens: the packer replaces each token by words[token-as-base36].
-            Regex("""\b(\w+)\b""").findAll(p).forEach { m ->
-                val idx = m.groupValues[1].toIntOrNull(36)
-                if (idx != null && idx in words.indices && words[idx].isNotEmpty()) sb.append(words[idx])
-                else sb.append(m.groupValues[1])
+    /**
+     * voe_decode: reverse VOE's obfuscation. Ported from voesx.py voe_decode().
+     * 1. Parse LUT: luts like "['xx','yy','zz']" -> split inner items, escape regex specials.
+     * 2. ROT-shift ct letters: uppercase (x-52)%26+65, lowercase (x-84)%26+97.
+     * 3. Remove each LUT element from the shifted text (regex replace with "").
+     * 4. base64-decode.
+     * 5. Caesar -3 (each char -3).
+     * 6. base64-decode reversed.
+     * 7. JSON parse -> {file, source, direct_access_url, captions}.
+     */
+    private fun voeDecode(ct: String, luts: String): org.json.JSONObject {
+        // 1. Parse LUT items: strip leading "[ '" and trailing "' ]", split by "','".
+        val inner = luts.substringAfter("['").substringBefore("']")
+        val lutItems = if (inner.isNotEmpty()) inner.split("','") else emptyList()
+        // Escape regex special chars in each LUT item.
+        val specials = setOf('.', '*', '+', '?', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\')
+
+        // 2. ROT-shift ct letters.
+        val shifted = StringBuilder(ct.length)
+        for (ch in ct) {
+            val x = ch.toInt()
+            val nx = when {
+                x in 65..90 -> (x - 52).rem(26) + 65   // uppercase
+                x in 97..122 -> (x - 84).rem(26) + 97   // lowercase
+                else -> x
             }
-            sb.toString()
-        } catch (_: Exception) {
-            p
+            shifted.append(nx.toChar())
         }
+        var txt = shifted.toString()
+
+        // 3. Remove each LUT element (escaped) from the shifted text.
+        for (item in lutItems) {
+            if (item.isEmpty()) continue
+            val escaped = buildString {
+                for (c in item) if (c in specials) { append('\\'); append(c) } else append(c)
+            }
+            txt = try { Regex(escaped).replace(txt, "") } catch (_: Throwable) { txt }
+        }
+
+        // 4. base64-decode.
+        val step4 = try { base64Decode(txt) } catch (t: Throwable) {
+            DebugLog.w(dbg, "voeDecode: base64 step1 failed: ${t.message}")
+            return org.json.JSONObject()
+        }
+        // 5. Caesar -3.
+        val step5 = String(CharArray(step4.length) { (step4[it].toInt() - 3).toChar() })
+        // 6. base64-decode reversed.
+        val reversed = step5.reversed()
+        val step6 = try { base64Decode(reversed) } catch (t: Throwable) {
+            DebugLog.w(dbg, "voeDecode: base64 step2 failed: ${t.message}")
+            return org.json.JSONObject()
+        }
+        // 7. JSON parse.
+        return try { org.json.JSONObject(step6) } catch (t: Throwable) {
+            DebugLog.w(dbg, "voeDecode: JSON parse failed: ${t.message}")
+            org.json.JSONObject()
+        }
+    }
+
+    private fun base64Decode(s: String): String {
+        return try {
+            String(android.util.Base64.decode(s, android.util.Base64.DEFAULT), Charsets.UTF_8)
+        } catch (t: Throwable) {
+            throw t
+        }
+    }
+
+    /**
+     * firestream.to extractor, ported from Gujal00/ResolveURL firestream.py.
+     * The embed page at /e/<mediaId> contains a hidden element `id="token-blob">...</token-blob>`.
+     * POST /api/videos/<mediaId>/resolve with JSON {"blob":"<token>"} + Referer/Origin headers ->
+     * JSON {signedVideoUrl, signedVideoSdUrl}. signedVideoUrl is a direct m3u8 URL.
+     * Verified live (Aug 2026, Inception): token-blob -> POST -> signedVideoUrl (video.m3u8).
+     */
+    private fun resolveFirestream(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val mediaId = url.substringAfterLast("/e/").substringBefore("?").trim()
+        if (mediaId.isEmpty()) {
+            DebugLog.w(dbg, "resolveFirestream: could not extract mediaId from $url")
+            return false
+        }
+        val res = httpGet(url, headers = mapOf("User-Agent" to mobileUA))
+        if (res.code !in 200..299) {
+            DebugLog.w(dbg, "resolveFirestream: GET $url -> HTTP ${res.code}")
+            return false
+        }
+        val blob = try {
+            Regex("""id="token-blob"[^>]+>([^<]+)""").find(res.text)?.groupValues?.get(1)
+        } catch (t: Throwable) { null }
+        if (blob.isNullOrBlank()) {
+            DebugLog.w(dbg, "resolveFirestream: no token-blob found in embed page")
+            return false
+        }
+        DebugLog.t(dbg, "resolveFirestream: token-blob found (len=${blob.length}), mediaId=$mediaId")
+        val apiUrl = "https://firestream.to/api/videos/$mediaId/resolve"
+        val body = """{"blob":"$blob"}"""
+        val apiRes = httpPost(apiUrl, body, headers = mapOf(
+            "Content-Type" to "application/json",
+            "Referer" to "https://firestream.to/",
+            "Origin" to "https://firestream.to",
+            "User-Agent" to mobileUA
+        ))
+        if (apiRes.code !in 200..299) {
+            DebugLog.w(dbg, "resolveFirestream: POST $apiUrl -> HTTP ${apiRes.code}")
+            return false
+        }
+        val streamUrl = try {
+            org.json.JSONObject(apiRes.text).optString("signedVideoUrl", "")
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "resolveFirestream: JSON parse failed: ${t.message}")
+            return false
+        }
+        if (!streamUrl.startsWith("http")) {
+            DebugLog.w(dbg, "resolveFirestream: no signedVideoUrl in response")
+            return false
+        }
+        DebugLog.t(dbg, "resolveFirestream: signedVideoUrl=$streamUrl")
+        emitLink("Firestream", streamUrl, "https://firestream.to/", callback)
+        return true
     }
 
     /**
