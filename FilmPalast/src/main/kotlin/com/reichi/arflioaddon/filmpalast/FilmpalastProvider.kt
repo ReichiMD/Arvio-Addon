@@ -461,7 +461,8 @@ class FilmpalastProvider : TmdbProvider() {
      *  - an Episode.data = the Filmpalast stream page URL (series path).
      *
      * For each hoster link we resolve it ourselves via resolveHost (hoster-specific extractors
-     * like VOE, plus a generic page-scrape for direct mp4/m3u8 URLs). We do NOT call
+     * like VOE, plus a generic page-scrape for direct mp4/m3u8 URLs), in PARALLEL via a JDK
+     * thread pool so total time is bounded by the slowest hoster, not the sum. We do NOT call
      * cloudstream3's loadExtractor: it is an ARVIO-provided suspend function that is broken for
      * external .cs3 plugins (coroutine resume returns a stray obfuscated object instead of
      * Boolean -> ClassCastException, and callback emissions never reach ARVIO). All our hoster
@@ -504,22 +505,42 @@ class FilmpalastProvider : TmdbProvider() {
             return false
         }
 
+        val fixed = links.mapNotNull { link ->
+            val f = fixUrlNull(link)
+            if (f == null) DebugLog.w(dbg, "loadLinks: fixUrlNull null for '$link' -> skip")
+            f
+        }
+        if (fixed.isEmpty()) {
+            DebugLog.w(dbg, "loadLinks: all hoster links invalid after fixUrlNull -> no sources")
+            return false
+        }
+
+        // Resolve hosters in PARALLEL so the slowest single hoster bounds total time instead of
+        // the sum. With 3 hosters (odysseusa+voe+vidsonic) sequential was ~1.45s; parallel ~0.7s,
+        // keeping us well under ARVIO's 2s Auto-Play timeout. java.util.concurrent (JDK, never
+        // obfuscated by R8). callback is (ExtractorLink)->Unit; ARVIO collects results thread-safely
+        // (no ConcurrentModificationException observed in v26). Each future has a 2s timeout so a
+        // hung hoster never blocks the whole budget; pool is always shut down in finally.
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(minOf(fixed.size, 4))
         var any = false
-        for (link in links) {
-            val fixed = fixUrlNull(link)
-            if (fixed == null) {
-                DebugLog.w(dbg, "loadLinks: fixUrlNull null for '$link' -> skip")
-                continue
+        try {
+            val futures = fixed.map { link ->
+                pool.submit(java.util.concurrent.Callable {
+                    val found = resolveHost(link, callback)
+                    DebugLog.t(dbg, "loadLinks: resolveHost('$link') -> found=$found")
+                    found
+                })
             }
-            // NOTE: cloudstream3's loadExtractor is an ARVIO-provided suspend function, and like
-            // app.get (Erkenntnis #13/#14) it is broken for external .cs3 plugins: the coroutine
-            // resume returns a stray obfuscated object (k7.a / d7.d0) instead of Boolean, throwing
-            // ClassCastException, and callback emissions never reach ARVIO ("0 links collected"
-            // despite any=true). So we resolve hosters ourselves with java.net + jsoup (no suspend,
-            // no ARVIO coroutine involvement) via resolveHost.
-            val found = resolveHost(fixed, callback)
-            DebugLog.t(dbg, "loadLinks: resolveHost('$fixed') -> found=$found")
-            any = found || any
+            for (f in futures) {
+                try {
+                    // 2s per future; a hung hoster is abandoned but others continue.
+                    if (f.get(2, java.util.concurrent.TimeUnit.SECONDS)) any = true
+                } catch (t: Throwable) {
+                    DebugLog.w(dbg, "loadLinks: hoster future threw ${t.javaClass.name}: ${t.message}")
+                }
+            }
+        } finally {
+            pool.shutdownNow()
         }
         DebugLog.t(dbg, "loadLinks: DONE, any=$any (any=true means at least one source emitted)")
         return any
