@@ -677,9 +677,21 @@ Nutzer kann ab sofort auch auf dem HANDY testen (UI-Bug behoben). Fuer Logcat oh
 4. Falls Bot-Schutz: Debug-Logging + Geraet-Test.
 
 ### RESOLVEURL-REPOS (geklont nach /tmp, 15.08.2026)
-- **Gujal00/ResolveURL** = `https://github.com/Gujal00/ResolveURL` (Hauptquelle, 227 Plugins, geklont nach `/tmp/resolveurl`). Pfad: `script.module.resolveurl/lib/resolveurl/plugins/<hoster>.py`.
-- **michaz1988/michaz1988.github.io** = `https://github.com/michaz1988/michaz1988.github.io` (michaz Repo, geklont nach `/tmp/michaz-repo`). Enthaelt `script.module.xstreamscraper` (Filmpalast-Scraper, geklont nach `/tmp/xstreamscraper`) + `plugin.video.xship` (xStream-Nachfolger).
+
+**AKTUALITAETS-CHECK durchgefuehrt (15.08.2026) — Gujal00/ResolveURL ist die aktuellste Quelle:**
+
+| Repo | Letzter Commit | Status |
+|---|---|---|
+| **Gujal00/ResolveURL** | 12.08.2026 (3 Tage her) | ⭐ AKTUELL — nutze diese |
+| jsergio123/script.module.resolveurl | 21.02.2020 (6 Jahre alt) | VERALTET — nicht nutzen |
+| Gujal00/smrzips | Release-Repo (zips only, v5.1.206) | Nur Zips, kein Quellcode |
+
+- **Gujal00/ResolveURL** = `https://github.com/Gujal00/ResolveURL` (Hauptquelle, 227 Plugins, geklont nach `/tmp/resolveurl`). Pfad: `script.module.resolveurl/lib/resolveurl/plugins/<hoster>.py`. Version 5.1.206. Letzter Commit 12.08.2026 ("voesx-prefer-hls-settings"). Sehr aktiv gepflegt (commits fast woechentlich).
+- `jsergio123/script.module.resolveurl` = VERALTET (letzter Commit 2020, 6 Jahre alt). Nicht nutzen.
+- `Gujal00/smrzips` = Release-Repo (nur .zip-Dateien, kein Quellcode). Version 5.1.206 als Zip. Der Quellcode ist im ResolveURL-Repo.
+- **michaz1988/michaz1988.github.io** = `https://github.com/michaz1988/michaz1988.github.io` (michaz Repo, geklont nach `/tmp/michaz-repo`). Enthaelt `script.module.xstreamscraper` (Filmpalast-Scraper, geklont nach `/tmp/xstreamscraper`) + `plugin.video.xship` (xStream-Nachfolger) + `repository.gujal` (verweist auf Gujal00/smrzips fuer resolveurl). michaz hostet KEIN eigenes resolveurl — er nutzt Gujal00's resolveurl ueber das repository.gujal Dependency.
 - **seizu/plugin.video.filmpalast.ex** = `https://github.com/seizu/plugin.video.filmpalast.ex` (Filmpalast Kodi-Plugin, geklont nach `/tmp/seizu-filmpalast`). Nutzt resolveurl fuer Hoster-Aufloesung.
+- **Fazit:** Gujal00/ResolveURL ist EINZIGE aktuell gepflegte resolveurl-Quelle. xStream/michaz nutzt genau diese. Wir nutzen sie auch. Keine Alternative noetig.
 - WICHTIG: Diese Repos sind nach /tmp geklont (nicht persistent ueber Resets). Bei naechster Session ggf. neu klonen: `git clone --depth 1 https://github.com/Gujal00/ResolveURL.git /tmp/resolveurl`
 
 ### VOE-EXTRACTOR: KOMPLETTE LOGIK (aus resolveurl voesx.py, lesbar!)
