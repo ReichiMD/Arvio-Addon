@@ -28,11 +28,12 @@ LINES=$(wc -l < "$LOG_RAW")
 echo "Gelesen: ${LINES} Zeilen -> ${LOG_RAW}"
 echo
 
-echo "=== 3/5 Filtere (ARVIO + FilmPalast + Serienstream + DDoS-Guard) ==="
-# Filter deckt BEIDE Scraper ab: FilmPalast UND Serienstream, plus ARVIO-Engine-Logs
-# und die Serienstream-spezifischen DDoS-Guard/resolve-Helfer (Erkenntnis #19).
+echo "=== 3/5 Filtere (ARVIO + FilmPalast + Serienstream + KinoGer + DDoS-Guard) ==="
+# Filter deckt ALLE Scraper ab: FilmPalast, Serienstream UND KinoGer, plus ARVIO-Engine-Logs
+# und die Serienstream-spezifischen DDoS-Guard/resolve-Helfer (Erkenntnis #19) sowie
+# KinoGer-spezifische resolveIncvideo/parseShowArrays (Phase 1).
 # Eine Zeile (keine Zeilenfortsetzung) fuer maximale Termux/bash-Kompatibilitaet.
-grep -iE "Filmpalast|Serienstream|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|ddg|ddos|guard|resolveHost|resolveVoe|resolveDoodstream|resolveStreamtape|resolveFileMoon|resolveVidHide|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|buildSeriesResponse|collectEpisodes|httpGet|httpPost|doRequest|CookieJar|voeDecode|detectQuality" \
+grep -iE "Filmpalast|Serienstream|Kinoger|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|ddg|ddos|guard|resolveHost|resolveVoe|resolveIncvideo|resolveDoodstream|resolveStreamtape|resolveFileMoon|resolveVidHide|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|searchKinoger|buildSeriesResponse|collectEpisodes|parseShowArrays|httpGet|httpPost|doRequest|CookieJar|voeDecode|detectQuality" \
   "$LOG_RAW" > "$HOME/${LOG_FILTERED}"
 FLINES=$(wc -l < "$HOME/${LOG_FILTERED}")
 echo "Gefiltert: ${FLINES} Zeilen -> ${LOG_FILTERED}"

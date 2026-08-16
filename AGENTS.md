@@ -636,19 +636,45 @@ Zusaetzlich: der Error entwischt, weil `resolveHost`/`emitLink` nur `Exception` 
 - Falls POST /r 200 + `var t = "<url>"` aber URL ist keine Hoster-URL → postMessage-Format anders als erwartet, Body-Parser anpassen.
 - **Turnstile-Hypothese (Prio für Fallback):** Das Gate heißt `turnstile_altcha` — möglicherweise braucht Serienstream BEIDE: Cloudflare-Turnstile (CAPTCHA) UND ALTCHA (PoW). Falls ja, ist Turnstile ohne Browser nicht lösbar → dann wäre Serienstream doch nicht umgehbar. v32-Log zeigt ob ALTCHA allein reicht.
 
-### AKTUELLER STAND (Stand 16.08.2026, Ende Session)
+### AKTUELLER STAND (Stand 16.08.2026, KinoGer-Modul Phase 1 gebaut)
 
-**Builds-Branch:**
+**Builds-Branch (Stand vor KinoGer-Push):**
 - **FilmPalast.cs3 v30** (1.486.293 Bytes, status=1, Movie+TvSeries) — funktioniert, liefert odysseusa/vidsonic-Quellen.
-- **Serienstream.cs3 v32** (1.488.388 Bytes, status=1, TvSeries) — NEU: ALTCHA-PoW-Solver implementiert. TV-Test ausstehend.
+- **Serienstream.cs3 v32** (1.488.388 Bytes, status=1, TvSeries) — ALTCHA-PoW-Solver implementiert. TV-Test ausstehend.
 - `plugins.json` auf builds enthält beide Module.
 
-**Quellcode-Stand:**
-- Letzter Commit auf `main`: `8274717` (fix: HashMap statt Map+Pair Syntax).
-- CI grün (Run 31942452533).
-- Serienstream-Provider: `Serienstream/src/main/kotlin/com/reichi/arflioaddon/serienstream/SerienstreamProvider.kt` (~860 Zeilen) — enthält `resolveRedirectGate`, `solveAltcha`, `doRequestPost` für den ALTCHA-Flow.
+**NEU: KinoGer-Modul (Phase 1 der Konsolidierung, lokal gebaut, NOCH NICHT auf builds):**
+- **Kinoger.cs3 v1** (1.486.489 Bytes, status=1, Movie+TvSeries) — lokal gebaut + verifiziert, **NOCH NICHT gepusht** (wartet auf Nutzer-Genehmigung / Commit auf main -> CI baut dann auf builds).
+- `Kinoger/src/main/kotlin/com/reichi/arflioaddon/kinoger/KinogerProvider.kt` (~600 Zeilen) — TmdbProvider, java.net-HTTP, eigene `resolveIncvideo` für fsst.online/incvideo1.online.
+- Override-Signaturen verifiziert obfusziert (load=(String,j7/d), loadLinks=(String,Z,x7/l,x7/l,j7/d), search=(String,j7/d)) -> Dispatch bindet.
+- Parse-Logik live validiert (Silo: 3 Staffeln, 27 Episoden, 4 Hoster/Episode korrekt gemerged; Matrix-Suche: korrekter Match "Matrix (1999)"; fsst.online: 360p/720p/1080p MP4-URLs extrahiert).
 
-**Was als nächstes passiert: NUTZER TESTET v32 AM TCL C7K TV**
+**KinoGer-Seitenstruktur (live verifiziert, 16.08.2026):**
+- KinoGer ist von der Heim-IP erreichbar (HTTP 200, kein 403 wie bei Render-Server-IP) — bestätigt die Konsolidierungs-Hypothese.
+- Suche `/index.php?do=search&subaction=search&titleonly=3&story=<q>` -> `section.post` mit `h2/h3 a[href]`. **WICHTIG: Desktop-UA nötig** — mobiles UA liefert JS-only-Template OHNE Hoster-Arrays.
+- Stream-Seite: Hoster in `<script>` als `VAR.init(); VAR.show(SEASON, [[[S1E1_hosters...],[...]],...], 0.2)` — 3D-Array Staffeln×Episoden×Hoster. Alle 4 Player-Vars (pw, fsst, go, ollhd) zeigen dieselbe Struktur mit verschiedenen Hoster-Domains.
+- **fsst.online/embed/<id>** leitet zu **incvideo1.online** weiter und enthält Playerjs-Config `file:"[360p]url/,[720p]url/,[1080p]url/"` -> DIREKTE MP4-URLs, kein JS nötig. Das ist die Hauptquelle (resolveIncvideo).
+- Andere Hosters (kinoger.pw, kinoger.embed4me.vip, kinoger.seekplays.pro) -> genericResolve (voraussichtlich leer, Phase 3-Hoster).
+
+**KinoGer-Hoster (live verifiziert):**
+| Hoster-Domain | Extraktor | Direkt? | Status |
+|---|---|---|---|
+| fsst.online / incvideo1.online | resolveIncvideo (Playerjs file-Regex) | JA (360p/720p/1080p mp4) | ✅ Phase 1 fertig |
+| kinoger.pw | genericResolve | ? | Phase 3 |
+| kinoger.embed4me.vip | genericResolve | ? | Phase 3 |
+| kinoger.seekplays.pro | genericResolve | ? | Phase 3 |
+| kinoger.re (VidStack), kinoger.be (VidHidePro), kinoger.ru (Voe) | GermanProviders-Aliase, in meinen Daten nicht gesehen | - | ggf. später |
+
+**Quellcode-Stand:**
+- KinoGer-Modul komplett in `Kinoger/` (build.gradle.kts + KinogerPlugin.kt + KinogerProvider.kt + DebugLog.kt).
+- settings.gradle.kts auto-include findet das Modul (keine Änderung nötig).
+- Build: `./gradlew make makePluginsJson` -> alle 3 Module (FilmPalast + Serienstream + Kinoger) bauen grün.
+- **Lokaler Build erfordert:** JDK 21 (openjdk-21-jdk-headless, Debian Trixie hat kein 17) + Android SDK 35 (cmdline-tools + platforms;android-35 + build-tools;35.0.0) + `local.properties` (sdk.dir).
+
+**Was als nächstes passiert:**
+1. **Commit auf main** (nach Nutzer-Genehmigung) -> CI baut Kinoger.cs3 v1 auf builds-Branch.
+2. **Nutzer testet KinoGer am TV** (Repo löschen + neu hinzufügen DIREKT, Matrix-Suche) — wenn `resolveIncvideo` durchläuft, ERSTE KinoGer-Quelle (1080p MP4) in ARVIO sichtbar.
+3. Parallel: Serienstream v32-TV-Test (ALTCHA-PoW) läuft noch aus.
 
 ### ENTSCHEIDENDE ERKENNTNIS #17 (15.08.2026, v23-TV-Test + Hoster-Analyse): KEIN CRASH, echte Hoster-Extraktion, odysseusa-API gefunden
 
