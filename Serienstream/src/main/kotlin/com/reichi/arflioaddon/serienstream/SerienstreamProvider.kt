@@ -768,7 +768,7 @@ class SerienstreamProvider : TmdbProvider() {
             emitLink(source, abs, url, callback); found = true
         }
         DebugLog.t(dbg, "genericResolve: $url found=$found (html ${html.length} chars)")
-        found
+        return found
     }
 
     private fun resolveRelative(maybeRelative: String, baseUrl: String): String {
