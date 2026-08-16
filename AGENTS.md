@@ -534,6 +534,35 @@ Zusaetzlich: der Error entwischt, weil `resolveHost`/`emitLink` nur `Exception` 
 
 **Erwartung v25-Test:** ExtractorLink-Konstruktion klappt (primary ctor ist von -keep retained). callback.invoke(link) emittiert die Quelle an ARVIO. `N links collected` (N>0) -> **Filmpalast-Quelle in ARVIO sichtbar = ZIEL ERREICHT!** Falls doch ein Error (neue geschrumpfte Klasse): try/catch(Throwable) faengt ihn, volles Logging im Logcat zeigt welche Klasse/Methode fehlt.
 
+### ENTSCHEIDENDE ERKENNTNIS #19 (16.08.2026, Serienstream-Modul): DDoS-Guard auf /r?-Redirect = HAUPT-Huerde
+
+**Serienstream (serienstream.to) als neues Provider-Modul gebaut (v31, Phase D).** Struktur verifiziert (live curl, Aug 2026):
+- Suche `/suche?term=<q>&tab=shows` -> `.results-group a[href=/serie/<slug>]`. Funktioniert vom Laptop (HTTP 200).
+- Serien-Seite `/serie/<slug>` -> `#season-nav ul li a[href=/staffel-N]`. Funktioniert.
+- Season-Seite `/serie/<slug>/staffel-N` -> `tr.episode-row` mit `onclick="window.location='/serie/<slug>/staffel-N/episode-M'"`, `.episode-number-cell`, `.episode-title-cell`. Funktioniert (Struktur = GermanProviders-Vorlage).
+- Episode-Seite `/serie/<slug>/staffel-N/episode-M` -> `.link-wrapper > button` mit `data-play-url="/r?t=<encrypted>"` + `data-provider-name` + `data-language-label`. Funktioniert.
+
+**ABER: Hoster-Redirect `/r?t=...` ist DDoS-Guard-geschuetzt.** Die `data-play-url` ist ein Laravel-AES-verschluesselter Redirect (Server entschluesselt, wir bekommen nur den Blob). Der `/r?`-Endpunkt liefert eine **DDoS-Guard js-Challenge** (403) statt der direkten Hoster-URL. Cookies von der Episode-Seite (`__ddg8_/__ddg9_/__ddg1_`) allein reichen NICHT (verifiziert: mit Session-Cookies immer noch 403 + Challenge-Body).
+
+**xStream (michaz) DDoS-Guard-Bypass gefunden (requestHandler.py:255-275):** Bei 403+DDoS-Guard -> lade `https://check.ddos-guard.net/check.js` -> extrahiere Image-URL (`Image.*?'([^']+)'; new`) -> lade sie auf dem Target-Host (setzt `__ddg2_`-Cookie) -> retry Original-Request. **ABER live getestet: dieser OLD bypass setzt zwar `__ddg2_`, reicht aber fuer Serienstreams `/r?`-Endpunkte NICHT mehr** — diese nutzen mittlerweile eine neuere js-Challenge (`view.js` + `index.js`), die echtes JS-Ausfuehren erfordert. xStream's Bypass war fuer die aeltere Challenge; aktuelle Serienstream-`/r?` bleibt 403.
+
+**resolveurl (Gujal00/ResolveURL 5.1.206, aktuellste Version) loest DDoS-Guard NICHT.** net.py wirft nur `ResolverError('Cloudflare challenge')` bei Cloudflare, kein DDoS-Guard-Solver vorhanden. resolveurl resolved Hoster-URLs direkt (voe.sx/e/xxx, dood.so/e/xxx) — JEMAND muss das `/r?`-Redirect VORHER aufloesen. Doodstream/FileMoon/VidHide sind direkt erreichbar (HTTP 200, kein DDoS-Guard); nur der Serienstream-Redirect ist das Hindernis.
+
+**Fix #19 / Option A (IMPLEMENTIERT, v31):** Serienstream-Modul als TmdbProvider (wie Filmpalast), mit java.net-HTTP + CookieJar + xStream-DDoS-Guard-Bypass-Versuch (check.js Image-Trick) in httpGet. Falls Bypass scheitert (neuere js-Challenge), resolveHost faellt auf genericResolve zurueck. **TV-Test entscheidet**: der TV (andere IP/Wohn-IP vs Rechenzentrum) koennte durchkommen, wo Laptop blockt. Bei VOE bekam der TV immerhin eine Challenge-Seite (nur keine echte Embed-Seite) — bei `/r?` koennte es anders laufen.
+
+**Option B (Falls A scheitert, NOCH NICHT umgesetzt):** view.js-js-Challenge reverse-engineeren + Token-Berechnungsalgorithmus nach Kotlin portieren. Vorher: GitHub-Recherche nach DDoS-Guard-js-Challenge-Solver (cloudscraper-aehnlich fuer DDoS-Guard).
+
+**Serienstream-Hoster-Spektrum (live verifiziert, Aug 2026):** VOE (haeufig, DDoS-Guard-blocked), Doodstream (direkt erreichbar!), FileMoon, VidHide, Streamtape. Doodstream-Extractor aus resolveurl doodstream.py portiert (dsplayer.hotkeys -> token -> /pass -> mp4). VOE-Extractor (voe_decode) aus Filmpalast reuse'd. Streamtape/FileMoon/VidHide via genericResolve (sources-JSON + m3u8/mp4-Regex).
+
+### FIX #19 / v31: Serienstream-Modul (Phase D, Option A)
+- **Neues Modul `Serienstream/`** (settings.gradle auto-include). Package `com.reichi.arflioaddon.serienstream`.
+- **SerienstreamProvider : TmdbProvider** (series-only, tvTypes=[TvSeries]). load({"id":<tmdbId>,"type":"tv"}) -> TMDB-Meta -> searchSeries (Titel-Match) -> buildSeriesResponse (Seasons + Episoden). loadLinks: episode-Seite -> .link-wrapper buttons -> /r? redirect follow -> resolveHost.
+- **CookieJar.kt**: in-memory cookie jar (java.net, kein okhttp), captureSetCookie (auch bei 403), toCookieHeader fuer retry. Scoped pro httpGetInternal-Aufruf.
+- **httpGet mit DDoS-Guard-Bypass**: bei 403+DDoS-Guard -> tryDdosGuardBypass (check.js + Image -> __ddg2_) -> retry. instanceFollowRedirects=true damit /r? redirect zur finalen Hoster-URL verfolgt wird (wenn nicht blockiert).
+- **resolveHost**: folgt /r? redirect, dispatcht per finaler Domain: Doodstream (dsplayer.hotkeys-Algorithmus), VOE (voe_decode), Streamtape (linko), FileMoon/VidHide (genericResolve), generic fallback.
+- **ExtractorLink primary ctor** (9 Args, wie v25/Filmpalast). Alle catch Throwable.
+- Version 31. CI baut beim Push auf main. **TV-Test ausstehend.**
+
 ### ENTSCHEIDENDE ERKENNTNIS #17 (15.08.2026, v23-TV-Test + Hoster-Analyse): KEIN CRASH, echte Hoster-Extraktion, odysseusa-API gefunden
 
 v23-TV-Test (arvio-tv-log-v23-filtered.txt) = **KEIN CRASH mehr!** loadExtractor-Entfernung (Fix #16) funktioniert. Scraper laeuft sauber durch, alle 4 Hoster found=false (Extraktion trifft nicht, aber clean termination). **Voll auf Ebene 2 = echte Hoster-Extraktion, kein Obfuskations-Problem mehr.**
