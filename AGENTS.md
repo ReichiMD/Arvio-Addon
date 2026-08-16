@@ -1488,3 +1488,133 @@ Das Plugin schreibt jeden Schritt des Filmpalast-Scrapers in einen internen Trac
 - **Erkenntnis #7 (14.08.2026, v13-DEX+APK-Analyse):** **Root-Cause gefunden.** ARVIOs R8 hat `kotlin.coroutines.Continuation` zu `j7.d` obfuscated. Unsere suspend-Override-Methoden (load/loadLinks/search) haben `Lkotlin/coroutines/Continuation;` in der Signatur, ARVIOs Parent hat `Lj7/d;` ‚Üí JVM findet Override nicht ‚Üí parent laeuft ‚Üí `ErrorLoadingException: No id found` ‚Üí 0 Quellen. **Betrifft ALLE externen .cs3-Plugins.** Geplanter Fix #7: gegen ARVIOs obfuscated cloudstream3-JAR kompilieren (dex2jar aus APK extrahieren). Siehe "ENTSCHEIDENDE ERKENNTNIS #7" oben.
 - **v14 (14.08.2026, Commit 829c057):** **Post-Build DEX-Patching fuer R8-obfuszierte Typen (Fix #7).** Ansatz 1 (gegen obfuszierte dex2jar-JAR kompilieren) wurde verwendet; Override-Signaturen korrekt obfusziert (load=(Ljava/lang/String;Lj7/d;)...). v14 live auf builds (1.268.540 bytes).
 - **Erkenntnis #8 + v15 (14.08.2026):** v14-TV-Test (arvio-tv-log-v14.txt) zeigte: DEX ist KAPUTT — ART-Verifier lehnt ab ("Failure to verify dex file: Non-zero padding b before section of type 8196 at offset 0x3111d2"). Root-Cause: dex2jar-Klassen (j7/d, j7/j, x7/l) wurden mit in die DEX gebuendelt und korrumpten deren Struktur. **Fix #8 (v15):** zurueck zum unobfuszierten Stub (keine dex2jar-Klassen -> valide DEX) + Post-Build-DEX-Patching (4 Typ-Strings). DexClassLoader parent-first-Delegation loest j7/d auf ARVIOs eigene Klasse -> Override-Deskriptoren matchen -> Dispatch bindet. CI baut v15 beim Push auf main. **Test auf TCL C7K TV ausstehend** (Windows 10 Anleitung: `docs/windows-10-test-guide.md`, Log-Datei `arvio-tv-log-v16.txt`).
+
+---
+
+## –ď—ě–í”Į–í“ó KONSOLIDIERUNGS-PLAN: Alle Scraper ins .cs3-Plugin (Stand 16.08.2026, fuer naechste Session)
+
+### Entscheidung (Nutzer, 16.08.2026)
+Langfristig sollen **alle Scraper im .cs3-Plugin** konsolidiert werden (ein System statt zwei). Das Stremio-Addon (ReichiMD/Stremio-Addon) bleibt als **funktionierendes Backup**, bis alle Scraper im .cs3-Plugin laufen. Nicht das funktionierende System wegwerfen, bevor das neue vollstaendig laeuft.
+
+### Warum Konsolidierung auf .cs3-Plugin sinnvoll ist
+1. **Clientseitig (Heim-IP):** kein Render-403 bei KinoGer, kein Bot-Schutz durch Rechenzentrums-IP. KinoGer wuerde sofort funktionieren (Heim-IP wird nicht blockiert).
+2. **Eine Codebasis pflegen** statt zwei (TypeScript + Kotlin).
+3. **Config-Seiten moeglich:** Cloudstream3-Plugins koennen UI-Settings haben (fuer Stalker-VOD: Portal-URL + MAC-Eingabe — das war der Grund, warum wir Cloudstream3 statt Nuvio-JS gewaehlt haben).
+4. **Vavoo Viewer-IP-Trick entfaellt:** Im .cs3-Plugin laeuft alles direkt auf dem TV — die Heim-IP ist automatisch die richtige IP. Der komplizierte X-Forwarded-For/IP-Rewrite-Trick aus dem Stremio-Addon (tvvoo) ist nicht noetig.
+
+### Risiken / Einschraenkungen (ehrlich dokumentiert)
+1. **.cs3-Plugin war extrem schwer zu bauen:** 25+ Versionen bis FilmPalast lief. Jeder neue Scraper kann neue R8-Probleme aufdecken (Obfuskation, geschrumpfte libs).
+2. **Vavoo Live-TV als .cs3-Plugin = Spezialfall:** Cloudstream3-Plugins sind fuer VOD (Filme/Serien) gebaut, nicht fuer Live-TV-Kataloge. ARVIO hat dafuer einen eigenen Stremio-Addon-Code-Pfad. Ob ein .cs3-Plugin Live-TV-Kanaele als Katalog liefern kann, ist **NICHT verifiziert**. Zuletzt portieren, ungewisser Ausgang.
+3. **Doppelte Arbeit pro Hoster-Extraktor:** Jeder Extraktor muss in Kotlin (.cs3) UND TypeScript (Stremio-Addon) gepflegt werden, solange beide Systeme laufen. Die Algorithmus-Recherche (resolveurl Python) faellt nur einmal an, das Uebersetzen in beide Sprachen ist mechanisch.
+
+### EMPFOHLENE REIHENFOLGE (schrittweise, nicht alles auf einmal)
+
+#### PHASE 1 — KinoGer als .cs3-Plugin (hoechste Prioritaet, grosster sofortiger Mehrwert)
+- **Warum zuerst:** KinoGer wird auf Render 403-blockiert (Server-IP). Im .cs3-Plugin (Heim-IP) wuerde es sofort funktionieren. Groesster sofortiger Nutzen.
+- **Vorlage:** `src/source/KinoGer.ts` im Stremio-Addon (TypeScript) + xStream/michaz `script.module.xstreamscraper` (Python).
+- **Aufbau:** TmdbProvider (wie FilmPalast), java.net-HTTP + Jsoup (kein app.get/okhttp — R8-Obfuskation umgehen, wie bei FilmPalast v21+).
+- **Estimate:** Mittel. KinoGer-Scraper-Logik ist aehnlich wie FilmPalast (Suche + Stream-Seite + Hoster-Links).
+
+#### PHASE 2 — Vavoo Filme/Serien als .cs3-Plugin
+- **Warum:** API-basiert (MediaHubMX), kein Bot-Schutz, zuverlaessig. Gleiche API wie Stremio-Addon, aber clientseitig.
+- **Vorlage:** `src/source/Vavoo.ts` im Stremio-Addon (TypeScript, ~297 Zeilen). Flow: POST ping -> addonSig -> POST mediahubmx-source.json -> Mirror-Liste.
+- **API-Endpoints:** `https://www.vypn.net/api/app/ping` (oder `https://cache.vypn.net/api/app/ping`) -> Signatur; `https://vavoo.to/mediahubmx-source.json` -> Mirrors.
+- **Ping-Payload:** statische Desktop-Payload (device/OS/app/version-Felder), `ipLocation: null` fuer Filme/Serien (Server-IP reicht, kein Viewer-IP-Trick noetig).
+- **Hoster:** Vidara, Vidsonic, Vidoza, Firestream, SuperVideo, Dropload, SaveFiles (direkt extrahierbar), DoodStream/VOE/FileMoon (unzuverlaessig, nach unten sortieren).
+- **Estimate:** Mittel. API ist simpler als HTML-Scraping, aber Signatur-Caching + Payload-Bau noetig.
+
+#### PHASE 3 — Weitere Hoster-Extraktoren (profitieren BEIDE Systeme)
+- **Warum:** Die fehlenden Streams sind blockierte Hoster (VOE, FileMoon, DoodStream), nicht fehlende Scraper. Bessere Extraktoren helfen .cs3-Plugin UND Stremio-Addon.
+- **Vorlage:** Gujal00/ResolveURL (Python, 227 Resolver, siehe RESOLVEURL-REPOS unten).
+- **Prioritaet pro Hoster:**
+  1. **VOE** (voesx.py): voe_decode (ROT+Base64+Caesar), 200+ Mirror-Domains. Prio 1 (haeufigster Hoster). Algorithmus in AGENTS.md bereits dokumentiert (siehe "VOE-EXTRACTOR: KOMPLETTE LOGIK").
+  2. **FileMoon** (filemoon?.py): dekompilieren/Reverse-Engineeren.
+  3. **DoodStream** (doodstream.py): dsplayer.hotkeys -> token -> /pass -> mp4. Algorithmus dokumentiert.
+  4. **Streamtape** (streamtape.py): linko-Algorithmus.
+- **Aufwand pro Hoster:** Python lesen -> Kotlin portieren -> (optional) TypeScript portieren -> curl testen -> TV testen.
+
+#### PHASE 4 — Stalker-VOD als .cs3-Plugin (wenn Nutzer Portal+MAC hat)
+- **Status:** Nutzer hat aktuell keine Portal-URL + MAC-Adresse. Kommt zum Schluss, wenn Daten verfuegbar.
+- **Warum es funktioniert (trotz ARVIOs Live-TV-only-Stalker):** Ein .cs3-Plugin bringt seine EIGENE Stalker-VOD-Logik mit (die 17 Methoden aus Ventix). ARVIOs eingebauter Stalker-Client (nur 4 Methoden, nur Live-TV) wird umgangen — das Plugin spricht direkt mit dem Stalker-Portal (getVodCategories, getVodList, createVodLink, getSeriesList, getSeasons).
+- **Vorlage:** `app/src/main/java/com/iptv/stalker/data/api/StalkerApi.kt` im Ventix-Repo (ReichiMD/IPTV-App, 17 Kotlin-Methoden, VOD+Serien+Seasons).
+- **Config-Seite:** Cloudstream3-Plugin-Settings fuer Portal-URL + MAC-Eingabe.
+- **Kein Bot-Schutz:** Stalker-Portale sind normale HTTP/JSON-APIs (wie FilmPalast, java.net.HttpURLConnection).
+- **Estimate:** Mittel. Kotlin-Code fertig in Ventix, muss an Cloudstream3-TmdbProvider-Format angepasst werden.
+
+#### PHASE 5 — Vavoo Live-TV als .cs3-Plugin (zuletzt, ungewiss)
+- **Warum zuletzt:** Cloudstream3-Plugins sind fuer VOD gebaut. Live-TV-Kataloge sind ein Spezialfall, ARVIO hat dafuer einen eigenen Code-Pfad. Ob .cs3-Plugins das koennen, ist NICHT verifiziert.
+- **Vorlage:** `src/source/VavooLive.ts` im Stremio-Addon (catalog.json + resolve.json API).
+- **Vorteil wenn es klappt:** Kein Viewer-IP-Trick noetig (laeuft direkt auf TV, IP ist automatisch richtig).
+- **Risiko:** mainPage-Kataloge in .cs3-Plugins hatten R8-Probleme (Erkenntnis #6, deshalb entfernt). Live-TV-Katalog wuerde mainPage brauchen. Ungewiss ob das funktioniert.
+- **Fallback:** Falls .cs3-Plugin Live-TV nicht kann, Stremio-Addon fuer Live-TV behalten (VavooLive.ts funktioniert dort zuverlaessig).
+
+### ZUSAMMENFASSUNG DER PHASEN
+| Phase | Scraper | Mehrwert | Aufwand | Status |
+|---|---|---|---|---|
+| 1 | KinoGer .cs3 | Heim-IP umgeht Render-403 | Mittel | TODO (naechste Session) |
+| 2 | Vavoo Filme/Serien .cs3 | API-basiert, zuverlaessig | Mittel | TODO |
+| 3 | Hoster-Extraktoren (VOE, FileMoon, etc.) | Mehr Streams in BEIDEN Systemen | Mittel pro Hoster | TODO |
+| 4 | Stalker-VOD .cs3 | Komplett neue Quelle! | Mittel | BLOCKED (Portal+MAC fehlen) |
+| 5 | Vavoo Live-TV .cs3 | Ein System, kein Render | Hoch/Risiko | TODO (zuletzt, ungewiss) |
+
+---
+
+## –ď—ě–í”Į–í“ó QUELLEN-REFERENZEN (alle Scraper-Quellen, Stand 16.08.2026)
+
+### Unser Stremio-Addon (funktionierendes Backup, TypeScript)
+- **Repo:** `ReichiMD/Stremio-Addon` (privat, Deployment auf Render: `https://stremio-stream-scraper.onrender.com`).
+- **Sprache:** TypeScript / Node.js (CommonJS) + Express.
+- **7 Scraper-Quellen registriert** (`src/source/index.ts`): MovieBox, VidSrc, VixSrc, **Vavoo** (Filme/Serien), **KinoGer**, **FilmpalastTO**, Einschalten.
+- **Vavoo Live-TV** (`src/source/VavooLive.ts`): separater Service (catalog.json + resolve.json), Viewer-IP-Trick (X-Forwarded-For).
+- **Vavoo Filme/Serien** (`src/source/Vavoo.ts`, 297 Zeilen): API-basiert (Ping -> Signatur -> mediahubmx-source.json), kein Bot-Schutz, `contentTypes: ['movie', 'series']`.
+- **14 Hoster-Extractoren** (`src/extractor/`): DoodStream, Dropload, ExternalUrl, Firestream, MediaFlow, MovieBox, SaveFiles, SuperVideo, VidSrc, Vidara, Vidoza, Vidsonic, VixSrc, Voe.
+- **Bekanntes Limit:** KinoGer wird von Render 403-blockiert (Server-IP). Lokal funktioniert es. .cs3-Plugin (Heim-IP) wuerde es loesen.
+- **AGENTS.md des Stremio-Addons:** enthaelt detaillierte Vavoo-API-Doku (Ping-Payload, mediahubmx-source.json Flow, Viewer-IP-Trick, Hoster-Priorisierung).
+
+### Ventix IPTV-App (Stalker-VOD-Vorlage, Kotlin)
+- **Repo:** `ReichiMD/IPTV-App` (privat).
+- **StalkerApi.kt:** `app/src/main/java/com/iptv/stalker/data/api/StalkerApi.kt` — 17 Kotlin-Methoden:
+  - Auth: `handshake`, `getProfile`, `activateSession`.
+  - Live-TV: `getGenres`, `getChannels`, `createChannelLink`, `getAllFavChannels`, `setFavChannels`.
+  - **VOD (Filme):** `getVodCategories`, `getVodList`, `createVodLink`, `setVodFav`.
+  - **Serien:** `getSeriesCategories`, `getSeriesList`, `getSeasons`, `setSeriesFav`.
+  - Sonstiges: `exportM3u`, `getEpgTable`, `sendWatchdog`.
+- **ARVIO-Vergleich:** ARVIOs `StalkerApi.kt` hat nur 4 Methoden (handshake, getProfile, getChannels, resolveStreamUrl) — nur Live-TV, kein VOD. Ventix hat die fehlenden 13 VOD/Serien-Methoden fertig.
+- **Stalker-API ist offener Standard:** `http://portal-url/stalker_portal/server/api/...` mit `mac=00:1A:...`, `type=stb`, `action=...`. Normale HTTP/JSON, kein Bot-Schutz.
+
+### resolveurl (Hoster-Extraktions-Logik, Python — Goldschatz)
+- **Repo:** `Gujal00/ResolveURL` (`https://github.com/Gujal00/ResolveURL`). Pfad: `script.module.resolveurl/lib/resolveurl/plugins/<hoster>.py`. Version 5.1.206. Letzter Commit 12.08.2026. AKTUELL.
+- **227 fertige Hoster-Resolver** in lesbarem Python (Regex, API-Endpoints, Decrypt-Methoden).
+- **Wichtig fuer uns:** voesx.py (VOE, voe_decode), vidsonic.py (hex+reverse, trivial!), firestream.py (token-blob POST API), supervideo.py (packed JS), doodstream.py (dsplayer.hotkeys).
+- **Klonen bei Bedarf:** `git clone --depth 1 https://github.com/Gujal00/ResolveURL.git /tmp/resolveurl` (nicht persistent, bei Reset neu klonen).
+- **VERALTET (nicht nutzen):** `jsergio123/script.module.resolveurl` (2020, 6 Jahre alt).
+
+### xStream / michaz (Filmpalast + KinoGer + Vavoo Vorlagen, Python)
+- **Repo:** `michaz1988/michaz1988.github.io` (`https://github.com/michaz1988/michaz1988.github.io`).
+- **Enthaelt:** `script.module.xstreamscraper` (Filmpalast/KinoGer/HDFilme-Scraper, Python), `plugin.video.vavooto` (Vavoo-Kodi-Addon, Vorlage fuer Vavoo-API), `plugin.video.xship` (xStream-Nachfolger).
+- **DDoS-Guard-Bypass** (requestHandler.py:255-275): check.js Image-Trick — ABER veraltet, reicht fuer neuere Serienstream-Turnstile nicht mehr.
+
+### GermanProviders (Cloudstream3-Plugin-Vorlagen, Kotlin)
+- **Repo:** `Bnyro/GermanProviders` (`https://raw.githubusercontent.com/Bnyro/GermanProviders/refs/heads/master/repo.json`).
+- **21 fertige Cloudstream3-Plugins:** ARD, Aniworld, Arte, C3TV, Discovery, EinschaltenIn, FilmPalast, HDFilme, HuhuTo, IptvOrg, KinoKing, Kinoger, Megakino, Moflix, Netzkino, PlutoTV, Serienstream, Southpark, SpiegelTV, Welt, Xcine.
+- **Aufbau-Referenz:** root build.gradle.kts mit cloudstream3-gradle-plugin, pro Provider ein Modul-Ordner. Status=1 (wichtig!).
+- **ABER:** GermanProviders-Scraper sind search-based (kein TmdbProvider) → ARVIOs fragiles findBestMatch-Title-Matching. Wir nutzen TmdbProvider (direkter Pfad, zuverlaessiger).
+
+### seizu/plugin.video.filmpalast.ex (Filmpalast Kodi-Plugin, Python)
+- **Repo:** `seizu/plugin.video.filmpalast.ex` (`https://github.com/seizu/plugin.video.filmpalast.ex`).
+- **Nutzt resolveurl** fuer Hoster-Aufloesung. Referenz fuer Filmpalast-Scraper-Logik.
+
+### stubebox / STUBE.BOX.LEGACY 2 (analysiert 16.08.2026, NICHT als Vorlage nutzbar)
+- **Quelle:** archive.org „STUBE.BOX.LEGACY 2" APK (68 MB). Eingebettetes Kodi-Repo: `gok.bplaced.net/.stubeboxle/repo/`.
+- **3 Addons:** vavoobox (Vavoo Live-TV), stalker.macsimum (Stalker Live-TV+VOD), script.mediabox (Hilfsskript).
+- **NICHT nutzbar:** Alle Addons nutzen „BadEncodeX"-Verschlüsseler (.pyc mit eval/exec/__import__/_rasputin). Code zur Laufzeit entschluesselt, statisch nicht auslesbar.
+- **Vavoo-Auth gefunden:** `https://www.vavoo.tv/api/box/ping2` (proprietäre Cloud-API, nicht offen wie MediaHubMX).
+- **Vavoo settings.xml:** nur „Stream Auswahl", keine Portal/MAC-Eingabe (Vavoo funktioniert anders als Stalker).
+- **Fazit:** stubebox beweist, dass Stalker-VOD mit URL/MAC-Wechsel in der Praxis laeuft — aber der Code ist verschluesselt und nicht als Vorlage nutzbar. Ventix-StalkerApi (offen, Kotlin) ist die bessere Vorlage.
+
+### ARVIO-Referenz (Ziel-App)
+- **Repo:** `ProdigyV21/ARVIO` (`https://github.com/ProdigyV21/ARVIO`). Version v1.9.994 (15.08.2026). Sideload-APK fuer Plugin-Support.
+- **Klonen:** `git clone --depth 1 https://github.com/ProdigyV21/ARVIO.git /tmp/arvio_ref` (nicht persistent).
+- **Obfuskations-Map (verifiziert, v1.9.983 + v1.9.994 identisch):** kotlin.coroutines.Continuation→j7/d, CoroutineContext→j7/j, Function1→x7/l, Function→d7/o, okhttp3.Interceptor→rb/c0, ContinuationInterceptor→j7/g, ContinuationInterceptor.Key→j7/f.i (Feld verschoben). Siehe ERKENNTNIS #7-#12.
+- **ARVIO StalkerApi** (`app/src/main/kotlin/com/arflix/tv/data/api/StalkerApi.kt`): nur 4 Methoden (handshake, getProfile, getChannels, resolveStreamUrl) — nur Live-TV, kein VOD.
+- **ARVIO IptvRepository** (`app/src/main/kotlin/com/arflix/tv/data/repository/IptvRepository.kt`, 8249+ Zeilen): Xtream Codes VOD (getVodCategories, getSeriesCategories) — aber Xtream, nicht Stalker. Stalker-VOD fehlt komplett.
