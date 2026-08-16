@@ -910,6 +910,48 @@ Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereit
 3. (ehemals Touch-Bug Add-Repo-Dialog - BEHOBEN in 1.9.994, Nutzer bestaetigt).
 AI-Disclosure-Pflicht bei Issue/Kommentar: "created by an AI agent (OpenHands) on behalf of [user]".
 
+### EMPFOHLENE SCHRITTWEISE STRATEGIE (Stand 16.08.2026, nach Serienstream-Modul v31)
+
+**VORBEMERKUNG — Prio 1-3 sind bereits erledigt:** Bei Durchsicht des FilmPalast-Codes (v30) zeigt sich, dass die AGENTS.md-Prio-Liste Prio 1-3 bereits implementiert sind (und ins Serienstream-Modul v31 übernommen wurden):
+- Prio 1 (Qualitaetserkennung): `detectQuality()` in beiden Providern — fetcht m3u8-Manifest, parst `RESOLUTION=WxH`, mappt auf hoechste Variante (P2160/P1080/P720/P480/P360), mp4-Default P720. ARVIO zeigt echte Aufloesung, Auto-Play-Score > 0.
+- Prio 2 (TMDB-Cache): `tmdbCache = ConcurrentHashMap<Int, TmdbMeta>()` in beiden Providern.
+- Prio 3 (parallele Hoster-Aufloesung): `Executors.newFixedThreadPool(minOf(n,4))` mit 2-3s Future-Timeouts in beiden Providern.
+→ Meilenstein „unter 2s Auto-Play-Timeout" auf Code-Ebene erreicht. Was bleibt = TV-Validierung + Prio 4.
+
+**REIHENFOLGE (aktualisiert):**
+
+#### PHASE 0 — Serienstream-TV-Test (JETZT, naechste Session, entscheidend)
+Warum vor Prio 4: Das gerade gebaute Serienstream-Modul (v31, Option A) ist der kritische Pfad. Der DDoS-Guard-Bypass wurde nur vom Laptop getestet (dort blockiert — Erkenntnis #19). Ob der TV durchkommt (andere IP/Wohn-IP), entscheidet, ob wir Serienstream-Quellen haben und ob Option B noetig wird.
+1. Nutzer folgt `docs/windows-10-test-guide.md` (WLAN-ADB + Logcat am TCL C7K).
+2. In ARVIO: **Repo loeschen + neu hinzufuegen DIREKT** (nicht Cloud-Sync — Erkenntnis #1) mit `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`.
+3. `adb logcat -c`, Serienstream-Scraper einschalten.
+4. Serie suchen (z.B. „Silo"), Quellensuche ausloesen, 15s warten.
+5. Log speichern (`~/save-tv-log.sh` oder `adb logcat -v time > arvio-tv-log-v31.txt`), filtern: `findstr /i "Serienstream ArvioAddon ExtExt Error No.API load verify dex DDoS ddg resolve"`.
+6. **Entscheidung anhand des Logs:**
+   - `Serienstream`/`ArvioAddon`-Eintraege -> Scraper laeuft.
+   - `resolveHost: ... final=<hoster-URL>` -> DDoS-Guard durchbrochen! (Option A erfolgreich) -> Quelle emittiert -> ZIEL.
+   - `0 links collected` / `final=...serienstream.to/r?...` -> DDoS-Guard blockt weiterhin -> **Option B noetig** (Prio 4b).
+   - `Failure to verify dex` / `No API loaded` -> DEX/Dispatch-Problem (unwahrscheinlich, gleiche Bau-Config wie FilmPalast v30).
+
+#### PRIO 4a — Weitere FilmPalast-Hoster (niedrig, bei Bedarf)
+Reihenfolge laut HOSTER-PRIORITAETEN-Tabelle: VOE (✅ v30), vidsonic (✅ v29), firestream (✅ v30). Verbleibend: Supervideo/VidHide/FileMoon nur falls neue Filmpalast-Hoster-Domains auftreten. Workflow: resolveurl Python lesen -> Kotlin portieren -> curl testen.
+
+#### PRIO 4b — Serienstream Option B (nur falls Phase 0 scheitert)
+Nur falls TV-Test zeigt, dass `/r?` blockiert bleibt:
+1. **GitHub-Recherche** (Task 6, Nutzer explizit angefordert): Suche „ddos-guard bypass", „ddos-guard js challenge solver", cloudscraper-Aequivalent fuer DDoS-Guard (nicht Cloudflare). Repos: `VeNoMouS/cloudscraper` (Cloudflare, nicht DDG), dedizierte DDG-Solver.
+2. Falls Solver gefunden: Algorithmus nach Kotlin portieren (java.net + Regex + ggf. JS-Engine — Achtung: JS-Engine koennte R8-Probleme verursachen wie app.get).
+3. Falls kein Solver: **view.js-Challenge reverse-engineeren** (offline): Challenge-Seite fetchen, JS deobfuszieren, Token-Berechnung nachvollziehen, in Kotlin nachbauen.
+4. In `httpGet` einbauen: bei 403+DDoS-Guard -> Solver -> retry.
+
+#### PRIO 4c — GitHub-Issue bei ARVIO (nach Phase 0, professionell)
+Status: NOCH NICHT eroeffnen — erst nach Serienstream-TV-Test, damit das Issue Beweise enthaelt. Drei dokumentierte Bugs:
+1. R8 obfuscated Continuation/okhttp3 + stript kotlin-reflect + DefaultConstructorMarker (Haupt-Bug, Erkenntnis #7+#13+#14+#15+#16+#18).
+2. Cloud-Sync-Restore laedt .cs3-Dateien nicht herunter (Erkenntnis #1).
+3. ~~Touch-Bug~~ — behoben in 1.9.994.
+Vorgehen (Vorbild Issue #537): Environment -> Summary -> Steps to reproduce -> Expected vs. Actual -> Root cause (mit Code-Verweis) -> Proposed fix -> References (#459, #273, #500) -> Logcat-Auszug -> **AI-Disclosure**. Optional: Fork + Fix-PR (ProGuard-Regel fuer `kotlin.coroutines.Continuation` + `kotlin.jvm.functions.*` unobfusziert).
+
+**ZUSAMMENFASSUNG:** Flaschenhals = Phase 0 (TV-Test). Alles Weitere (Option B, Issue) haengt vom TV-Test-Befund ab. Sobald der Nutzer den TV erreichter kann, sollte Phase 0 an erster Stelle stehen.
+
 ### NEUE ARVIO-VERSION v1.9.994 (15.08.2026)
 ARVIO v1.9.994 heute veroeffentlicht. VERIFIZIERT: Obfuskations-Map UNVERAENDERT (j7/d immer noch Continuation, rb/c0 immer noch okhttp3.Interceptor) -> unsere DEX-Patches funktionieren weiterhin. Neue nuetzliche Features: "Refresh Add-ons"-Aktion (#511, Plugin-Update ohne Loeschen/Neu-Hinzufuegen), "Fixed release dependency injection for sideload builds" (#525). Release-Notes erwaehnen NICHT den Cloudstream3-.cs3-Plugin-Obfuskations-Bug -> Kernproblem von ARVIO nicht geloest, nur unsere Patches bleiben kompatibel. Nutzer kann auf 1.9.994 updaten (sicher).
 - Letzter Commit auf `main`: v17 (Fix #10, pre-d8 .class patching). Builds-Version: 17.
