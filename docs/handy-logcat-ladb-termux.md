@@ -166,9 +166,87 @@ Das Skript macht automatisch:
 
 ---
 
+## Variante: Nur mit Termux (ohne LADB, ohne Shizuku) — die robusteste Methode
+
+Wenn LADB beim Pairing zickt („no devices/emulators found") oder du keine zweite App installieren willst: Termux kann sich selbst über ADB pairen und verbinden. Das ist am zuverlässigsten, weil alles in einem Fenster läuft (kein Tab-Wechsel-Problem).
+
+### Einrichtung (einmalig)
+
+**1 — adb-Werkzeug in Termux installieren:**
+```
+pkg update && pkg install android-tools
+```
+(falls „Do you want to continue?" fragt: `y` + Enter)
+
+**2 — Termux Speicherzugriff geben:**
+```
+termux-setup-storage
+```
+→ Dialog „Termux darf auf Dateien zugreifen" → **Zulassen**.
+
+**3 — Fertig-Skript installieren:**
+```
+curl -sL https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/docs/save-tv-log.sh -o ~/save-tv-log.sh && chmod +x ~/save-tv-log.sh
+```
+
+**4 — Mit dem Handy pairen + verbinden + Berechtigung geben (einmalig):**
+
+- **4a** — Entwickleroptionen → Drahtloses Debugging → „Gerät mit Pairing-Code koppeln" tippen → Fenster offen lassen. Du siehst **IP:Pairing-Port** (z. B. `192.168.0.239:45357`) und **6-stelligen Code**.
+- **4b** — In Termux pairen (IP+Pairing-Port aus dem Fenster einsetzen):
+  ```
+  adb pair 192.168.0.239:45357
+  ```
+  → `Enter pairing code:` → 6-stelligen Code eingeben → Enter.
+  → `Successfully paired to ...` = geklappt. Das Pairing-Fenster am Handy schließt sich von selbst.
+- **4c** — In Termux verbinden (WICHTIG: hier **Port 5555**, NICHT den Pairing-Port):
+  ```
+  adb connect 192.168.0.239:5555
+  ```
+  → muss kommen: `connected to 192.168.0.239:5555`
+  > Falls `5555` nicht geht: In den Entwickleroptionen oben unter „Drahtloses Debugging" steht eine „IP-Adresse & Port"-Zeile. Nimm **genau den Port** daraus (oft 5555, manchmal 3xxxx). Falls am Handy ein Dialog „USB-Debugging zulassen?" poppt → **Zulassen**.
+- **4d** — Verbindung prüfen:
+  ```
+  adb devices
+  ```
+  → muss zeigen: `192.168.0.239:5555  device`
+- **4e** — Berechtigung geben (der einmalige Befehl):
+  ```
+  adb shell pm grant com.termux android.permission.READ_LOGS
+  ```
+  → keine Ausgabe = geklappt.
+- **4f** — Verbindung trennen (aufräumen):
+  ```
+  adb disconnect
+  ```
+
+**5 — Prüfen, ob die Berechtigung da ist:**
+```
+logcat -d | head
+```
+- Siehst du viele Textzeilen → **geschafft**. Die Einrichtung ist fertig, du brauchst sie nie wieder.
+- Steht „permission denied" → zurück zu Schritt 4.
+
+### Test-Ablauf (jedes Mal, wenn du testest)
+
+Jetzt nur noch Termux, ganz normal (kein adb-Pairing mehr nötig, die Berechtigung bleibt):
+
+```
+logcat -c
+```
+(dann ARVIO: Scraper an, Matrix/Silo suchen, „Nach Quellen suchen", 15s warten)
+```
+logcat -d -v time | grep -iE "Filmpalast|Serienstream|Kinoger|ArvioAddon|ExternalExtension|No API loaded|ErrorLoading|verify dex|resolveHost|resolveIncvideo|loadLinks|httpGet" > ~/storage/downloads/arvio-logs/arvio-handy-log.txt
+```
+Datei in Downloads/arvio-logs/ → lange drücken → Teilen → in den Chat hochladen.
+
+> Wichtig: `adb pair` (mit Pairing-Port) brauchst du **nur einmal** zum Einrichten. Danach bleibt die READ_LOGS-Berechtigung dauerhaft — du brauchst beim Testen nur noch `logcat`, kein adb mehr.
+> Nach einem **Handy-Neustart** wird die ADB-Verbindung getrennt, aber die Berechtigung bleibt. Falls du adb wieder brauchst (z. B. um die Berechtigung nochmal zu setzen): Drahtloses Debugging wieder AN, dann `adb connect <IP>:5555` (ohne erneutes Paaren, das Pairing bleibt gespeichert).
+
+---
+
 ## Variante: Handy-Logcat OHNE TV (nur Handy testen)
 
-Das `save-tv-log.sh`-Skript versucht standardmäßig, sich mit dem TV zu verbinden. Wenn du **nur am Handy** testest (ARVIO läuft ja auch auf dem Handy), nutze stattdessen diese direkte Befehlsfolge in Termux:
+Das `save-tv-log.sh`-Skript versucht standardmäßig, sich mit dem TV zu verbinden. Wenn du **nur am Handy** testest (ARVIO läuft ja auch auf dem Handy), nutze stattdessen die direkte Befehlsfolge aus dem „Nur mit Termux"-Abschnitt oben (Test-Ablauf):
 ```
 logcat -c
 ```
