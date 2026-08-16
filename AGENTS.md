@@ -645,26 +645,93 @@ Nutzer kann ab sofort auch auf dem HANDY testen (UI-Bug behoben). Fuer Logcat oh
 
 ### NAECHSTE SCHRITTE (Stand 15.08.2026, fuer naechste Session)
 
-**MEILENSTEIN ERREICHT: v25 liefert die ERSTE Filmpalast-Quelle in ARVIO!** (odysseusa.cc master.m3u8, `1 links collected`, `returned 1 results`). ExtractorLink primary-ctor + catch(Throwable) hat funktioniert. Naechstes Ziel = Quellenvielfalt (VOE als häufigster Hoster).
+**MEILENSTEIN ERREICHT: v25 liefert Filmpalast-Quellen in ARVIO, Playback startet!** (odysseusa.cc master.m3u8, `1 links collected`, `returned 1 results`, Nutzer bestaetigt: Video startet). Naechstes Ziel = Quellenvielfalt (weitere Hoster).
 
-**Prio 1 - VOE-Extractor verbessern (höchster ROI für Quellenvielfalt):**
-- v25-Log zeigt: `httpGet: https://voe.sx/h2dxd1h0sxbr -> 404 (118949 bytes)` + `resolveVoe: found=false`.
-- Das 404 ist kein echtes 404 — die 118949 Bytes sind die DDoS-Guard-Challenge-Seite (oder die echte Embed-Seite hinter der Challenge). Vom Server (curl) kommen nur 902 Bytes (Challenge), aber das Geraet bekommt 118949 Bytes (kommt durch).
-- **Problem:** resolveVoes Regex-Patterns matchen nicht den tatsaechlichen Seiteninhalt. VOE versteckt m3u8 in: eval(packer), base64-dekodiertem JS, oder `"hls":"..."` JSON-Blob.
-- **Loesung:** Debug-Logging in resolveVoe hinzufuegen: erste 500-1000 Zeichen des Response-Body ins Logcat schreiben. Dann sehen wir genau welches Pattern VOE aktuell nutzt -> Regex anpassen.
-- Alternativ: VOE-Embed-Seite vom Geraet-logcat extrahieren (die 118949 Bytes). Aber gefiltertes Log enthaelt die nicht -> ungefiltertes Log noetig ODER Debug-Logging.
-- **Wert:** VOE ist der häufigste Hoster auf deutschen Scraper-Seiten. Wenn VOE klappt, haben die meisten Filme/Serien mind. 2 Quellen (odysseusa + voe).
+### BESTE METHODE FUER WEITERE HOSTER (entscheidend, 15.08.2026)
+
+**Drei Methoden verglichen, Empfehlung = B+C kombiniert (A als Fallback):**
+
+**Methode A: Logcat Debug-Logging** (urspruenglicher Vorschlag)
+- Plugin schreibt erste ~500 Zeichen der Embed-Seite ins Logcat -> sieht was das Geraet erhaelt.
+- Pro: Zeigt tatsaechlichen Geraet-Response (DDoS-Guard wird auf Geraet durchgegangen).
+- Con: Geraet-Roundtrip fuer JEDEM Hoster noetig (langsam, Nutzer muss testen+loggen).
+- Best for: Hoster MIT Bot-Schutz (VOE, flyfile) wo curl nur Challenge-Seite bekommt.
+
+**Methode B: Built-in cloudstream3-Extractoren dekompilieren** (BESTE METHODE, neu entdeckt) ⭐
+- Die cloudstream3-library hat BEREITS funktionierende Extractoren fuer Voe, Supervideo, VidHidePro, Firestream, FileMoon usw.! Ihre Extraktionslogik (Regexes, API-Endpoints, JS-Unpacking, Decrypt) ist im Bytecode.
+- Wir koennen sie NICHT direkt nutzen (suspend-Methoden broken, Erkenntnis #16), ABER wir koennen ihre LOGIK in unsere non-suspend `resolveXxx()`-Funktionen portieren.
+- Vorgehen: `javap -c -p -constants` auf cloudstream.jar-Extractor-Klassen -> String-Konstanten + Methoden-Aufrufe zeigen genau: welche Regex, welcher CSS-Selector, welcher API-Endpoint, welche Decrypt-Methode.
+- Pro: KEIN Reverse-Engineering von noetaendig — cloudstream3 hat es schon gemacht! KEIN Geraet-Roundtrip zum Verstehen der Logik noetig. Schnellste Methode.
+- Con: Decrypt-Methoden (wie Voe.decryptF7) koennen komplex sein -> Bytecode lesen.
+- Best for: ALLE bekannten Hoster (Voe, Supervideo, VidHide, Firestream, FileMoon).
+
+**Methode C: Direkt curl vom Server** (schnellstes Testen)
+- `curl -A "<mobileUA>" <embed-URL>` -> Embed-Seite direkt holen.
+- Pro: Sekunden-Schnelle Iteration, kein Geraet noetig.
+- Con: Hoster MIT Bot-Schutz (DDoS-Guard, Cloudflare) blockieren Server-IPs -> nur Challenge-Seite (VOE: 902 Bytes vom Server vs 118949 Bytes vom Geraet).
+- Best for: Hoster OHNE Bot-Schutz (odysseusa: so geknackt!; Firestream: wahrscheinlich auch).
+
+**EMPFOHLENER WORKFLOW PRO HOSTER:**
+1. `javap -c -p -constants` auf die built-in cloudstream3-Extractor-Klasse -> Algorithmus verstehen (Regex, API, Decrypt). **Kein Geraet noetig.**
+2. Logik in non-suspend `resolveXxx()` portieren (java.net + jsoup + org.json).
+3. Mit `curl` vom Server testen (wenn kein Bot-Schutz: funktioniert sofort; wenn Bot-Schutz: siehe Schritt 4).
+4. Falls Bot-Schutz (curl bekommt nur Challenge): Debug-Logging ins Plugin, auf Geraet testen (das Geraet kommt durch, wie VOE 118949B zeigt). Logcat zeigt die echte Seite -> Regex validieren.
+
+### VOE-EXTRACTOR ANALYSE (dekompiliert aus cloudstream3 Voe.class, 15.08.2026)
+
+VOE-Extraktionsalgorithmus (aus Bytecode rekonstruiert):
+1. GET embed-Page (voe.sx/<id>)
+2. Redirect-Check: Regex `window.location.href\s*=\s*'([^']+)';` in `document.data()` -> falls Match: neuer GET auf redirect-URL.
+3. `document.selectFirst("script[type=application/json]")` -> `element.data()` (JSON-Inhalt).
+4. Encoded-String extrahieren: `substringAfter('["')` + `substringBeforeLast('"]')` (nimmt den String zwischen `["` und `"]`).
+5. **`decryptF7(encodedString)`** -> `VoeDecrypted(source, directAccessUrl)`:
+   - `source` = m3u8-URL -> M3u8Helper.generateM3u8() mit Header `Origin: <mainUrl>/`
+   - `directAccessUrl` = mp4-URL -> direkter ExtractorLink (type=VIDEO, name+" MP4")
+6. Falls `source` null + `directAccessUrl` null: "encoded string not found." -> Fehler.
+
+**Der Schluessel: `decryptF7(String)`** — custom Decrypt-Methode (private final in Voe.class). Muss dekompiliert werden, um die genaue Logik zu sehen (wahrscheinlich base64 + XOR/Substitution). Naechster Schritt: `javap -c -p` auf die decryptF7-Methode im Detail.
+
+**Warum VOE auf dem Geraet 118949 Bytes bekommt (vs 902 vom curl):** Das Geraet kommt durch DDoS-Guard (andere IP/Header/Cookies). Die 118949 Bytes sind die ECHTE Embed-Seite mit dem `script[type=application/json]`-Tag. Unsere resolveVoe suchte nach direkten hls/mp4-URLs und p.a.c.k.e.r'd eval — das ist FALSCH. VOE nutzt `script[type=application/json]` + decryptF7. **Fix: resolveVoe auf diesen Algorithmus umstellen.**
+
+### HOSTER-PRIORITAETEN (Stand 15.08.2026)
+
+| Hoster | Built-in Extractor? | Bot-Schutz? | Algorithmus bekannt? | Aufwand | Prioritaet |
+|---|---|---|---|---|---|
+| odysseusa.cc | Nein (eigene API) | Nein | Ja (POST /api/stream) | ERLEDIGT v24 | ✅ Done |
+| **voe.sx** | Ja (Voe.class) | Ja (DDoS-Guard) | Ja (script[json]+decryptF7) | Mittel (decryptF7 portieren) | **Prio 1** ⭐ |
+| firestream.to | Ja (Firestream.class) | ? | Teilweise (VideoResponse-Klasse) | Mittel | Prio 2 |
+| filemoon.sx | Ja (FileMoonSx.class) | ? | ? (dekompilieren) | Mittel | Prio 3 |
+| supervideo.cc | Ja (Supervideo.class) | ? | ? (dekompilieren) | Mittel | Prio 3 |
+| vidhide.com | Ja (VidHidePro.class) | ? | ? (dekompilieren) | Mittel | Prio 3 |
+| vidsonic.net | Nein | Nein | Nein (obfuscated JS) | Hoch | Niedrig |
+| flyfile.app | Nein | Ja (Cloudflare) | Nein | Hoch | Niedrig |
+
+**VOE hat hoechste Prioritaet** weil es der häufigste Hoster auf deutschen Scraper-Seiten ist. Wenn VOE klappt, haben die meisten Filme/Serien mind. 2 Quellen (odysseusa + voe).
+
+### VOE-IMPLEMENTATIONSPLAN (fuer naechste Session)
+
+1. `javap -c -p -constants com/lagradost/cloudstream3/extractors/Voe.class` -> `decryptF7`-Methode im Detail dekompilieren (Base64? XOR? Substitution?).
+2. `decryptF7` in Kotlin nachbauen (java.util.Base64 + ggf. XOR-Schleife).
+3. `resolveVoe` neu schreiben:
+   - GET embed-URL (bereits vorhanden)
+   - Jsoup: `doc.selectFirst("script[type=application/json]")` -> `data()`
+   - `substringAfter('["')` + `substringBeforeLast('"]')`
+   - `decryptF7(encoded)` -> source (m3u8) / directAccessUrl (mp4)
+   - `emitLink` mit `Origin: voe.sx` Header (wichtig fuer VOE-Server!)
+4. Mit curl testen (Server bekommt nur DDoS-Guard, aber Algorithmus-Logik kann validiert werden).
+5. Auf Geraet testen (Geraet kommt durch DDoS-Guard -> echte Seite -> decryptF7 -> m3u8).
+6. Version bumpen, CI, builds, testen.
+
+**WICHTIG fuer VOE:** `Origin: voe.sx` Header muss im ExtractorLink gesetzt werden (headers-Parameter), sonst lehnt der VOE-CDN die m3u8 ab (CORS/Referer-Check). Aktuell setzt emitLink `headers=emptyMap()` — fuer VOE muesste das `mapOf("Origin" to "https://voe.sx")` sein.
 
 **Prio 2 - Playback verifizieren:**
-- v25 lieferte 1 Quelle an ARVIO (`returned 1 results`). Noch nicht bestaetigt: ob der User die Quelle in ARVIOs Quellenauswahl SIEHT und ob PLAYBACK startet (m3u8 wird abgespielt).
-- Nutzer bestaetigen lassen: Quelle sichtbar? Playback startet? Falls ja: **Ziel komplett erreicht.**
-- Falls Playback nicht startet: m3u8-URL ist temporaer (token mit IP gebunden). Token enthaelt `213.211.234.31` (Geraet-IP) + Timestamp -> m3u8 ist nur kurz gueltig. Sollte aber fuer sofortiges Playback reichen.
+- v25: Nutzer bestaetigt "Ja ich kann das Video starten." -> **PLAYBACK FUNKTIONIERT! Ziel komplett erreicht.**
+- m3u8-URL mit token (IP-gebunden + timestamp) funktioniert fuer sofortiges Playback.
 
 **Prio 3 - Weitere Hoster (Firestream, FileMoon, etc.):**
-- Jeder Hoster braucht individuellen java.net-Extractor (built-in cloudstream3-Extractoren sind suspend -> broken fuer .cs3-Plugins, Erkenntnis #16).
-- Firestream: hat `VideoResponse`-Klasse -> wahrscheinlich API-basiert wie odysseusa -> MEDIUM.
-- FileMoon/Supervideo/VidHide: typischerweise packed JS -> MEDIUM-NIEDRIG.
-- Pattern ist bewiesen (odysseusa): Embed-Seite fetchen -> API/JS analysieren -> m3u8/mp4 extrahieren -> emitLink. Replizierbar, aber Einzelaufwand pro Hoster.
+- Jeder Hoster: Methode B (javap dekompilieren) + Methode C (curl testen) + ggf. Methode A (Geraet-Debug).
+- Built-in Extractoren sind suspend -> broken, aber LOGIK ist portierbar.
+- Pattern ist bewiesen (odysseusa): Embed-Seite fetchen -> API/JS analysieren -> m3u8/mp4 extrahieren -> emitLink. Replizierbar.
 
 **Prio 4 - GitHub-Issue bei ARVIO (noch NICHT eroeffnen):**
 Siehe unten "Entscheidung Nutzer: GitHub-Issue bei ARVIO professionell vorbereiten". Drei klare Bugs:
