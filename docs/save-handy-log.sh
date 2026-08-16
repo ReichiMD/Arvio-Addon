@@ -60,6 +60,3 @@ else
   echo "  Datei lange druecken -> Teilen -> in Chat hochladen"
 fi
 echo "=============================================="
-echo
-echo "--- Vorschau (erste 20 Zeilen) ---"
-head -20 "$HOME/${LOG_FILE}"
