@@ -781,8 +781,11 @@ class FilmpalastProvider : TmdbProvider() {
         return try {
             val res = httpGet(url, headers = mapOf("Range" to "bytes=0-8192"))
             if (res.code !in 200..299 && res.code != 206) return Qualities.P720.value
-            val m = Regex("RESOLUTION=(\\d+)x(\\d+)", RegexOption.IGNORE_CASE).find(res.text)
-            val h = m?.groupValues?.get(2)?.toIntOrNull() ?: return Qualities.P720.value
+            // A master.m3u8 may list MULTIPLE variants (480p/720p/1080p/4K). Take the HIGHEST
+            // resolution available (not the first), so we report the best quality the stream offers.
+            val heights = Regex("RESOLUTION=(\\d+)x(\\d+)", RegexOption.IGNORE_CASE)
+                .findAll(res.text).mapNotNull { it.groupValues[2].toIntOrNull() }.toList()
+            val h = heights.maxOrNull() ?: return Qualities.P720.value
             when {
                 h >= 2160 -> Qualities.P2160.value
                 h >= 1080 -> Qualities.P1080.value
