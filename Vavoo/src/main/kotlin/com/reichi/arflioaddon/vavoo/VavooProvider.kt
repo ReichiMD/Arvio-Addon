@@ -565,7 +565,9 @@ class VavooProvider : TmdbProvider() {
         if (m1 != null) {
             val ct = m1.groupValues[1]
             val jsUrlRaw = m1.groupValues[2]
-            val jsUrl = if (jsUrlRaw.startsWith("http")) jsUrlRaw else "$currentUrl/$jsUrlRaw".replace("//", "/")
+            val jsUrl = if (jsUrlRaw.startsWith("http")) jsUrlRaw
+                else try { java.net.URL(java.net.URL(currentUrl), jsUrlRaw).toString() }
+                catch (_: Throwable) { "$currentUrl/$jsUrlRaw" }
             DebugLog.t(dbg, "resolveVoe: Pattern 1 match, ct len=${ct.length}, jsUrl=$jsUrl")
             val jsRes = httpGet(jsUrl, headers = mapOf("User-Agent" to mobileUA))
             val lutMatch = Regex("""(\[(?:'\W{2}'[,\]]){1,9})""").find(jsRes.text)
