@@ -1013,22 +1013,68 @@ class KinogerProvider : TmdbProvider() {
      * real resolution and Auto-Play scores the stream. See FilmpalastProvider.detectQuality.
      */
     private fun detectQuality(url: String): Int {
+        val isM3u8 = url.contains(".m3u8")
+        val urlQuality = qualityFromUrl(url)
+        if (!isM3u8) return urlQuality ?: Qualities.P720.value
+        if (urlQuality != null) return urlQuality
         return try {
-            val res = httpGet(url, headers = mapOf("Range" to "bytes=0-8192"))
+            var res = httpGet(url, headers = mapOf("Range" to "bytes=0-16384"))
             if (res.code !in 200..299 && res.code != 206) return Qualities.P720.value
+            val redir = Regex("window\\.location\\.replace\\('([^']+)'").find(res.text)
+            if (redir != null) {
+                res = httpGet(redir.groupValues[1], headers = mapOf("Range" to "bytes=0-16384"))
+                if (res.code !in 200..299 && res.code != 206) return Qualities.P720.value
+            }
             val heights = Regex("RESOLUTION=(\\d+)x(\\d+)", RegexOption.IGNORE_CASE)
                 .findAll(res.text).mapNotNull { it.groupValues[2].toIntOrNull() }.toList()
-            val h = heights.maxOrNull() ?: return Qualities.P720.value
-            when {
-                h >= 2160 -> Qualities.P2160.value
-                h >= 1080 -> Qualities.P1080.value
-                h >= 720 -> Qualities.P720.value
-                h >= 480 -> Qualities.P480.value
-                else -> Qualities.P360.value
-            }
+            val h = heights.maxOrNull()
+            if (h != null) return heightToQuality(h)
+            val bw = Regex("BANDWIDTH=(\\d+)", RegexOption.IGNORE_CASE)
+                .findAll(res.text).mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull()
+            if (bw != null) return bandwidthToQuality(bw)
+            Qualities.P720.value
         } catch (t: Throwable) {
             DebugLog.w(dbg, "detectQuality: '$url' threw ${t.javaClass.name}: ${t.message}")
             Qualities.P720.value
         }
+    }
+
+    /** Extract a quality value from quality markers in the URL/path (1080p, 720p, 4K, 2160p, ...). */
+    private fun qualityFromUrl(url: String): Int? {
+        val u = url.lowercase()
+        if (u.contains("2160p") || u.contains(".4k.") || u.contains("4k-") || u.contains("-4k") ||
+            u.contains("ultrahd") || u.contains("uhd.") || u.contains(".uhd") || u.contains("2160."))
+            return Qualities.P2160.value
+        if (u.contains("1440p")) return Qualities.P1440.value
+        if (u.contains("1080p") || u.contains("1080.") || u.contains("1080-") || u.contains("-1080"))
+            return Qualities.P1080.value
+        if (u.contains("720p") || u.contains("720.") || u.contains("720-") || u.contains("-720"))
+            return Qualities.P720.value
+        if (u.contains("480p") || u.contains("480.") || u.contains("480-") || u.contains("-480"))
+            return Qualities.P480.value
+        if (u.contains("360p") || u.contains("360.") || u.contains("360-") || u.contains("-360"))
+            return Qualities.P360.value
+        if (u.contains("240p")) return Qualities.P240.value
+        return null
+    }
+
+    /** Map a video height to the nearest cloudstream3 Qualities value. */
+    private fun heightToQuality(h: Int): Int = when {
+        h >= 2160 -> Qualities.P2160.value
+        h >= 1440 -> Qualities.P1440.value
+        h >= 1080 -> Qualities.P1080.value
+        h >= 720 -> Qualities.P720.value
+        h >= 480 -> Qualities.P480.value
+        h >= 360 -> Qualities.P360.value
+        else -> Qualities.P240.value
+    }
+
+    /** Estimate a quality from BANDWIDTH (bits/s) when no RESOLUTION line is available. */
+    private fun bandwidthToQuality(bw: Int): Int = when {
+        bw >= 15_000_000 -> Qualities.P2160.value
+        bw >= 8_000_000 -> Qualities.P1080.value
+        bw >= 4_000_000 -> Qualities.P720.value
+        bw >= 2_000_000 -> Qualities.P480.value
+        else -> Qualities.P360.value
     }
 }

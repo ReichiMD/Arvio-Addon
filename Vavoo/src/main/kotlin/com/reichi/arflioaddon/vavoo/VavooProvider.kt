@@ -809,26 +809,94 @@ class VavooProvider : TmdbProvider() {
         }
     }
 
+    /**
+     * Detect the real stream quality so ARVIO shows the correct resolution and Auto-Play scores
+     * the stream. Three strategies, best-effort (falls back to 720 on any failure):
+     *  1) URL/filename quality markers for mp4 (e.g. "..._1080p.mp4", "...1080p.BluRay...mp4",
+     *     "...4K...", "...2160p..."). Many hosters encode the quality in the file path.
+     *  2) For m3u8: fetch the playlist, follow a `window.location.replace(...)` JS redirect
+     *     (supervideo/some CDNs serve an HTML redirect page first), then parse RESOLUTION=WxH.
+     *  3) BANDWIDTH fallback if no RESOLUTION line (master playlists sometimes only list
+     *     BANDWIDTH; map common bandwidths to a height estimate).
+     */
     private fun detectQuality(url: String, isM3u8: Boolean): Int {
-        if (!isM3u8) return Qualities.P720.value
+        // Strategy 1: parse quality from the URL itself (works for mp4 AND m3u8 filenames).
+        val urlQuality = qualityFromUrl(url)
+        if (!isM3u8) return urlQuality ?: Qualities.P720.value
+        if (urlQuality != null) {
+            // URL has an explicit quality marker; trust it (avoids an extra HTTP round-trip).
+            return urlQuality
+        }
         return try {
-            val res = httpGet(url, headers = mapOf("Range" to "bytes=0-8192"))
+            var res = httpGet(url, headers = mapOf("Range" to "bytes=0-16384"))
             if (res.code !in 200..299 && res.code != 206) return Qualities.P720.value
+            // Some CDNs (supervideo) return an HTML page with a JS redirect instead of the
+            // playlist on the first request. Follow one `window.location.replace('...')` hop
+            // and re-fetch the real playlist.
+            val redir = Regex("window\\.location\\.replace\\('([^']+)'").find(res.text)
+            if (redir != null) {
+                val u2 = redir.groupValues[1]
+                res = httpGet(u2, headers = mapOf("Range" to "bytes=0-16384"))
+                if (res.code !in 200..299 && res.code != 206) return Qualities.P720.value
+            }
+            // Parse RESOLUTION=WIDTHxHEIGHT from the master playlist; take the highest variant.
             val heights = Regex("RESOLUTION=(\\d+)x(\\d+)", RegexOption.IGNORE_CASE)
                 .findAll(res.text).mapNotNull { it.groupValues[2].toIntOrNull() }.toList()
-            val h = heights.maxOrNull() ?: return Qualities.P720.value
-            when {
-                h >= 2160 -> Qualities.P2160.value
-                h >= 1080 -> Qualities.P1080.value
-                h >= 720 -> Qualities.P720.value
-                h >= 480 -> Qualities.P480.value
-                else -> Qualities.P360.value
-            }
+            val h = heights.maxOrNull()
+            if (h != null) return heightToQuality(h)
+            // Fallback: no RESOLUTION line. Estimate from BANDWIDTH (bits/s) if present.
+            val bw = Regex("BANDWIDTH=(\\d+)", RegexOption.IGNORE_CASE)
+                .findAll(res.text).mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull()
+            if (bw != null) return bandwidthToQuality(bw)
+            Qualities.P720.value
         } catch (t: Throwable) {
             DebugLog.w(dbg, "detectQuality: '$url' threw ${t.javaClass.name}: ${t.message}")
             Qualities.P720.value
         }
     }
+
+    /** Extract a quality value from quality markers in the URL/path (1080p, 720p, 4K, 2160p, ...). */
+    private fun qualityFromUrl(url: String): Int? {
+        val u = url.lowercase()
+        // 4K / UHD / 2160p
+        if (u.contains("2160p") || u.contains(".4k.") || u.contains("4k-") || u.contains("-4k") ||
+            u.contains("ultrahd") || u.contains("uhd.") || u.contains(".uhd") || u.contains("2160."))
+            return Qualities.P2160.value
+        // 1440p
+        if (u.contains("1440p")) return Qualities.P1440.value
+        // 1080p (also match "1080" without p, e.g. "...1080.mp4")
+        if (u.contains("1080p") || u.contains("1080.") || u.contains("1080-") || u.contains("-1080"))
+            return Qualities.P1080.value
+        if (u.contains("720p") || u.contains("720.") || u.contains("720-") || u.contains("-720"))
+            return Qualities.P720.value
+        if (u.contains("480p") || u.contains("480.") || u.contains("480-") || u.contains("-480"))
+            return Qualities.P480.value
+        if (u.contains("360p") || u.contains("360.") || u.contains("360-") || u.contains("-360"))
+            return Qualities.P360.value
+        if (u.contains("240p")) return Qualities.P240.value
+        return null
+    }
+
+    /** Map a video height to the nearest cloudstream3 Qualities value. */
+    private fun heightToQuality(h: Int): Int = when {
+        h >= 2160 -> Qualities.P2160.value
+        h >= 1440 -> Qualities.P1440.value
+        h >= 1080 -> Qualities.P1080.value
+        h >= 720 -> Qualities.P720.value
+        h >= 480 -> Qualities.P480.value
+        h >= 360 -> Qualities.P360.value
+        else -> Qualities.P240.value
+    }
+
+    /** Estimate a quality from BANDWIDTH (bits/s) when no RESOLUTION line is available. */
+    private fun bandwidthToQuality(bw: Int): Int = when {
+        bw >= 15_000_000 -> Qualities.P2160.value  // ~15 Mbps+ usually 4K
+        bw >= 8_000_000 -> Qualities.P1080.value   // ~8-15 Mbps usually 1080p
+        bw >= 4_000_000 -> Qualities.P720.value     // ~4-8 Mbps usually 720p
+        bw >= 2_000_000 -> Qualities.P480.value      // ~2-4 Mbps usually 480p
+        else -> Qualities.P360.value
+    }
+
 
     // --------------------------------------------------------------------------------------------
     // JSON helpers (org.json; no Jackson/kotlin-reflect — R8-stripped, Erkenntnis #15).
