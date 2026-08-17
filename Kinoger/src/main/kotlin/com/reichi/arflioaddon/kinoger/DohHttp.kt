@@ -127,30 +127,38 @@ internal fun openDohConnection(url: String): HttpURLConnection {
     return conn
 }
 
-/** SSLSocketFactory that pins the SNI server name to the original hostname when connecting by IP. */
+/** SSLSocketFactory that pins the SNI server name to the original hostname when connecting by IP.
+ *  HttpsURLConnection uses the LAYERED createSocket(plainSocket, host, port, autoClose) after it
+ *  has already opened a plain TCP socket to the (resolved) IP. The naive approach of setting
+ *  sslParameters.serverNames AFTER delegate.createSocket(...) is too late — the handshake has
+ *  already started, so SNI is never sent and Cloudflare returns SSLV3_ALERT_HANDSHAKE_FAILURE.
+ *  Fix: pass a null host to the delegate so it does NOT auto-start the handshake (and does not
+ *  set its own SNI from the IP), then set SNI to the real hostname and call startHandshake()
+ *  ourselves. This is the canonical SNI-pinning pattern for java.net HTTPS. */
 private class SniSocketFactory(private val sniHost: String) : SSLSocketFactory() {
     private val delegate = javax.net.ssl.SSLContext.getDefault().socketFactory
     override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
     override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
-    override fun createSocket(): Socket = applySni(delegate.createSocket())
-    override fun createSocket(host: String, port: Int): Socket = applySni(delegate.createSocket(host, port))
+    override fun createSocket(): Socket = delegate.createSocket()
+    override fun createSocket(host: String, port: Int): Socket = delegate.createSocket(host, port)
     override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
-        applySni(delegate.createSocket(host, port, localHost, localPort))
-    override fun createSocket(host: InetAddress, port: Int): Socket = applySni(delegate.createSocket(host, port))
+        delegate.createSocket(host, port, localHost, localPort)
+    override fun createSocket(host: InetAddress, port: Int): Socket = delegate.createSocket(host, port)
     override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
-        applySni(delegate.createSocket(address, port, localAddress, localPort))
-    override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket =
-        applySni(delegate.createSocket(s, host, port, autoClose))
+        delegate.createSocket(address, port, localAddress, localPort)
 
-    private fun applySni(s: Socket): Socket {
-        if (s is SSLSocket) {
-            try {
-                val p = s.sslParameters
-                p.serverNames = listOf(SNIHostName(sniHost))
-                s.sslParameters = p
-            } catch (_: Throwable) {
-            }
+    override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket {
+        // host is the IP here (the URL host). null host -> delegate does NOT start the handshake
+        // and does NOT set SNI; we set the real SNI then start the handshake ourselves.
+        val ssl = delegate.createSocket(s, null, port, autoClose) as SSLSocket
+        try {
+            val p = ssl.sslParameters
+            p.serverNames = listOf(SNIHostName(sniHost))
+            ssl.sslParameters = p
+        } catch (_: Throwable) {
         }
-        return s
+        Log.d("ArvioAddon[DohResolver]", "SniSocketFactory: starting handshake with SNI=$sniHost")
+        ssl.startHandshake()
+        return ssl
     }
 }
