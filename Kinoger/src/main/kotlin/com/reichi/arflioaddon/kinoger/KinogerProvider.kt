@@ -130,7 +130,7 @@ class KinogerProvider : TmdbProvider() {
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/?do=search&subaction=search&titleonly=3&story=${query.encode()}&x=0&y=0&submit=submit"
         val doc = Jsoup.parse(httpGet(url).text)
-        return doc.select("div.content_text.searchresult_img").mapNotNull { it.toSearchResponse() }
+        return doc.select("div.titlecontrol").mapNotNull { it.toSearchResponse() }
     }
 
     private fun org.jsoup.nodes.Element.toSearchResponse(): SearchResponse? {
@@ -259,7 +259,9 @@ class KinogerProvider : TmdbProvider() {
                 return emptyList()
             }
             val doc = Jsoup.parse(res.text)
-            val selected = doc.select("div.content_text.searchresult_img")
+            // Each search result is wrapped in <div class="titlecontrol"><div class="title"><a href=".../stream/<id>-<slug>.html">TITLE Film</a></div></div>.
+            // The sibling <div class="content_text searchresult_img"> only holds the poster image (alt=title), not the link.
+            val selected = doc.select("div.titlecontrol")
             DebugLog.t(dbg, "searchKinoger: CSS selector matched ${selected.size} elements")
             selected.mapNotNull { it.parseSearchEntry() }
                 .filter { it.title.isNotEmpty() }
@@ -270,10 +272,9 @@ class KinogerProvider : TmdbProvider() {
     }
 
     /**
-     * Parse one search-result block. KinoGer search results live in
-     * `div.content_text.searchresult_img` containers. The title is in the `<img alt="...">`
-     * attribute and the stream link is an `<a href="/stream/...html">` (sometimes with a
-     * `#comment` suffix which we strip).
+     * Parse one search-result block. KinoGer wraps each result in
+     * `<div class="titlecontrol"><div class="title"><a href=".../stream/<id>-<slug>.html">TITLE Film</a></div></div>`.
+     * The title is the anchor text (trailing " Film" suffix stripped); the link points to the stream page.
      */
     private fun org.jsoup.nodes.Element.parseSearchEntry(): KinogerEntry? {
         val link = selectFirst("a[href*=/stream/]") ?: return null
@@ -285,10 +286,12 @@ class KinogerProvider : TmdbProvider() {
             href.startsWith("/") -> "$mainUrl$href"
             else -> href
         }
-        // Title: prefer img alt in this block, fall back to link text.
-        val img = selectFirst("img[alt]")
-        val rawTitle = (img?.attr("alt")?.trim() ?: link.text().trim())
-        if (rawTitle.isEmpty() || rawTitle.contains("KinoGer", ignoreCase = true)) return null
+        // Title: anchor text, e.g. "Matrix (1999) Film". Strip trailing " Film"/" Serie".
+        val rawTitle = link.text().trim()
+            .replace(Regex("""\s+(Film|Serie)$""", RegexOption.IGNORE_CASE), "")
+            .trim()
+        if (rawTitle.isEmpty() || rawTitle.equals("Suche", ignoreCase = true) ||
+            rawTitle.contains("KinoGer", ignoreCase = true)) return null
         return KinogerEntry(u, rawTitle)
     }
 
