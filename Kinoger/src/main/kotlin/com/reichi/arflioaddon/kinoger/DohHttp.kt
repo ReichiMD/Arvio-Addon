@@ -85,13 +85,29 @@ internal object DohResolver {
 }
 
 /**
- * Opens an HttpURLConnection for [url]. If the host can be resolved via DoH, connects to the
- * resolved IP with proper SNI / Host header / hostname verification for the original host
- * (bypasses DNS-level blocking). Otherwise falls back to a plain system-DNS connection.
+ * Hosts that are known to be DNS-blocked on some mobile networks (German ISPs) and therefore
+ * MUST be resolved via DoH. Everything else (TMDB, hoster embeds, ...) uses the plain system
+ * DNS connection, because (a) those are generally not blocked and (b) the custom SNI socket
+ * factory breaks some CDNs (e.g. TMDB on CloudFront returns SSLV3_ALERT_HANDSHAKE_FAILURE).
+ * Add a host here if a future hoster turns out to be DNS-blocked on mobile too.
+ */
+private val DOH_HOSTS = setOf("kinoger.com", "filmpalast.to", "serienstream.to")
+
+private fun shouldUseDoh(host: String): Boolean {
+    val h = host.lowercase()
+    return DOH_HOSTS.any { h == it || h.endsWith(".$it") }
+}
+
+/**
+ * Opens an HttpURLConnection for [url]. If the host is a known DNS-blocked streaming site,
+ * resolves it via DoH and connects to the resolved IP with proper SNI / Host header /
+ * hostname verification (bypasses DNS-level blocking). Otherwise uses a plain system-DNS
+ * connection (works for non-blocked hosts and avoids breaking CDNs that reject our SNI socket).
  */
 internal fun openDohConnection(url: String): HttpURLConnection {
     val u = URL(url)
     val host = u.host
+    if (!shouldUseDoh(host)) return u.openConnection() as HttpURLConnection // plain system DNS
     val ip = DohResolver.resolve(host)
     if (ip == null) return u.openConnection() as HttpURLConnection // fallback: system DNS
     val portPart = if (u.port > 0 && u.port != u.defaultPort) ":${u.port}" else ""
