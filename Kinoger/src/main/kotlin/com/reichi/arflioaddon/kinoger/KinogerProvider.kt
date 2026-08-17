@@ -608,12 +608,16 @@ class KinogerProvider : TmdbProvider() {
             return false
         }
         var found = false
+        // The fsst.online embed page repeats its playerjs config across multiple player
+        // instances, so the same stream URL appears several times. Emit each URL only once.
+        val emitted = HashSet<String>()
         // Playerjs file config: file:"[360p]https://...mp4/,[720p]https://...mp4/,..."
         // Capture quality label + url.
         val segPattern = Regex("""\[(\d{3,4}p)?\](https?://[^\s"',]+\.mp4[^\s"',/]*)""")
         segPattern.findAll(text).forEach { m ->
             val label = m.groupValues[1].ifEmpty { "720p" }
             val streamUrl = m.groupValues[2]
+            if (!emitted.add(streamUrl)) return@forEach
             val quality = mapQualityLabel(label)
             emitLink("Incvideo", streamUrl, "https://fsst.online/", quality, false, callback)
             found = true
@@ -621,11 +625,13 @@ class KinogerProvider : TmdbProvider() {
         if (!found) {
             // Fallback: any direct mp4 URL in the page.
             Regex("""(https?://[^\s"'<>]+\.mp4[^\s"'<>]*)""").findAll(text).forEach { m ->
-                emitLink("Incvideo", m.groupValues[1], "https://fsst.online/", Qualities.P720.value, false, callback)
+                val streamUrl = m.groupValues[1]
+                if (!emitted.add(streamUrl)) return@forEach
+                emitLink("Incvideo", streamUrl, "https://fsst.online/", Qualities.P720.value, false, callback)
                 found = true
             }
         }
-        DebugLog.t(dbg, "resolveIncvideo: GET $url -> ${res.code}, len=${text.length}, found=$found")
+        DebugLog.t(dbg, "resolveIncvideo: GET $url -> ${res.code}, len=${text.length}, found=$found (emitted ${emitted.size} unique)")
         return found
     }
 
