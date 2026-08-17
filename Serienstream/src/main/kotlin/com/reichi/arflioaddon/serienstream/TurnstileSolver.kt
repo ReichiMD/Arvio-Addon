@@ -42,7 +42,7 @@ import java.util.concurrent.TimeUnit
 internal object TurnstileSolver {
 
     private const val TAG = "ArvioAddon[TurnstileSolver]"
-    private const val DEFAULT_TIMEOUT_MS = 20_000L
+    private const val DEFAULT_TIMEOUT_MS = 30_000L
     private const val POLL_INTERVAL_MS = 500L
 
     /**
@@ -69,13 +69,24 @@ internal object TurnstileSolver {
     data class SolveResult(val token: String, val cookies: String)
 
     /**
-     * Load [url] (the /r?t=<token> redirect page that renders the Turnstile widget) in a WebView,
-     * wait for the cf-turnstile-response token, and return it together with the WebView cookies.
+     * Load [turnstileUrl] (the /r?t=<token> redirect page that renders the Turnstile widget) in a
+     * WebView, wait for the cf-turnstile-response token, and return it together with the WebView
+     * cookies.
+     *
+     * [episodePageUrl] is loaded FIRST so the WebView collects the Serienstream session cookies
+     * (DDoS-Guard __ddg*, Laravel session, XSRF-TOKEN). Without this warm-up the /r?t= token is
+     * bound to a different session and Serienstream redirects to the homepage (no Turnstile widget
+     * renders -> no token). This mirrors what a real browser does: visit the episode page, then
+     * click the hoster button which opens /r?t=.
      *
      * Blocks the calling thread up to [timeoutMs]. Returns null if no token was produced in time
      * (timeout, page failed to load, no Turnstile widget present, etc.).
      */
-    fun solveTurnstileToken(url: String, timeoutMs: Long = DEFAULT_TIMEOUT_MS): SolveResult? {
+    fun solveTurnstileToken(
+        turnstileUrl: String,
+        episodePageUrl: String,
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+    ): SolveResult? {
         val ctx = context ?: run {
             Log.w(TAG, "solveTurnstileToken: no context (init not called?)")
             return null
@@ -87,6 +98,8 @@ internal object TurnstileSolver {
 
         // Capture the webView reference on the main thread so we can destroy it on the main thread.
         val webViewRef = arrayOfNulls<WebView>(1)
+        // Phases: 0 = warm-up (episode page), 1 = gate (/r?t=), 2 = done.
+        val phase = java.util.concurrent.atomic.AtomicInteger(0)
 
         mainHandler.post {
             try {
@@ -107,8 +120,23 @@ internal object TurnstileSolver {
                 webView.webChromeClient = WebChromeClient()
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, loadedUrl: String?) {
-                        Log.d(TAG, "onPageFinished: $loadedUrl")
-                        pollForToken(view, mainHandler, token, latch, timeoutMs)
+                        Log.d(TAG, "onPageFinished: phase=${phase.get()} url=$loadedUrl")
+                        when (phase.get()) {
+                            0 -> {
+                                // Warm-up done (episode page loaded, cookies collected). Now load the
+                                // /r?t= gate page in the SAME WebView so it shares the session.
+                                phase.set(1)
+                                Log.d(TAG, "warm-up done, loading gate: $turnstileUrl")
+                                view.loadUrl(turnstileUrl)
+                            }
+                            1 -> {
+                                // Gate page loaded. Start polling for the Turnstile token.
+                                pollForToken(view, mainHandler, token, latch, timeoutMs)
+                            }
+                            else -> {
+                                // Already polling or done.
+                            }
+                        }
                     }
 
                     override fun onReceivedError(
@@ -119,8 +147,8 @@ internal object TurnstileSolver {
                         Log.w(TAG, "onReceivedError: ${error?.description} (${request?.url})")
                     }
                 }
-                Log.d(TAG, "loadUrl: $url")
-                webView.loadUrl(url)
+                Log.d(TAG, "loadUrl (warm-up): $episodePageUrl")
+                webView.loadUrl(episodePageUrl)
             } catch (t: Throwable) {
                 Log.w(TAG, "webView create threw ${t.javaClass.name}: ${t.message}")
                 latch.countDown()
@@ -131,7 +159,7 @@ internal object TurnstileSolver {
             // Block the calling (network) thread until token arrives or timeout.
             val got = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
             if (!got) {
-                Log.w(TAG, "solveTurnstileToken: TIMEOUT after ${timeoutMs}ms for $url")
+                Log.w(TAG, "solveTurnstileToken: TIMEOUT after ${timeoutMs}ms")
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
@@ -162,9 +190,9 @@ internal object TurnstileSolver {
             Log.w(TAG, "solveTurnstileToken: no token produced")
             return null
         }
-        // Export cookies synchronously (CookieManager.flush is async; we read the in-memory jar).
+        // Export cookies for the gate URL (the domain the POST /r will target).
         val cookies = try {
-            CookieManager.getInstance().getCookie(url) ?: ""
+            CookieManager.getInstance().getCookie(turnstileUrl) ?: ""
         } catch (_: Throwable) { "" }
         Log.d(TAG, "solveTurnstileToken: token=${resolved.take(24)}… cookies=${cookies.length} chars")
         return SolveResult(resolved, cookies)

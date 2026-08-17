@@ -659,7 +659,7 @@ class SerienstreamProvider : TmdbProvider() {
         // RECHERCHE (17.08.2026) Kategorie 3.
         val turnstileUrl = redirectUrl // die /r?t=<token> Seite rendert das Turnstile-Widget
         val turnstileResult = try {
-            TurnstileSolver.solveTurnstileToken(turnstileUrl)
+            TurnstileSolver.solveTurnstileToken(turnstileUrl, episodePageUrl)
         } catch (t: Throwable) {
             DebugLog.w(dbg, "redirectGate: TurnstileSolver threw ${t.javaClass.name}: ${t.message}")
             null
