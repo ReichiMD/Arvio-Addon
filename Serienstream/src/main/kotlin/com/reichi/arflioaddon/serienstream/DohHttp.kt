@@ -91,7 +91,7 @@ internal object DohResolver {
  * factory breaks some CDNs (e.g. TMDB on CloudFront returns SSLV3_ALERT_HANDSHAKE_FAILURE).
  * Add a host here if a future hoster turns out to be DNS-blocked on mobile too.
  */
-private val DOH_HOSTS = setOf("kinoger.com", "filmpalast.to", "serienstream.to")
+private val DOH_HOSTS = setOf("kinoger.com", "filmpalast.to", "serienstream.to", "supervideo.cc")
 
 private fun shouldUseDoh(host: String): Boolean {
     val h = host.lowercase()
