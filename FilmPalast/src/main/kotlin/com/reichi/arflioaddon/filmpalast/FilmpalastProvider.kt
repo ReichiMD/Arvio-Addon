@@ -69,7 +69,7 @@ class FilmpalastProvider : TmdbProvider() {
         }
         var conn: java.net.HttpURLConnection? = null
         return try {
-            conn = (java.net.URL(fullUrl).openConnection() as java.net.HttpURLConnection).apply {
+            conn = openDohConnection(fullUrl).apply {
                 connectTimeout = NET_TIMEOUT_MS.toInt()
                 readTimeout = NET_TIMEOUT_MS.toInt()
                 instanceFollowRedirects = true
@@ -99,7 +99,7 @@ class FilmpalastProvider : TmdbProvider() {
     ): HttpResp {
         var conn: java.net.HttpURLConnection? = null
         return try {
-            conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+            conn = openDohConnection(url).apply {
                 connectTimeout = NET_TIMEOUT_MS.toInt()
                 readTimeout = NET_TIMEOUT_MS.toInt()
                 instanceFollowRedirects = true

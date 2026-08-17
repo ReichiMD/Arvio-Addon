@@ -153,7 +153,7 @@ class SerienstreamProvider : TmdbProvider() {
     ): HttpResp {
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            conn = openDohConnection(url).apply {
                 connectTimeout = NET_TIMEOUT_MS.toInt()
                 readTimeout = NET_TIMEOUT_MS.toInt()
                 instanceFollowRedirects = true
@@ -189,7 +189,7 @@ class SerienstreamProvider : TmdbProvider() {
     ): HttpResp {
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            conn = openDohConnection(url).apply {
                 connectTimeout = NET_TIMEOUT_MS.toInt()
                 readTimeout = NET_TIMEOUT_MS.toInt()
                 instanceFollowRedirects = true
@@ -768,7 +768,7 @@ class SerienstreamProvider : TmdbProvider() {
     ): HttpResp {
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            conn = openDohConnection(url).apply {
                 connectTimeout = NET_TIMEOUT_MS.toInt()
                 readTimeout = NET_TIMEOUT_MS.toInt()
                 instanceFollowRedirects = true
