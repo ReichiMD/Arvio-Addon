@@ -563,6 +563,9 @@ class FilmpalastProvider : TmdbProvider() {
                 // vidsonic.net embeds the direct m3u8 URL as a hex-encoded + reversed string in a
                 // `const _0x1 = '...'` JS variable. Algorithm from Gujal00/ResolveURL vidsonic.py.
                 host.contains("vidsonic") -> resolveVidsonic(url, callback)
+                // supervideo.cc packs the player config in a Dean-Edwards p.a.c.k.e.r eval block;
+                // unpack it and read the m3u8 from jwplayer setup sources. No bot protection.
+                host.contains("supervideo") || host.contains("supercdn") -> resolveSupervideo(url, callback)
                 // firestream.to: token-blob in embed page -> POST /api/videos/<id>/resolve -> signedVideoUrl.
                 host.contains("firestream") -> resolveFirestream(url, callback)
                 // Add more hoster-specific extractors here as needed.
@@ -574,6 +577,89 @@ class FilmpalastProvider : TmdbProvider() {
             DebugLog.w(dbg, "resolveHost: '$url' threw ${t.javaClass.name}: ${t.message}")
             false
         }
+    }
+
+    /**
+     * supervideo.cc extractor. The embed page (/e/<mediaId>) packs the JWPlayer config in a
+     * Dean-Edwards p.a.c.k.e.r eval(function(p,a,c,k,e,d){...}('p',36,381,'k'.split('|'))) block.
+     * This variant passes a and c as BARE integers (not quoted). Unpack it and read the m3u8 URL
+     * from jwplayer("vplayer").setup({sources:[{file:"...m3u8..."}]}). No bot protection (HTTP 200).
+     * Algorithm verified live (Aug 2026).
+     */
+    private fun resolveSupervideo(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val ref = url.substringBefore("/e/") + "/"
+        val res = httpGet(url, headers = mapOf("Referer" to ref, "User-Agent" to mobileUA))
+        if (res.code !in 200..299) {
+            DebugLog.w(dbg, "resolveSupervideo: GET $url -> HTTP ${res.code}")
+            return false
+        }
+        val unpacked = unpackPacker(res.text)
+        if (unpacked.isNullOrEmpty()) {
+            DebugLog.w(dbg, "resolveSupervideo: no packer block found (len=${res.text.length})")
+            return false
+        }
+        val fileUrl = try {
+            Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*["']([^"']+)["']""")
+                .find(unpacked)?.groupValues?.get(1)
+        } catch (t: Throwable) { null }
+        if (fileUrl.isNullOrEmpty()) {
+            DebugLog.w(dbg, "resolveSupervideo: no sources file: URL in unpacked player config")
+            return false
+        }
+        if (!fileUrl.startsWith("http")) {
+            DebugLog.w(dbg, "resolveSupervideo: file URL not http: '$fileUrl'")
+            return false
+        }
+        DebugLog.t(dbg, "resolveSupervideo: file=$fileUrl")
+        emitLink("Supervideo", fileUrl, ref, callback)
+        return true
+    }
+
+    /**
+     * Dean-Edwards p.a.c.k.e.r unpacker. Finds the eval(function(p,a,c,k,e,d){...}('p',A,C,'k'.split('|')))
+     * block (this variant passes A and C as BARE integers, e.g. 36,381), reverses the token substitution
+     * (while c-- if k[c]) p=p.replace(\b<c base A>\b, k[c])), and returns the unpacked JS.
+     * Returns "" if no packer block is found.
+     */
+    private fun unpackPacker(html: String): String {
+        return try {
+            val start = html.indexOf("eval(function(p,a,c,k,e,d){")
+            if (start < 0) return ""
+            val splitIdx = html.indexOf(".split('|'))", start)
+            if (splitIdx < 0) return ""
+            val block = html.substring(start, splitIdx + ".split('|'))".length)
+            val m = Regex("""\('(.*)',(\d+),(\d+),'([^']*)'\.split\('\|'\)\)""", RegexOption.DOT_MATCHES_ALL)
+                .find(block) ?: return ""
+            val pStr = m.groupValues[1]
+            val a = m.groupValues[2].toInt()
+            val c = m.groupValues[3].toInt()
+            val k = m.groupValues[4].split("|")
+            var p = pStr
+            var cc = c
+            while (cc > 0) {
+                cc--
+                if (cc < k.size && k[cc].isNotEmpty()) {
+                    p = Regex("\\b" + Regex.escape(toBase(cc, a)) + "\\b").replace(p, k[cc])
+                }
+            }
+            p
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "unpackPacker: threw ${t.javaClass.name}: ${t.message}")
+            ""
+        }
+    }
+
+    /** Convert n to a base-b string (digits 0-9a-z). */
+    private fun toBase(n: Int, b: Int): String {
+        if (n == 0) return "0"
+        val digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        var v = n
+        val sb = StringBuilder()
+        while (v > 0) {
+            sb.insert(0, digits[v % b])
+            v /= b
+        }
+        return sb.toString()
     }
 
     /**
