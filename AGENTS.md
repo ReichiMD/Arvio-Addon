@@ -13,6 +13,35 @@ Ziel: Ventix-Funktionalit–ď“ď–í”®t (deutsche Web-Scraper + Stalker-V
 - Der **Nutzer testet selbst am TV** (TCL C7K, WLAN-ADB via Termux/Handy) und schickt Logcat-Dateien. Die Analyse macht die AI.
 - Der Nutzer entscheidet ueber Prioritaeten und genehmigt Ans–ď“ď–í”®tze (z.B. "Option A zuerst, Option B nur falls scheitert").
 
+## ‼️ NEU (17.08.2026): DOH-DNS-BYPASS = PLUGINS LAUFEN JETZT AUCH MOBIL (WICHTIG FUER ALLE SESSIONS)
+
+**Meilenstein 17.08.2026: KinoGer v7 + FilmPalast v33 + Serienstream v37 liefern Quellen AUCH im Mobilfunk** (zuvor nur WLAN). Das war die letzte grosse Huerde.
+
+**Root-Cause der Mobilfunk-Probleme (vor v33/v7):** HttpURLConnection nimmt den SYSTEM-DNS. Deutsche Mobilfunk-Provider (Telekom/Vodafone/O2) blockieren Streaming-Seiten (kinoger.com, filmpalast.to, serienstream.to) per DNS → die aufgeloeste IP liefert keine echte TLS-Antwort → „Unable to parse TLS packet header" bzw. „SSLV3_ALERT_HANDSHAKE_FAILURE" → 0 Quellen. TMDB (api.themoviedb.org, nicht blockiert) ging immer. Webstreamr (serverseitig auf Render) ging immer, weil das Handy nicht direkt mit der Streaming-Seite spricht.
+- Nutzer-Tests bewiesen: ARVIOs integrierte DNS-Einstellung reicht NICHT fuer unser Plugin (wirkt nur auf ARVIOs eigenen OkHttp, nicht auf unser java.net.HttpURLConnection). System-DNS auf AdGuard (1.1.1.1) → Quellen. → DNS-Level-Sperre, umgehbar. (Cloudstream3-App hatte kein Problem, weil sie OkHttp mit eigenem DNS/DoH nutzt.)
+
+**FIX: DNS-over-HTTPS direkt im Plugin.** Pro Modul eine `DohHttp.kt` (Pfade: `FilmPalast/.../DohHttp.kt`, `Kinoger/.../DohHttp.kt`, `Serienstream/.../DohHttp.kt` — identisch bis auf package-Zeile):
+- `DohResolver.resolve(host)`: fragt Cloudflare DoH `https://1.1.1.1/dns-query?name=HOST&type=A` (per IP erreichbar, selbst nie blockiert), cached A-Record fuer TTL (60–3600s) in einer `ConcurrentHashMap`.
+- `openDohConnection(url)`: verbindet sich zur aufgeloesten IP mit korrektem SNI (`SniSocketFactory`), `Host`-Header = Original-Hostname, `HostnameVerifier` prueft Zertifikat gegen Original-Hostname. Fallback auf normalen System-DNS, falls DoH ausfaellt (nie schlechter als vorher).
+- Alle `httpGet`/`httpPost`/`doRequest`-Aufrufstellen nutzen `openDohConnection(url)` statt `URL(url).openConnection()`.
+
+**⚠️ ZWEI WICHTIGE PITFALLS (falls DoH mal angepasst werden muss):**
+1. **WHITELIST, nicht „DoH fuer alles".** DoH nur fuer `DOH_HOSTS = {kinoger.com, filmpalast.to, serienstream.to}` (Suffix-Match via `shouldUseDoh`). Alles andere (TMDB, Hoster-Embeds voe.sx/fsst.online/vidsonic.net/odysseusa.cc) bleibt auf normalem System-DNS. Grund: die Custom-SNI-SocketFactory bricht manche CDNs (TMDB/CloudFront → „SSLV3_ALERT_HANDSHAKE_FAILURE"). v5 hatte DoH fuer ALLES angewendet → TMDB kaputt → Scraper kam nie bis zur Suche. **Falls ein Hoster spaeter auch mobil gesperrt ist: Domain zur `DOH_HOSTS`-Liste in der jeweiligen `DohHttp.kt` hinzufuegen (eine Zeile).**
+2. **SNI VOR dem Handshake setzen.** `sslParameters.serverNames` MUSS vor dem TLS-Handshake stehen. HttpsURLConnection nutzt die *layered* `createSocket(plainSocket, host, port, autoClose)` nach Aufbau des plain-TCP. Korrekt: `delegate.createSocket(s, null, port, autoClose)` (null-Host → startet KEIN Auto-Handshake, setzt kein IP-SNI), dann `serverNames = SNIHostName(originalHost)`, dann `startHandshake()` selbst aufrufen. Zu spaet setzen → kein SNI → Cloudflare lehnt ab (v6-Fehlversuch). SNI nur auf API 24+ (per `Build.VERSION.SDK_INT >= 24` guard); minSdk 21 bleibt sicher (no-Op).
+
+**Verifiziert im v7-Handy-Log (mobil unterwegs):** `resolve: kinoger.com -> 104.21.45.164`, `SniSocketFactory: starting handshake with SNI=kinoger.com`, `httpGet: kinoger.com/... -> 200`, `DEX scraper Kinoger returned 3 results`, `DEX scraper FilmPalast returned 2 results`. Odysseusa-URL enthielt die mobile IPv6 des Handys → Stream wirklich vom Mobilfunk.
+
+**Performance-Nachteile DoH:** ca. 50–150ms beim ERSTEN Aufruf pro Host (ein DoH-Lookup), danach cached, kein weiterer Overhead. Videoqualitaet/Speed unberuehrt. Cloudflare sieht aufgeloeste Hostnamen (nicht den Video-Inhalt, der bleibt HTTPS-verschluesselt).
+
+**DoH-Debug-Log-Zeilen (im Logcat):** `D/ArvioAddon[DohResolver]: resolve: HOST -> IP (ttl Ns)` (DoH liefert IP), `D/ArvioAddon[DohResolver]: SniSocketFactory: starting handshake with SNI=HOST` (SNI vor Handshake gesetzt — sollte bei Scraper-Seiten kommen). Bleibt `SSLV3_ALERT_HANDSHAKE_FAILURE` → SNI-Setup scheitert oder Host fehlt in `DOH_HOSTS`.
+
+**Plan B (NICHT noetig geworden, nur falls SNI bei einem neuen CDN bricht):** OkHttp direkt ins .cs3-DEX buendeln + eigenen OkHttpClient mit DoH-Dns-Interface (wie Cloudstream3). Groesserer Umbau, aber garantiert SNI/HTTP2/TLS sauber.
+
+**Naechste Phase (Prio 1): Vavoo Filme/Serien als .cs3-Modul (Konsolidierung Phase 2).** Siehe „KONSOLIDIERUNGS-PLAN" weiter unten. Vavoo API-basiert (POST ping → addonSig → POST mediahubmx-source.json → Mirror-Liste), kein Bot-Schutz, Vorlage `src/source/Vavoo.ts` im Stremio-Addon (TypeScript, ~297 Zeilen). DoH-Fix greift auch hier (Vavoo-Domains ggf. zur `DOH_HOSTS` addieren, falls mobil gesperrt). Aufbau wie FilmPalast/Kinoger: TmdbProvider, java.net+DoH, org.json, ExtractorLink primary-ctor, catch(Throwable).
+
+---
+
+
 ## ‼ÔłŹ KURZ-STAND (Stand 16.08.2026, fuer naechste Session — LESEN BEVOR ARBEIT BEGINNT)
 
 **Aktueller Stand:** Drei Scraper-Module auf `builds`-Branch (FilmPalast v30 ✅ funktioniert, Serienstream v32 TV-Test ausstehend, **Kinoger v2 TV-Test ausstehend**). **Handy-Logcat erfolgreich eingerichtet** (Termux + adb, keine LADB/Shizuku nötig).
