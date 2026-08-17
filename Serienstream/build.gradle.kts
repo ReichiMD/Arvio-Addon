@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 39
+version = 40
 
 
 cloudstream {
@@ -19,12 +19,13 @@ cloudstream {
      * PluginDataStore.setScraperEnabled() silently refuses to persist an enable,
      * so the scraper never runs. GermanProviders uses status = 1 for all plugins.
      *
-     * DISABLED (status 0): the /r redirect gate requires Cloudflare Turnstile (browser
-     * CAPTCHA, sitekey 0x4AAAAAAAFBfchmT6XFij7y) + ALTCHA-PoW. We solve the PoW but not
-     * Turnstile -> 0 sources. Re-enable (status 1 + registerMainAPI) when a Turnstile
-     * bypass exists. The provider code is kept for later re-use.
+     * RE-ENABLED (v40): the /r redirect gate requires Cloudflare Turnstile + ALTCHA-PoW.
+     * We now solve Turnstile via a real Android WebView (TurnstileSolver.kt) — ARVIO runs on a
+     * real TV with residential IP, which Turnstile rates "high trust", so the widget usually
+     * passes silently. This is the mobile-app use-case Cloudflare itself documents.
+     * See AGENTS.md "RECHERCHE (17.08.2026): Browser-CAPTCHA-Bypass" Kategorie 3.
      */
-    status = 0
+    status = 1
 
     tvTypes = listOf("TvSeries")
 

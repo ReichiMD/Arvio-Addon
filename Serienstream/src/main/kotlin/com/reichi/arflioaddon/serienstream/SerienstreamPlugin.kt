@@ -7,11 +7,13 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class SerienstreamPlugin : Plugin() {
     override fun load(context: Context) {
-        android.util.Log.d("ArvioAddon[SerienstreamPlugin]", "load() — provider DISABLED (Turnstile+ALTCHA gate)")
-        // Disabled: the /r redirect gate requires BOTH Cloudflare Turnstile (browser-based CAPTCHA,
-        // sitekey 0x4AAAAAAAFBfchmT6XFij7y) AND ALTCHA-PoW. We solve the PoW, but cannot solve
-        // Turnstile without a browser engine, so the server rejects the POST /r with
-        // "Das hat leider nicht geklappt" -> 0 sources. Re-enable when a Turnstile bypass exists.
-        // registerMainAPI(SerienstreamProvider())
+        android.util.Log.d("ArvioAddon[SerienstreamPlugin]", "load() — provider ENABLED (Turnstile WebView solver)")
+        // Initialise the WebView-based Turnstile solver with the Activity context ARVIO hands us.
+        // Cloudflare Turnstile validates residential IP + real browser fingerprint + behaviour
+        // simultaneously; a token from a 2captcha-style solver (minted on a different IP) is rejected.
+        // ARVIO runs on a real TV with a residential IP -> "high trust" -> the widget usually
+        // passes silently in a WebView, which is the use-case Cloudflare documents for mobile apps.
+        TurnstileSolver.init(context)
+        registerMainAPI(SerienstreamProvider())
     }
 }

@@ -42,4 +42,19 @@ internal class CookieJar {
     fun names(): Set<String> = cookies.keys.toSet()
 
     fun hasAny(namePrefix: String): Boolean = cookies.keys.any { it.startsWith(namePrefix) }
+
+    /**
+     * Import cookies from a CookieManager.getCookie() header string ("name1=val1; name2=val2").
+     * Used to transfer the DDoS-Guard session cookies the WebView collected while solving the
+     * Cloudflare Turnstile into this jar so the subsequent java.net POST /r uses the same session.
+     */
+    fun importCookieHeader(header: String, requestUrl: String) {
+        for (pair in header.split(";")) {
+            val eq = pair.indexOf('=')
+            if (eq <= 0) continue
+            val name = pair.substring(0, eq).trim()
+            val value = pair.substring(eq + 1).trim()
+            if (name.isNotEmpty()) cookies[name] = value
+        }
+    }
 }

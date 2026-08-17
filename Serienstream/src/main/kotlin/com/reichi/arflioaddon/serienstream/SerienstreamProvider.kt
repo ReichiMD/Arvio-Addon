@@ -650,17 +650,37 @@ class SerienstreamProvider : TmdbProvider() {
             return HttpResp(0, "", redirectUrl)
         }
 
-        // 4. POST /r mit _token + t + altcha + cf-turnstile-response.
-        // The gate tier is "turnstile_altcha" — the form also has a Cloudflare Turnstile
-        // widget. Turnstile injects a hidden input "cf-turnstile-response" when rendered in
-        // a browser. We can't run Turnstile's JS (no browser engine), so we send an empty
-        // value. This only works if the server runs in non-strict mode (rare). If the server
-        // validates the token server-side, this fails and Serienstream is not solvable
-        // without a JS engine.
+        // 4. Cloudflare Turnstile-Token via echtem WebView lösen.
+        // Das Gate ist "turnstile_altcha" — der Server verlangt BOTH ALTCHA-PoW UND einen gültigen
+        // cf-turnstile-response. ARVIO läuft auf einem echten TV mit residential IP -> Turnstile
+        // stuft den Besucher als "high trust" ein und das Widget läuft im WebView meist unsichtbar
+        // automatisch durch (Managed/Non-Interactive mode). Token + Cookies werden vom WebView
+        // extrahiert und in den java.net POST /r eingesetzt. Siehe TurnstileSolver + AGENTS.md
+        // RECHERCHE (17.08.2026) Kategorie 3.
+        val turnstileUrl = redirectUrl // die /r?t=<token> Seite rendert das Turnstile-Widget
+        val turnstileResult = try {
+            TurnstileSolver.solveTurnstileToken(turnstileUrl)
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "redirectGate: TurnstileSolver threw ${t.javaClass.name}: ${t.message}")
+            null
+        }
+        if (turnstileResult == null || turnstileResult.token.isEmpty()) {
+            DebugLog.w(dbg, "redirectGate: Turnstile-Token nicht erzeugt (Timeout/kein Widget) -> POST /r wird abgelehnt")
+        } else {
+            DebugLog.t(dbg, "redirectGate: Turnstile-Token erhalten (${turnstileResult.token.take(20)}…)")
+            // Die vom WebView gesammelten DDoS-Guard-Session-Cookies in unseren CookieJar übernehmen,
+            // damit der java.net POST /r dieselbe Session verwendet. Sonst IP/Session-Mismatch.
+            if (turnstileResult.cookies.isNotEmpty()) {
+                cj.importCookieHeader(turnstileResult.cookies, redirectUrl)
+            }
+        }
+        val cfToken = turnstileResult?.token ?: ""
+
+        // 5. POST /r mit _token + t + altcha + cf-turnstile-response.
         val postBody = "_token=" + java.net.URLEncoder.encode(csrf, "UTF-8") +
             "&t=" + java.net.URLEncoder.encode(tToken, "UTF-8") +
             "&altcha=" + java.net.URLEncoder.encode(payload, "UTF-8") +
-            "&cf-turnstile-response="
+            "&cf-turnstile-response=" + java.net.URLEncoder.encode(cfToken, "UTF-8")
         val postHeaders = HashMap(headers)
         postHeaders["Referer"] = episodePageUrl
         postHeaders["Origin"] = mainUrl
@@ -671,7 +691,7 @@ class SerienstreamProvider : TmdbProvider() {
             postHeaders,
             cj
         )
-        DebugLog.t(dbg, "redirectGate: POST /r -> ${postResp.code} (${postResp.text.length}B)")
+        DebugLog.t(dbg, "redirectGate: POST /r -> ${postResp.code} (${postResp.text.length}B) cfToken=${if (cfToken.isEmpty()) "empty" else "present"}")
 
         if (postResp.code !in 200..299) {
             return postResp
