@@ -26,7 +26,7 @@ echo "=== Filtere ARVIO-Logs am Handy ==="
 # Logcat lokal auslesen (kein adb nötig, Berechtigung wurde erteilt),
 # filtern nach allen Scrapern + ARVIO-Engine, in Datei speichern.
 logcat -d -v time \
-  | grep -iE "Filmpalast|Serienstream|Kinoger|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|resolveHost|resolveIncvideo|resolveVoe|resolveDoodstream|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|searchKinoger|buildSeriesResponse|parseShowArrays|httpGet|httpPost|detectQuality" \
+  | grep -iE "Filmpalast|Serienstream|Kinoger|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|resolveHost|resolveIncvideo|resolveVoe|resolveDoodstream|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|searchKinoger|buildSeriesResponse|parseShowArrays|httpGet|httpPost|detectQuality|TurnstileSolver|turnstile|cf-turnstile|redirectGate|solveAltcha|onPageFinished|WebView" \
   > "$HOME/${LOG_FILE}" 2>/dev/null || true
 
 LINES=$(wc -l < "$HOME/${LOG_FILE}" 2>/dev/null || echo 0)

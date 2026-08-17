@@ -23,7 +23,7 @@ Ziel: Ventix-FunktionalitвҖ“ДҸвҖңДҸвҖ“ГӯвҖқВ®t (deutsche W
 - **KinoGer.cs3 v11** (status=1) вҖ” вң… liefert 3 Quellen (Incvideo 360p/720p/1080p MP4). **1080p-Erkennung funktioniert** (URL-Filename `1014657.mp4` вҶ’ quality=1080).
 - **FilmPalast.cs3 v37** (status=1) вҖ” вң… liefert 2 Quellen (Odysseusa 720p m3u8, Vidsonic 720p m3u8).
 - **Vavoo.cs3 v5** (status=1) вҖ” вң… liefert 2 Quellen (Vidsonic 720p m3u8, VOE 480p m3u8). **480p-VOE-Erkennung funktioniert** (BANDWIDTH-Fallback aus m3u8-Manifest).
-- **Serienstream.cs3 v39** (status=0, DEAKTIVIERT) вҖ” Provider-Code behalten, aber `registerMainAPI()` auskommentiert + `status=0` in build.gradle.kts. ARVIO lГӨdt die .cs3 nicht / aktiviert sie nicht. Grund siehe вҖһERKENNTNIS #20-Serienstream-Turnstile" unten.
+- **Serienstream.cs3 v40** (status=1, RE-AKTIVIERT) вҖ” Provider + ALTCHA-PoW-Solver + **WebView-basierter Cloudflare-Turnstile-Solver** (`TurnstileSolver.kt`). ARVIO lГӨuft auf echtem TV mit residential IP -> Turnstile "high trust" -> Widget lГӨuft im WebView meist unsichtbar durch (Managed/Non-Interactive mode). Token + WebView-Cookies werden in den java.net POST /r eingesetzt. **TV-TEST AUSSTEHEND** (Proof-of-Concept, entscheidend ob WebView aus .cs3-Plugin heraus funktioniert). Siehe "RECHERCHE (17.08.2026): Browser-CAPTCHA-Bypass" Kategorie 3 + "ERKENNTNIS #40-WebView-Turnstile" unten.
 
 **Letzter Handy-Test (17.08.2026, arvio-handy-log-v11.txt, Silo S1E1):** KinoGer 3 Quellen + FilmPalast 2 + Vavoo 2 = 7 Quellen fГјr Silo. detectQuality funktioniert (1080p/720p/480p korrekt). Serienstream 0 (Turnstile-Blockade, siehe unten).
 
@@ -86,6 +86,51 @@ Alle drei bekannten deutschen Serien-Streaming-Portale sind 2026 hinter browser-
 - **AniWorld**: DDoS-Guard WebSocket+eval-Challenge (nicht lГ¶sbar).
 - **Burning Series**: Google reCAPTCHA v2 invisible (nicht lГ¶sbar).
 **FГјr Serien liefern KinoGer + Vavoo + FilmPalast zuverlГӨssig Quellen** (alle drei unterstГјtzen TvSeries via TmdbProvider). Das reicht.
+
+### ERKENNTNIS #40-WebView-Turnstile (17.08.2026, v40 IMPLEMENTIERT): WebView-basierter Turnstile-Solver — ARVIO gibt Activity-Context!
+
+**v40-Implementierung: Serienstream RE-AKTIVIERT mit WebView-basiertem Cloudflare-Turnstile-Solver.**
+
+**Root-Cause der LГ¶sung (verifiziert im ARVIO-Source `/tmp/arvio_ref`):** ARVIOs `Plugin.load(context)` wird mit `(activity as Context?) ?: context` aufgerufen (`ExternalExtensionLoader.kt:317/486/611`). Das bedeutet: **wenn eine Activity verfГјgbar ist, bekommt das Plugin einen Activity-Context** вҖ” und das ist EXACT der Context, den `android.webkit.WebView` braucht. Die Hauptschluss-HГјrde aus der Recherche ("Ob ARVIO uns einen Context gibt, der WebView erlaubt, ist NICHT verifiziert") ist **gelГ¶st**: ARVIO gibt uns einen Activity-Context. WebView-Erstellung ist mГ¶glich.
+
+**Neue Datei `TurnstileSolver.kt` (implementiert):**
+- `init(context: Context)`: speichert den applicationContext (in `SerienstreamPlugin.load()` aufgerufen).
+- `solveTurnstileToken(url, timeoutMs=20000): SolveResult?`: non-suspend, blockierend (wie die anderen java.net-Aufrufe). Erstellt auf dem Main-Thread (via `Handler(Looper.getMainLooper()).post`) einen WebView, lГӨdt die `/r?t=<token>`-Seite, die das Turnstile-Widget rendert. Pollt alle 500ms via `evaluateJavascript` auf `cf-turnstile-response` (hidden input ODER `turnstile.getResponse()`). Gibt `SolveResult(token, cookies)` zurГјck. Timeout 20s (ARVIOs `LOADLINKS_TIMEOUT_MS=60s` deckt das locker). WebView-Cleanup (destroy) auf Main-Thread nach LГ¶sung/Timeout.
+- Cookies vom WebView (`CookieManager.getInstance().getCookie(url)`) werden exportiert und via `CookieJar.importCookieHeader` in den java.net CookieJar Гјbernommen, damit der `POST /r` dieselbe DDoS-Guard-Session nutzt (sonst IP/Session-Mismatch -> "Das hat leider nicht geklappt").
+- WebView-Einstellungen: `javaScriptEnabled=true`, `domStorageEnabled=true`, `setAcceptThirdPartyCookies=true` (Turnstile-iframe braucht das), Desktop-Chrome-UA (hГӨlt Turnstile in high-trust/non-interactive mode).
+
+**`resolveRedirectGate` geГӨndert (SerienstreamProvider.kt:653-694):** Schritt 4 neu: vor dem `POST /r` wird `TurnstileSolver.solveTurnstileToken(redirectUrl)` aufgerufen. Der Token geht in `cf-turnstile-response=` (vorher leer). Log-Zeile zeigt `cfToken=empty` oder `cfToken=present`.
+
+**`SerienstreamPlugin.load(context)`:** ruft `TurnstileSolver.init(context)` + `registerMainAPI(SerienstreamProvider())` (vorher auskommentiert). **status=1** in build.gradle.kts. Version=40.
+
+**CI grГјn (17.08.2026, Run 32031277518, 3m4s).** builds-Branch: `Serienstream.cs3` v40 (1.498.482 Bytes, status=1). `compileDebugKotlin` fГјr Serienstream durchgelaufen (nur eine harmlose Warnung "No cast needed" in TurnstileSolver.kt:145). DEX-Patch (patch_class_obfuscation.py) lГӨuft wie bisher Гјber alle Module.
+
+**Architektur-Entscheidung (Strategie A, nicht D):** WebView lГ¶st NUR das Turnstile, java.net macht den `POST /r` mit Token + ALTCHA + WebView-Cookies. Strategie D (WebView macht alles inkl. ALTCHA in JS) wГӨre cookie-sicherer aber viel komplexer (SHA-256 in JS, Form-Submit im WebView). FГјr PoC erstmal Strategie A. **Falls Cookie-Mismatch auftritt** (POST /r 200 aber err="Das hat leider nicht geklappt" trotz Token present): auf Strategie D umsteigen = WebView lГӨdt Episode-Seite, wir injizieren ALTCHA-Payload via `evaluateJavascript`, das Formular submittet sich selbst im WebView, WebView folgt Redirect zur Hoster-URL, wir lesen `WebView.getUrl()` aus.
+
+**ERWARTUNG v40-TV-TEST (entscheidend, 17.08.2026):**
+1. **Best-Case:** `TurnstileSolver: token=...` + `redirectGate: Turnstile-Token erhalten` + `POST /r -> 200` + `redirectGate: resolved to https://voe.sx/...` -> **ERSTE SERIENSTREAM-QUELLE!** рҹҺҜ
+2. **Falls `solveTurnstileToken: no token produced` / TIMEOUT:** WebView erstellt aber Turnstile-Widget lГӨuft nicht durch (residential IP wurde als "medium trust" eingestuft -> sichtbares Widget, braucht Klick den wir nicht simulieren). LГ¶sung: Maus-Bewegung/Touch im WebView simulieren (Strategie D + `webView.dispatchTouchEvent`).
+3. **Falls `webView create threw` (z.B. `java.lang.RuntimeException: Can't toast on a thread that has not called Looper.prepare()` oder `WrongThreadException`):** WebView kann nicht aus dem Netzwerk-Thread / dem suspend-Kontext gestartet werden, selbst mit `Handler(mainLooper).post` nicht. LГ¶sung: Activity-Context via `runOnUiThread` nutzen oder ARVIO-interne WebView-Helper finden.
+4. **Falls `NoClassDefFoundError: android.webkit.WebView` oder R8-stripped WebView-Helfer:** wie frГјher (okhttp3, kotlin-reflect) -> WebView-Klassen sind Android-built-in, sollten NIE von R8 geshrinkt werden (anderen als okhttp3). Aber `WebResourceRequest`/`WebResourceError` (API 23+) kГ¶nnten fehlen -> auf die alte `onReceivedError(view, errorCode, description, failingUrl)`-Гңberladung zurГјckfallen (habe ich in v40 schon auf die neue API gesetzt; falls Build/Run schlГӨgt fehl, auf alte API wechseln).
+5. **Falls POST /r 200 aber err="Das hat leider nicht geklappt":** Token da aber Cookie/Session-Mismatch -> Strategie D (WebView macht alles).
+
+**TEST-ABLAUF fГјr v40 (am TV, mit Handy+Termux, Standard):**
+1. In ARVIO: Repo LГ–SCHEN + neu hinzufГјgen DIREKT (`https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json`) -> Scraper einschalten (Serienstream + die 3 laufenden).
+2. In Termux: `adb logcat -c` (TV via `adb connect 192.168.0.59:5555`).
+3. In ARVIO: Serie suchen (z.B. **Silo**), auf eine Episode, "nach Quellen suchen", 25s warten (lГӨnger als sonst wegen Turnstile-Timeout 20s).
+4. In Termux: `~/save-tv-log.sh v40` (Filter ist schon aktualisiert auf `TurnstileSolver|turnstile|cf-turnstile`).
+5. Log an AI weiterleiten.
+
+**Was die AI im Log sucht (entscheidend):**
+- `TurnstileSolver: loadUrl: https://serienstream.to/r?t=...` -> WebView startet.
+- `TurnstileSolver: onPageFinished: ...` -> Seite geladen.
+- `TurnstileSolver: solveTurnstileToken: token=...` -> **TURNSTILE GELГ–ST!**
+- `redirectGate: Turnstile-Token erhalten (...)` -> Token an POST /r Гјbergeben.
+- `redirectGate: POST /r -> 200 (NB) cfToken=present` -> POST mit Token.
+- `redirectGate: resolved to https://voe.sx/...` -> **ERSTE SERIENSTREAM-QUELLE!** рҹҺҜ
+- `solveTurnstileToken: TIMEOUT after 20000ms` -> Turnstile lГӨuft nicht durch (sichtbares Widget nГ¶tig).
+- `webView create threw ...` -> WebView kann nicht erstellt werden (Threading/Context-Problem).
+- `redirectGate: server rejected ALTCHA: Das hat leider nicht geklappt` -> Cookie/Session-Mismatch -> Strategie D.
 
 ### RECHERCHE (17.08.2026): Browser-CAPTCHA-Bypass — Weltweite LГ¶sungsansГӨtze & RealitГӨtscheck
 

@@ -33,7 +33,7 @@ echo "=== 3/5 Filtere (ARVIO + FilmPalast + Serienstream + KinoGer + DDoS-Guard)
 # und die Serienstream-spezifischen DDoS-Guard/resolve-Helfer (Erkenntnis #19) sowie
 # KinoGer-spezifische resolveIncvideo/parseShowArrays (Phase 1).
 # Eine Zeile (keine Zeilenfortsetzung) fuer maximale Termux/bash-Kompatibilitaet.
-grep -iE "Filmpalast|Serienstream|Kinoger|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|ddg|ddos|guard|resolveHost|resolveVoe|resolveIncvideo|resolveDoodstream|resolveStreamtape|resolveFileMoon|resolveVidHide|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|searchKinoger|buildSeriesResponse|collectEpisodes|parseShowArrays|httpGet|httpPost|doRequest|CookieJar|voeDecode|detectQuality" \
+grep -iE "Filmpalast|Serienstream|Kinoger|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|MISSING CLASS|CloudstreamPlugin|Executing DEX|ddg|ddos|guard|resolveHost|resolveVoe|resolveIncvideo|resolveDoodstream|resolveStreamtape|resolveFileMoon|resolveVidHide|genericResolve|emitLink|loadLinks|fetchTmdbMeta|searchSeries|searchKinoger|buildSeriesResponse|collectEpisodes|parseShowArrays|httpGet|httpPost|doRequest|CookieJar|voeDecode|detectQuality|TurnstileSolver|turnstile|cf-turnstile|redirectGate|solveAltcha|onPageFinished|WebView" \
   "$LOG_RAW" > "$HOME/${LOG_FILTERED}"
 FLINES=$(wc -l < "$HOME/${LOG_FILTERED}")
 echo "Gefiltert: ${FLINES} Zeilen -> ${LOG_FILTERED}"
