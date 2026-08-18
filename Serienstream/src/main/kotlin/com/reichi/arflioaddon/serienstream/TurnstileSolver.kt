@@ -363,7 +363,7 @@ internal object TurnstileSolver {
                 } else value ?: ""
                 if (raw.startsWith("{") && raw.contains("challenge")) {
                     val payload = try {
-                        SerienstreamProvider.solveAltchaStatic(raw)
+                        solveAltcha(raw)
                     } catch (t: Throwable) {
                         Log.w(TAG, "fetchVerifyInitAndSubmit: solveAltcha threw ${t.javaClass.name}: ${t.message}")
                         ""
@@ -472,4 +472,53 @@ internal object TurnstileSolver {
     }
 
     // (Legacy pollForToken removed — replaced by pollForTurnstileThenSubmit in the Strategie D flow.)
+
+    /**
+     * ALTCHA Proof-of-Work solver. Given the verify-init JSON response, finds n in 0..maxnumber
+     * where SHA-256(salt + str(n)) == challenge, then returns base64(JSON payload). Uses
+     * java.security.MessageDigest (JDK, never R8-obfuscated). Called from fetchVerifyInitAndSubmit
+     * after the WebView fetches verify-init.
+     */
+    internal fun solveAltcha(initJson: String): String {
+        val obj = org.json.JSONObject(initJson)
+        val algorithm = obj.optString("algorithm", "SHA-256")
+        val challenge = obj.optString("challenge", "")
+        val salt = obj.optString("salt", "")
+        val maxnumber = obj.optInt("maxnumber", 100000)
+        val signature = obj.optString("signature", "")
+        if (challenge.isEmpty() || salt.isEmpty()) return ""
+        if (!algorithm.equals("SHA-256", ignoreCase = true)) {
+            Log.w(TAG, "solveAltcha: unsupported algorithm '$algorithm'")
+            return ""
+        }
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        var solution = -1
+        for (n in 0..maxnumber) {
+            val input = (salt + n.toString()).toByteArray(Charsets.UTF_8)
+            val hash = md.digest(input)
+            val hex = StringBuilder(hash.size * 2)
+            for (b in hash) {
+                val v = b.toInt() and 0xFF
+                hex.append("0123456789abcdef"[v ushr 4])
+                hex.append("0123456789abcdef"[v and 0x0F])
+            }
+            if (hex.toString() == challenge) {
+                solution = n
+                break
+            }
+        }
+        if (solution < 0) {
+            Log.w(TAG, "solveAltcha: no solution found in 0..$maxnumber")
+            return ""
+        }
+        Log.d(TAG, "solveAltcha: PoW solved, n=$solution")
+        val payloadObj = org.json.JSONObject()
+        payloadObj.put("algorithm", algorithm)
+        payloadObj.put("challenge", challenge)
+        payloadObj.put("number", solution)
+        payloadObj.put("salt", salt)
+        payloadObj.put("signature", signature)
+        val payloadJson = payloadObj.toString()
+        return android.util.Base64.encodeToString(payloadJson.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+    }
 }
