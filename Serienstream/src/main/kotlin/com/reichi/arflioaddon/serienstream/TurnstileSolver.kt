@@ -42,7 +42,7 @@ import java.util.concurrent.TimeUnit
 internal object TurnstileSolver {
 
     private const val TAG = "ArvioAddon[TurnstileSolver]"
-    private const val DEFAULT_TIMEOUT_MS = 30_000L
+    private const val DEFAULT_TIMEOUT_MS = 45_000L
     private const val POLL_INTERVAL_MS = 500L
 
     /**
@@ -69,36 +69,48 @@ internal object TurnstileSolver {
     data class SolveResult(val token: String, val cookies: String)
 
     /**
-     * Load [turnstileUrl] (the /r?t=<token> redirect page that renders the Turnstile widget) in a
-     * WebView, wait for the cf-turnstile-response token, and return it together with the WebView
-     * cookies.
+     * STRATEGIE D — der WebView macht den GESAMTEN /r-Gate-Flow in EINER Session:
+     *   1. Lädt die Episode-Seite (sammelt Session-Cookies: __ddg*, Laravel session, XSRF-TOKEN).
+     *   2. Lädt die /r?t=<token> Gate-Seite (rendert Turnstile-Widget + ALTCHA-Formular).
+     *   3. Wartet bis Turnstile durchgelaufen ist (cf-turnstile-response da).
+     *   4. Injiziert das vorab berechnete ALTCHA-PoW-Payload + CSRF + t-Token in das Formular und
+     *      submittet es (mit dem Turnstile-Token, den das Widget automatisch eingesetzt hat).
+     *   5. Die POST /r Antwort ist eine HTML/JS-Seite; bei Erfolg enthält sie `var t = "<hoster-url>"`.
+     *      Wir extrahieren die Hoster-URL aus dem Body.
      *
-     * [episodePageUrl] is loaded FIRST so the WebView collects the Serienstream session cookies
-     * (DDoS-Guard __ddg*, Laravel session, XSRF-TOKEN). Without this warm-up the /r?t= token is
-     * bound to a different session and Serienstream redirects to the homepage (no Turnstile widget
-     * renders -> no token). This mirrors what a real browser does: visit the episode page, then
-     * click the hoster button which opens /r?t=.
+     * Weil alles im selben WebView läuft, gibt es KEINEN Cookie/Session-Mismatch mehr (das war das
+     * Problem bei Strategie A: java.net-Preflight hat die Session geholt, aber der WebView hatte
+     * eine eigene Session -> /r?t= redirectete auf die Startseite). Der WebView besitzt hier die
+     * Session von Anfang an, der /r?t= Token gehört zu IHR, und der POST /r geht aus derselben
+     * Session heraus.
      *
-     * Blocks the calling thread up to [timeoutMs]. Returns null if no token was produced in time
-     * (timeout, page failed to load, no Turnstile widget present, etc.).
+     * [altchaPayload] = base64(JSON{algorithm,challenge,number,salt,signature}), vom Provider via
+     * solveAltcha() berechnet (java.security.MessageDigest, JDK). Das ALTCHA-PoW machen wir weiterhin
+     * in Kotlin, weil die Web Crypto API in evaluateJavascript umständlich wäre (async/await + ArrayBuffer).
+     *
+     * [csrfToken] = der _token-Wert aus der Episode-Seite (CSRF).
+     * [tToken] = der dekodierte t-Token aus der /r?t= URL.
+     *
+     * Gibt die finale Hoster-URL zurück (z.B. https://voe.sx/e/...), oder null bei Timeout/Fehler.
      */
-    fun solveTurnstileToken(
-        turnstileUrl: String,
+    fun solveGate(
         episodePageUrl: String,
+        gateUrl: String,
+        csrfToken: String,
+        tToken: String,
+        altchaPayload: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS
-    ): SolveResult? {
+    ): String? {
         val ctx = context ?: run {
-            Log.w(TAG, "solveTurnstileToken: no context (init not called?)")
+            Log.w(TAG, "solveGate: no context (init not called?)")
             return null
         }
         val latch = CountDownLatch(1)
-        // token[0] holds the result; nullable to allow in-place mutation from the main thread.
-        val token = arrayOfNulls<String>(1)
+        // resultUrl[0] holds the final hoster URL.
+        val resultUrl = arrayOfNulls<String>(1)
         val mainHandler = Handler(Looper.getMainLooper())
-
-        // Capture the webView reference on the main thread so we can destroy it on the main thread.
         val webViewRef = arrayOfNulls<WebView>(1)
-        // Phases: 0 = warm-up (episode page), 1 = gate (/r?t=), 2 = done.
+        // Phases: 0 = warm-up (episode), 1 = gate (/r?t=, wait for Turnstile), 2 = submit, 3 = read answer.
         val phase = java.util.concurrent.atomic.AtomicInteger(0)
 
         mainHandler.post {
@@ -110,10 +122,8 @@ internal object TurnstileSolver {
                 settings.domStorageEnabled = true
                 settings.javaScriptCanOpenWindowsAutomatically = true
                 settings.setSupportMultipleWindows(false)
-                // A real desktop Chrome UA keeps Turnstile in "high trust" / non-interactive mode.
                 settings.userAgentString =
                     "Mozilla/5.0 (Linux; Android 13; TCL C7K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                // Accept third-party cookies so the Cloudflare challenge iframe can set its cookies.
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
@@ -123,29 +133,28 @@ internal object TurnstileSolver {
                         Log.d(TAG, "onPageFinished: phase=${phase.get()} url=$loadedUrl")
                         when (phase.get()) {
                             0 -> {
-                                // Warm-up done (episode page loaded, cookies collected). Persist the
-                                // cookies NOW so the subsequent gate load sends them. CookieManager
-                                // keeps cookies in memory but the WebView only sends them on the next
-                                // navigation once they are committed; flush() forces that.
-                                try {
-                                    CookieManager.getInstance().flush()
-                                } catch (_: Throwable) {}
-                                // Small delay so the Set-Cookie headers from the episode page are
-                                // captured before we navigate to the gate.
+                                // Episode-Seite geladen -> Cookies flushen, dann Gate laden.
+                                try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
                                 phase.set(1)
                                 mainHandler.postDelayed({
                                     if (latch.count > 0) {
-                                        Log.d(TAG, "warm-up done, loading gate: $turnstileUrl")
-                                        try { view.loadUrl(turnstileUrl) } catch (_: Throwable) {}
+                                        Log.d(TAG, "warm-up done, loading gate: $gateUrl")
+                                        try { view.loadUrl(gateUrl) } catch (_: Throwable) {}
                                     }
                                 }, 300L)
                             }
                             1 -> {
-                                // Gate page loaded. Start polling for the Turnstile token.
-                                pollForToken(view, mainHandler, token, latch, timeoutMs)
+                                // Gate-Seite geladen. Auf Turnstile-Token warten, dann Form submitten.
+                                pollForTurnstileThenSubmit(view, mainHandler, phase, latch, resultUrl,
+                                    csrfToken, tToken, altchaPayload, timeoutMs)
+                            }
+                            2 -> {
+                                // Form submitted -> POST /r Antwort geladen. Body nach Hoster-URL durchsuchen.
+                                phase.set(3)
+                                extractHosterUrlFromBody(view, mainHandler, latch, resultUrl)
                             }
                             else -> {
-                                // Already polling or done.
+                                // Already done.
                             }
                         }
                     }
@@ -158,7 +167,7 @@ internal object TurnstileSolver {
                         Log.w(TAG, "onReceivedError: ${error?.description} (${request?.url})")
                     }
                 }
-                Log.d(TAG, "loadUrl (warm-up): $episodePageUrl")
+                Log.d(TAG, "solveGate: loadUrl (warm-up): $episodePageUrl")
                 webView.loadUrl(episodePageUrl)
             } catch (t: Throwable) {
                 Log.w(TAG, "webView create threw ${t.javaClass.name}: ${t.message}")
@@ -167,16 +176,15 @@ internal object TurnstileSolver {
         }
 
         try {
-            // Block the calling (network) thread until token arrives or timeout.
             val got = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
             if (!got) {
-                Log.w(TAG, "solveTurnstileToken: TIMEOUT after ${timeoutMs}ms")
+                Log.w(TAG, "solveGate: TIMEOUT after ${timeoutMs}ms (phase=${phase.get()})")
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
 
-        // Destroy the WebView on the main thread to release resources.
+        // Destroy the WebView on the main thread.
         val webView = webViewRef[0]
         if (webView != null) {
             mainHandler.post {
@@ -196,63 +204,151 @@ internal object TurnstileSolver {
             }
         }
 
-        val resolved = token[0]
-        if (resolved == null || resolved.length < 10) {
-            Log.w(TAG, "solveTurnstileToken: no token produced")
+        val resolved = resultUrl[0]
+        if (resolved == null) {
+            Log.w(TAG, "solveGate: no hoster URL produced (phase=${phase.get()})")
             return null
         }
-        // Export cookies for the gate URL (the domain the POST /r will target).
-        val cookies = try {
-            CookieManager.getInstance().getCookie(turnstileUrl) ?: ""
-        } catch (_: Throwable) { "" }
-        Log.d(TAG, "solveTurnstileToken: token=${resolved.take(24)}… cookies=${cookies.length} chars")
-        return SolveResult(resolved, cookies)
+        Log.d(TAG, "solveGate: resolved to $resolved")
+        return resolved
     }
 
     /**
-     * Poll the loaded page for the cf-turnstile-response token. The widget writes the token into
-     * a hidden form input named `cf-turnstile-response`; the JS API `turnstile.getResponse()`
-     * returns the same value once solved. We check both, every 500ms, until a token appears or
-     * the deadline expires.
+     * Poll the gate page for the cf-turnstile-response token. Once present, inject JS that fills
+     * the player-prepare-form with _token + t + altcha (Turnstile already filled its own field)
+     * and submits it. The submission triggers a navigation to the POST /r response page.
      */
-    private fun pollForToken(
+    private fun pollForTurnstileThenSubmit(
         webView: WebView,
         handler: Handler,
-        token: Array<String?>,
+        phase: java.util.concurrent.atomic.AtomicInteger,
         latch: CountDownLatch,
+        resultUrl: Array<String?>,
+        csrfToken: String,
+        tToken: String,
+        altchaPayload: String,
         deadlineMs: Long
     ) {
         if (System.currentTimeMillis() >= deadlineMs) {
+            Log.w(TAG, "pollForTurnstile: TIMEOUT before token")
             latch.countDown()
             return
         }
-        // JS that returns the token if present, else null. evaluateJavascript wraps the result in
-        // double quotes (a JSON string) or the literal "null".
         val js = "(function(){try{var el=document.querySelector('[name=cf-turnstile-response]');if(el&&el.value)return el.value;}catch(e){}try{return turnstile.getResponse();}catch(e){}return null;})();"
         try {
             webView.evaluateJavascript(js) { value ->
                 if (value != null && value != "null" && value.length > 10) {
-                    // Strip the surrounding JSON quotes that evaluateJavascript adds.
                     val cleaned = if (value.startsWith("\"") && value.endsWith("\"")) {
                         value.substring(1, value.length - 1).replace("\\\"", "\"").replace("\\/", "/")
                     } else value
-                    token[0] = cleaned
-                    latch.countDown()
+                    Log.d(TAG, "Turnstile token erhalten (${cleaned.take(20)}…), submitten")
+                    // Inject the form fields + submit. The form id on the gate page is "player-prepare-form".
+                    phase.set(2)
+                    val submitJs = buildSubmitJs(csrfToken, tToken, altchaPayload)
+                    try {
+                        webView.evaluateJavascript(submitJs) { _ ->
+                            // Submission triggers a navigation; onPageFinished (phase 2) reads the body.
+                            Log.d(TAG, "form submit injected")
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "submit inject threw ${t.javaClass.name}: ${t.message}")
+                        latch.countDown()
+                    }
                 } else {
                     handler.postDelayed({
-                        if (!latch.await(0, TimeUnit.MILLISECONDS)) {
-                            pollForToken(webView, handler, token, latch, deadlineMs)
+                        if (phase.get() < 2 && latch.count > 0) {
+                            pollForTurnstileThenSubmit(webView, handler, phase, latch, resultUrl,
+                                csrfToken, tToken, altchaPayload, deadlineMs)
                         }
                     }, POLL_INTERVAL_MS)
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "pollForToken: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
+            Log.w(TAG, "pollForTurnstile: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
             handler.postDelayed({
-                if (!latch.await(0, TimeUnit.MILLISECONDS)) {
-                    pollForToken(webView, handler, token, latch, deadlineMs)
+                if (phase.get() < 2 && latch.count > 0) {
+                    pollForTurnstileThenSubmit(webView, handler, phase, latch, resultUrl,
+                        csrfToken, tToken, altchaPayload, deadlineMs)
                 }
             }, POLL_INTERVAL_MS)
         }
     }
+
+    /**
+     * Build the JavaScript that fills the player-prepare-form and submits it. The form fields are:
+     *   - _token (CSRF, hidden input already present, we overwrite)
+     *   - t (hidden input id="player-prepare-token")
+     *   - altcha (hidden input name="altcha")
+     *   - cf-turnstile-response (already set by the Turnstile widget)
+     * We set the fields directly and call form.submit() (not HTMLFormElement.requestSubmit, which
+     * needs newer API). escapeJsString guards against quotes/backslashes in the tokens.
+     */
+    private fun buildSubmitJs(csrfToken: String, tToken: String, altchaPayload: String): String {
+        val cs = escapeJsString(csrfToken)
+        val ts = escapeJsString(tToken)
+        val ap = escapeJsString(altchaPayload)
+        return "(function(){" +
+            "var f=document.getElementById('player-prepare-form')||document.querySelector('form[action=\"/r\"]');" +
+            "if(!f){window.__gateError='no form';return;}" +
+            "function setField(name,val){var i=f.querySelector('[name=\"'+name+'\"]');if(!i){i=document.createElement('input');i.type='hidden';i.name=name;f.appendChild(i);}i.value=val;}" +
+            "setField('_token','$cs');" +
+            "setField('t','$ts');" +
+            "setField('altcha','$ap');" +
+            "f.submit();" +
+            "})();"
+    }
+
+    private fun escapeJsString(s: String): String =
+        s.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+
+    /**
+     * The POST /r response is an HTML/JS page. On success it contains `var t = "<hoster-url>"`
+     * (a postMessage to the parent iframe). We read document.body.innerHTML and extract the URL.
+     * Also check the final loaded URL (in case of a redirect to the hoster) and a generic hoster-URL
+     * regex as fallback.
+     */
+    private fun extractHosterUrlFromBody(
+        webView: WebView,
+        handler: Handler,
+        latch: CountDownLatch,
+        resultUrl: Array<String?>
+    ) {
+        val js = "(function(){try{return document.body?document.body.innerHTML:'';}catch(e){return '';}})();"
+        try {
+            webView.evaluateJavascript(js) { body ->
+                val html = if (body != null && body != "null" && body.length > 2) {
+                    if (body.startsWith("\"") && body.endsWith("\"")) {
+                        // evaluateJavascript returns a JSON-quoted string; un-escape minimally.
+                        body.substring(1, body.length - 1)
+                            .replace("\\\"", "\"").replace("\\/", "/").replace("\\n", "\n").replace("\\\\", "\\")
+                    } else body
+                } else ""
+                val url = parseHosterUrl(html) ?: try { webView.url } catch (_: Throwable) { null }
+                if (url != null && url.startsWith("http") && !url.contains("serienstream.to/r")) {
+                    resultUrl[0] = url
+                    latch.countDown()
+                } else {
+                    // No hoster URL in body -> err="..." (server rejected). Surface the err for logging.
+                    val err = Regex("""var\s+err\s*=\s*"([^"]*)"""").find(html)?.groupValues?.get(1) ?: ""
+                    Log.w(TAG, "extractHosterUrl: no hoster URL in POST /r body${if (err.isNotEmpty()) " (err=$err)" else ""}")
+                    latch.countDown()
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "extractHosterUrl threw ${t.javaClass.name}: ${t.message}")
+            latch.countDown()
+        }
+    }
+
+    /** Extract the hoster URL from the POST /r response body: `var t = "<url>"` or a direct hoster link. */
+    private fun parseHosterUrl(html: String): String? {
+        Regex("""var\s+t\s*=\s*"([^"]+)"""").find(html)?.let {
+            if (it.groupValues[1].startsWith("http")) return it.groupValues[1]
+        }
+        Regex("""(https?://[^\s"'<>]*(?:voe|dood|ds2play|streamtape|filemoon|vidhide|vidhd|playmogo|vidply|vidoza)[^\s"'<>]*)""",
+            RegexOption.IGNORE_CASE).find(html)?.let { return it.groupValues[1] }
+        return null
+    }
+
+    // (Legacy pollForToken removed — replaced by pollForTurnstileThenSubmit in the Strategie D flow.)
 }

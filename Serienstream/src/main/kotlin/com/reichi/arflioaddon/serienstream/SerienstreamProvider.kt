@@ -601,27 +601,11 @@ class SerienstreamProvider : TmdbProvider() {
             return epResp
         }
 
-        // 1b. Preflight: GET the /r?t=<token> redirect URL itself. The browser does this when
-        // the user clicks a hoster button — it loads the redirect-gate page (which embeds the
-        // ALTCHA widget). This request establishes the DDoS-Guard session cookies that the
-        // POST /r later requires. Without it the server rejects the ALTCHA solution with
-        // "Das hat leider nicht geklappt" even though the PoW is correct.
-        // instanceFollowRedirects stays true so we don't follow away to a hoster prematurely
-        // (the gate page returns 200 + JS, not a 3xx).
-        val preflightHeaders = HashMap(headers)
-        preflightHeaders["Referer"] = episodePageUrl
-        val preflightResp = doRequest(redirectUrl, preflightHeaders, cj)
-        DebugLog.t(dbg, "redirectGate: preflight /r?t= -> ${preflightResp.code} (${preflightResp.text.length}B) ddgCookies=${cj.hasAny("__ddg")}")
-
-        // Der t-token aus der redirectUrl (/r?t=<urlencoded>). Dekodieren für das POST-Feld.
-        val tToken = try {
-            val raw = redirectUrl.substringAfter("t=").substringBefore("&")
-            java.net.URLDecoder.decode(raw, "UTF-8")
-        } catch (_: Throwable) {
-            redirectUrl.substringAfter("t=").substringBefore("&")
-        }
-
-        // 2. ALTCHA Challenge holen.
+        // 1b. ALTCHA Challenge holen (java.net, mit Episode-Page-Session). Der WebView in solveGate
+        // holt sich seine eigene Session, aber das ALTCHA-PoW-Payload ist serverseitig stateless
+        // (nur salt+number+signature in der Payload) -> wir können es hier in java.net holen und an
+        // solveGate übergeben. verify-init ist NICHT DDoS-Guard-geschützt (lieferte im v41/v42-Log
+        // 200), nur der /r-Gate-Endpunkt braucht die WebView-Session.
         val chalHeaders = HashMap(headers)
         chalHeaders["Referer"] = episodePageUrl
         val chalResp = doRequest(
@@ -633,7 +617,18 @@ class SerienstreamProvider : TmdbProvider() {
             DebugLog.w(dbg, "redirectGate: verify-init -> HTTP ${chalResp.code} (DDoS-Guard blocks API?)")
             return HttpResp(chalResp.code, chalResp.text, redirectUrl)
         }
-        // 3. PoW lösen.
+        // 1c. t-token aus der redirectUrl (/r?t=<urlencoded>) dekodieren. Wird an solveGate übergeben
+        // und dort im Formular als Feld "t" gesetzt.
+        val tToken = try {
+            val raw = redirectUrl.substringAfter("t=").substringBefore("&")
+            java.net.URLDecoder.decode(raw, "UTF-8")
+        } catch (_: Throwable) {
+            redirectUrl.substringAfter("t=").substringBefore("&")
+        }
+
+        // 2. ALTCHA PoW lösen (java.security.MessageDigest, JDK). Das Payload ist serverseitig
+        // stateless (salt+number+signature) und wird an solveGate übergeben, das es ins Formular
+        // injiziert. Das Turnstile-Token holt der WebView selbst (Cloudflare Widget).
         val payload = try {
             solveAltcha(chalResp.text)
         } catch (t: Throwable) {
@@ -645,80 +640,27 @@ class SerienstreamProvider : TmdbProvider() {
             return HttpResp(0, "", redirectUrl)
         }
 
-        // 4. Cloudflare Turnstile-Token via echtem WebView lösen.
-        // Das Gate ist "turnstile_altcha" — der Server verlangt BOTH ALTCHA-PoW UND einen gültigen
-        // cf-turnstile-response. ARVIO läuft auf einem echten TV mit residential IP -> Turnstile
-        // stuft den Besucher als "high trust" ein und das Widget läuft im WebView meist unsichtbar
-        // automatisch durch (Managed/Non-Interactive mode). Token + Cookies werden vom WebView
-        // extrahiert und in den java.net POST /r eingesetzt. Siehe TurnstileSolver + AGENTS.md
-        // RECHERCHE (17.08.2026) Kategorie 3.
-        val turnstileUrl = redirectUrl // die /r?t=<token> Seite rendert das Turnstile-Widget
-        val turnstileResult = try {
-            TurnstileSolver.solveTurnstileToken(turnstileUrl, episodePageUrl)
+        // 4. STRATEGIE D: der WebView macht den GESAMTEN /r-Gate-Flow (Episode -> Gate -> Turnstile ->
+        // Form-Submit -> Hoster-URL). Alle vorherigen Versuche (Strategie A: WebView löst nur
+        // Turnstile, java.net macht POST /r) scheiterten am Cookie/Session-Mismatch — der /r?t=
+        // Token war an die java.net-Session gebunden, der WebView hatte eine eigene Session, also
+        // lehnte Serienstream ab und redirectete auf die Startseite. Strategie D macht alles in
+        // EINEM WebView, damit der Token zur WebView-Session passt. Siehe TurnstileSolver.solveGate
+        // + AGENTS.md "ERKENNTNIS #40-WebView-Turnstile" Strategie D.
+        DebugLog.t(dbg, "redirectGate: solveGate (WebView full flow) start")
+        val resolvedHosterUrl = try {
+            TurnstileSolver.solveGate(episodePageUrl, redirectUrl, csrf, tToken, payload)
         } catch (t: Throwable) {
-            DebugLog.w(dbg, "redirectGate: TurnstileSolver threw ${t.javaClass.name}: ${t.message}")
+            DebugLog.w(dbg, "redirectGate: solveGate threw ${t.javaClass.name}: ${t.message}")
             null
         }
-        if (turnstileResult == null || turnstileResult.token.isEmpty()) {
-            DebugLog.w(dbg, "redirectGate: Turnstile-Token nicht erzeugt (Timeout/kein Widget) -> POST /r wird abgelehnt")
-        } else {
-            DebugLog.t(dbg, "redirectGate: Turnstile-Token erhalten (${turnstileResult.token.take(20)}…)")
-            // Die vom WebView gesammelten DDoS-Guard-Session-Cookies in unseren CookieJar übernehmen,
-            // damit der java.net POST /r dieselbe Session verwendet. Sonst IP/Session-Mismatch.
-            if (turnstileResult.cookies.isNotEmpty()) {
-                cj.importCookieHeader(turnstileResult.cookies, redirectUrl)
-            }
+        if (resolvedHosterUrl == null) {
+            DebugLog.w(dbg, "redirectGate: solveGate lieferte keine Hoster-URL (Timeout/Server lehnt ab)")
+            return HttpResp(200, "", redirectUrl)
         }
-        val cfToken = turnstileResult?.token ?: ""
-
-        // 5. POST /r mit _token + t + altcha + cf-turnstile-response.
-        val postBody = "_token=" + java.net.URLEncoder.encode(csrf, "UTF-8") +
-            "&t=" + java.net.URLEncoder.encode(tToken, "UTF-8") +
-            "&altcha=" + java.net.URLEncoder.encode(payload, "UTF-8") +
-            "&cf-turnstile-response=" + java.net.URLEncoder.encode(cfToken, "UTF-8")
-        val postHeaders = HashMap(headers)
-        postHeaders["Referer"] = episodePageUrl
-        postHeaders["Origin"] = mainUrl
-        postHeaders["Content-Type"] = "application/x-www-form-urlencoded"
-        val postResp = doRequestPost(
-            "https://serienstream.to/r",
-            postBody,
-            postHeaders,
-            cj
-        )
-        DebugLog.t(dbg, "redirectGate: POST /r -> ${postResp.code} (${postResp.text.length}B) cfToken=${if (cfToken.isEmpty()) "empty" else "present"}")
-
-        if (postResp.code !in 200..299) {
-            return postResp
-        }
-        // 5. 200-Body parsen: Erfolg = Hoster-URL gefunden; Misserfolg = err="...".
-        val body = postResp.text
-        val errMatch = Regex("""var\s+err\s*=\s*"([^"]*)"""").find(body)
-        if (errMatch != null && errMatch.groupValues[1].isNotEmpty()) {
-            DebugLog.w(dbg, "redirectGate: server rejected ALTCHA: ${errMatch.groupValues[1]}")
-            // Der Server sendet trotzdem einen t-token zurück (postMessage an parent), den der
-            // Browser ins iframe lädt. Bei Erfolg ist err leer und t enthält die echte Hoster-URL.
-        }
-        // Bei Erfolg: der Body enthält die echte Hoster-URL im t-Feld oder als location.
-        // postMessage-Format: {type:"frameBridge",v:1,t:<url>,err:<err>} -> t ist die Hoster-URL.
-        val tMatch = Regex("""var\s+t\s*=\s*"([^"]+)"""").find(body)
-        if (tMatch != null) {
-            val resolvedUrl = tMatch.groupValues[1]
-            if (resolvedUrl.startsWith("http")) {
-                DebugLog.t(dbg, "redirectGate: resolved to $resolvedUrl")
-                return HttpResp(200, body, resolvedUrl)
-            }
-        }
-        // Fallback: direkte Hoster-URL im Body (voe/dood/streamtape/etc.).
-        val hosterUrl = Regex("""(https?://[^\s"'<>]*(?:voe|dood|ds2play|streamtape|filemoon|vidhide|vidhd|playmogo|vidply)[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
-            .find(body)?.groupValues?.get(1)
-        if (hosterUrl != null) {
-            DebugLog.t(dbg, "redirectGate: found hoster URL in body: $hosterUrl")
-            return HttpResp(200, body, hosterUrl)
-        }
-        // Keine Hoster-URL gefunden -> Return raw body (genericResolve kann noch direkt URLs finden).
-        DebugLog.w(dbg, "redirectGate: no hoster URL in POST /r response body")
-        return HttpResp(200, body, redirectUrl)
+        DebugLog.t(dbg, "redirectGate: solveGate resolved to $resolvedHosterUrl")
+        // Die Hoster-URL direkt an resolveHost zurückgeben (finalUrl = Hoster-Embed-URL).
+        return HttpResp(200, "", resolvedHosterUrl)
     }
 
     /**
