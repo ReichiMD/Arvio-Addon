@@ -137,7 +137,7 @@ internal object TurnstileSolver {
                                 // dann /r?t= Token + CSRF aus dem WebView extrahieren und Gate laden.
                                 val warmupDeadline = System.currentTimeMillis() + 15_000L
                                 checkEpisodePageReadyAndExtract(view, mainHandler, phase, latch,
-                                    extracted, hosterIndex, warmupDeadline)
+                                    extracted, hosterIndex, episodePageUrl, warmupDeadline)
                             }
                             1 -> {
                                 // Gate-Seite geladen. Auf Turnstile-Token warten, dann verify-init
@@ -226,6 +226,7 @@ internal object TurnstileSolver {
         latch: CountDownLatch,
         extracted: Array<String?>,
         hosterIndex: Int,
+        episodePageUrl: String,
         deadlineMs: Long
     ) {
         if (System.currentTimeMillis() >= deadlineMs) {
@@ -246,18 +247,23 @@ internal object TurnstileSolver {
                             val gateUrl = json.optString("gateUrl")
                             val csrf = json.optString("csrf")
                             if (gateUrl.isNotEmpty()) {
-                                extracted[0] = gateUrl
+                                // data-play-url is a RELATIVE path (/r?t=...). WebView.loadUrl does NOT
+                                // resolve relative URLs against the current page (it treats "/r?t=..."
+                                // as file:///r?t=... -> ERR_ACCESS_DENIED). Resolve it against the
+                                // episode page URL to build an absolute https://serienstream.to/r?t=... URL.
+                                val absoluteGateUrl = resolveAgainstEpisode(gateUrl, episodePageUrl)
+                                extracted[0] = absoluteGateUrl
                                 extracted[1] = csrf
                                 // Echte Seite + Token extrahiert -> Cookies flushen, Gate laden.
                                 try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
                                 val hasDdg = try {
                                     (CookieManager.getInstance().getCookie("https://serienstream.to") ?: "").contains("__ddg")
                                 } catch (_: Throwable) { false }
-                                Log.d(TAG, "episode page ready (form found, __ddg=$hasDdg), extracted gate token, loading gate: $gateUrl")
+                                Log.d(TAG, "episode page ready (form found, __ddg=$hasDdg), extracted gate token, loading gate: $absoluteGateUrl")
                                 phase.set(1)
                                 handler.postDelayed({
                                     if (latch.count > 0) {
-                                        try { webView.loadUrl(gateUrl) } catch (_: Throwable) {}
+                                        try { webView.loadUrl(absoluteGateUrl) } catch (_: Throwable) {}
                                     }
                                 }, 300L)
                                 return@evaluateJavascript
@@ -270,7 +276,7 @@ internal object TurnstileSolver {
                 // Not ready yet -> poll again.
                 handler.postDelayed({
                     if (phase.get() < 1 && latch.count > 0) {
-                        checkEpisodePageReadyAndExtract(webView, handler, phase, latch, extracted, hosterIndex, deadlineMs)
+                        checkEpisodePageReadyAndExtract(webView, handler, phase, latch, extracted, hosterIndex, episodePageUrl, deadlineMs)
                     }
                 }, POLL_INTERVAL_MS)
             }
@@ -278,9 +284,26 @@ internal object TurnstileSolver {
             Log.w(TAG, "checkEpisodePageReadyAndExtract: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
             handler.postDelayed({
                 if (phase.get() < 1 && latch.count > 0) {
-                    checkEpisodePageReadyAndExtract(webView, handler, phase, latch, extracted, hosterIndex, deadlineMs)
+                    checkEpisodePageReadyAndExtract(webView, handler, phase, latch, extracted, hosterIndex, episodePageUrl, deadlineMs)
                 }
             }, POLL_INTERVAL_MS)
+        }
+    }
+
+    /**
+     * Resolve a relative URL (e.g. "/r?t=...") against the episode page URL to build an absolute
+     * https://serienstream.to/r?t=... URL. Uses java.net.URI (JDK, never R8-obfuscated).
+     */
+    private fun resolveAgainstEpisode(relative: String, episodePageUrl: String): String {
+        return try {
+            java.net.URI(episodePageUrl).resolve(relative).toString()
+        } catch (_: Throwable) {
+            // Fallback: manual prefix if it starts with "/".
+            val base = try {
+                val u = java.net.URI(episodePageUrl)
+                "${u.scheme}://${u.host}"
+            } catch (_: Throwable) { "https://serienstream.to" }
+            if (relative.startsWith("/")) base + relative else relative
         }
     }
 
