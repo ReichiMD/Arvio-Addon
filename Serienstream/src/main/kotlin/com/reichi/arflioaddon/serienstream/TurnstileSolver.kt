@@ -133,20 +133,24 @@ internal object TurnstileSolver {
                         Log.d(TAG, "onPageFinished: phase=${phase.get()} url=$loadedUrl")
                         when (phase.get()) {
                             0 -> {
-                                // Episode-Seite geladen -> Cookies flushen, dann Gate laden.
-                                try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
-                                phase.set(1)
-                                mainHandler.postDelayed({
-                                    if (latch.count > 0) {
-                                        Log.d(TAG, "warm-up done, loading gate: $gateUrl")
-                                        try { view.loadUrl(gateUrl) } catch (_: Throwable) {}
-                                    }
-                                }, 300L)
+                                // Episode-Seite geladen -> prГјfen ob es die ECHTE Seite ist (enthГӨlt
+                                // player-prepare-form) oder eine DDoS-Guard-Challenge-Seite. Der WebView
+                                // hat eine frische Session ohne __ddg-Cookies, deshalb liefert die
+                                // Episode-Seite evtl. erst eine DDoS-Guard-Challenge (JS, das __ddg
+                                // setzt + weiterleitet). onPageFinished feuert fГјr die Challenge, nicht
+                                // die echte Seite -> wГјrden das Gate ohne __ddg laden -> Gate redirectet
+                                // auf die Startseite. Also: auf die echte Seite warten (Form vorhanden),
+                                // erst dann Gate laden.
+                                val warmupDeadline = System.currentTimeMillis() + 15_000L
+                                checkEpisodePageReady(view, mainHandler, phase, latch, gateUrl, warmupDeadline)
                             }
                             1 -> {
                                 // Gate-Seite geladen. Auf Turnstile-Token warten, dann Form submitten.
+                                // deadlineMs = currentTimeMillis + remaining timeout (not the raw
+                                // timeoutMs, which would be interpreted as an absolute epoch time).
+                                val deadline = System.currentTimeMillis() + 20_000L
                                 pollForTurnstileThenSubmit(view, mainHandler, phase, latch, resultUrl,
-                                    csrfToken, tToken, altchaPayload, timeoutMs)
+                                    csrfToken, tToken, altchaPayload, deadline)
                             }
                             2 -> {
                                 // Form submitted -> POST /r Antwort geladen. Body nach Hoster-URL durchsuchen.
@@ -211,6 +215,61 @@ internal object TurnstileSolver {
         }
         Log.d(TAG, "solveGate: resolved to $resolved")
         return resolved
+    }
+
+    /**
+     * Check whether the episode page is the REAL page (contains player-prepare-form) or a
+     * DDoS-Guard challenge page. If the form is present, the page is ready -> load the gate.
+     * If not, poll again every 500ms (the DDoS-Guard JS is still running, setting __ddg cookies
+     * and will redirect to the real page). Timeout if the form never appears.
+     */
+    private fun checkEpisodePageReady(
+        webView: WebView,
+        handler: Handler,
+        phase: java.util.concurrent.atomic.AtomicInteger,
+        latch: CountDownLatch,
+        gateUrl: String,
+        deadlineMs: Long
+    ) {
+        if (System.currentTimeMillis() >= deadlineMs) {
+            Log.w(TAG, "checkEpisodePageReady: TIMEOUT (no player-prepare-form)")
+            latch.countDown()
+            return
+        }
+        val js = "(function(){try{return !!document.getElementById('player-prepare-form')||!!document.querySelector('form[action=\"/r\"]');}catch(e){return false;}})();"
+        try {
+            webView.evaluateJavascript(js) { value ->
+                if (value == "true") {
+                    // Echte Seite -> Cookies flushen, dann Gate laden.
+                    try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
+                    val hasDdg = try {
+                        (CookieManager.getInstance().getCookie("https://serienstream.to") ?: "").contains("__ddg")
+                    } catch (_: Throwable) { false }
+                    Log.d(TAG, "episode page ready (form found, __ddg=$hasDdg), loading gate")
+                    phase.set(1)
+                    handler.postDelayed({
+                        if (latch.count > 0) {
+                            Log.d(TAG, "warm-up done, loading gate: $gateUrl")
+                            try { webView.loadUrl(gateUrl) } catch (_: Throwable) {}
+                        }
+                    }, 300L)
+                } else {
+                    // Noch Challenge-Seite -> __ddg-Cookies fehlen, weiter pollen.
+                    handler.postDelayed({
+                        if (phase.get() < 1 && latch.count > 0) {
+                            checkEpisodePageReady(webView, handler, phase, latch, gateUrl, deadlineMs)
+                        }
+                    }, POLL_INTERVAL_MS)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "checkEpisodePageReady: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
+            handler.postDelayed({
+                if (phase.get() < 1 && latch.count > 0) {
+                    checkEpisodePageReady(webView, handler, phase, latch, gateUrl, deadlineMs)
+                }
+            }, POLL_INTERVAL_MS)
+        }
     }
 
     /**
