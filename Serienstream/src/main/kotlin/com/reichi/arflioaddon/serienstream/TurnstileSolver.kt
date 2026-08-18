@@ -302,9 +302,11 @@ internal object TurnstileSolver {
         val esc = gateUrl.replace("\\", "\\\\").replace("'", "\\'")
         return """
 (function(){
-  var started=false;
+  try{
   function log(m){try{Bridge.onLog(m);}catch(e){}}
   function done(u){try{Bridge.onResult(u||'');}catch(e){}}
+  log('driver start');
+  var started=false;
   // Capture frameBridge postMessages. The gate iframe sends:
   //   {type:"frameBridge", v:1, t:"<prepare-token>"}  (initial load -> parent shows modal+turnstile+altcha)
   //   {type:"frameBridge", v:1, t:"<hoster-url>"}     (after form submit -> final hoster url)
@@ -318,13 +320,13 @@ internal object TurnstileSolver {
     // prepare-token received -> the page's gate JS renders Turnstile+ALTCHA. Start polling for submit.
     if(d.t&&!started){started=true;pollAndSubmit();}
   },false);
-  // Also intercept form submit so the POST /r response stays in the iframe (target).
   var f=document.getElementById('player-prepare-form')||document.querySelector('form[action="/r"]');
+  log('form found='+(!!f));
   if(f){
     if(!f.getAttribute('target')){f.setAttribute('target','player-iframe');}
   }
-  // Load the gate URL into the player iframe (this is what a hoster-button click does).
   var iframe=document.getElementById('player-iframe');
+  log('iframe found='+(!!iframe));
   if(!iframe){log('no player-iframe');done('');return;}
   iframe.src='$esc';
   log('iframe.src set, waiting for frameBridge');
@@ -339,8 +341,6 @@ internal object TurnstileSolver {
       var al=f.querySelector('[name=altcha]');
       var tsVal=(ts&&ts.value&&ts.value.length>10)?ts.value:'';
       var alVal=(al&&al.value&&al.value.length>10)?al.value:'';
-      // Diagnose: every 5 seconds (10 tries), log the full state so we can see exactly
-      // what is rendered and what is missing.
       if(tries%10===1){
         var tp=document.getElementById('player-prepare-turnstile');
         var ap=document.getElementById('player-prepare-altcha');
@@ -352,7 +352,6 @@ internal object TurnstileSolver {
         var errTxt=errEl?(errEl.textContent||''):'';
         log('diag try='+tries+': ts='+tsVal.slice(0,8)+' al='+alVal.slice(0,8)+' turnstile=['+tsHtml+'] altcha=['+alHtml+'] modal='+modalVis+' err='+errTxt.slice(0,30));
       }
-      // ALTCHA widget may set the value into a hidden input named 'altcha' only after solving.
       if(tsVal&&alVal){
         clearInterval(iv);
         log('turnstile+altcha ready, submitting form');
@@ -361,6 +360,7 @@ internal object TurnstileSolver {
       }
     },500);
   }
+  }catch(e){log('driver threw: '+e.message);}
 })();
 """.trimIndent()
     }
