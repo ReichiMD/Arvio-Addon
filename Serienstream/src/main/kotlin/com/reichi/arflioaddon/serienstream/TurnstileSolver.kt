@@ -149,6 +149,30 @@ internal object TurnstileSolver {
                     }
                 }
                 webView.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(
+                        view: WebView?,
+                        request: android.webkit.WebResourceRequest?
+                    ): android.webkit.WebResourceResponse? {
+                        val url = request?.url?.toString() ?: return null
+                        // Cloudflare Turnstile loads challenge resources from rotating subdomains
+                        // like brunhild.challenges.cloudflare.com that have NO public DNS A-record
+                        // (only a SOA). The WebView's system DNS fails with ERR_NAME_NOT_RESOLVED,
+                        // so turnstile.render() never creates its challenge iframe -> no token.
+                        // Fix: intercept *.challenges.cloudflare.com and fetch via java.net using
+                        // the IP of challenges.cloudflare.com (which IS resolvable) with the original
+                        // Host header + SNI. Cloudflare's edge accepts the Host header and serves
+                        // the correct content (verified: --resolve works, HTTP 404 on bad path).
+                        if (url.contains(".challenges.cloudflare.com")) {
+                            return try {
+                                interceptCloudflareChallenge(url, request)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "shouldInterceptRequest threw for $url: ${t.javaClass.name}: ${t.message}")
+                                null
+                            }
+                        }
+                        return null
+                    }
+
                     override fun onPageFinished(view: WebView, loadedUrl: String?) {
                         Log.d(TAG, "onPageFinished: phase=${phase.get()} url=$loadedUrl")
                         when (phase.get()) {
@@ -390,6 +414,137 @@ internal object TurnstileSolver {
             } catch (_: Throwable) { "https://serienstream.to" }
             if (relative.startsWith("/")) base + relative else relative
         }
+    }
+
+    /**
+     * Fetch a *.challenges.cloudflare.com resource via java.net, using the IP of
+     * challenges.cloudflare.com (which is DNS-resolvable) with the original Host header + SNI.
+     * Cloudflare's edge accepts the Host header and serves the correct content for the rotating
+     * subdomain (e.g. brunhild.challenges.cloudflare.com), even though that subdomain has no
+     * public A-record. Returns a WebResourceResponse for the WebView to use.
+     */
+    @android.annotation.SuppressLint("StaticFieldLeak")
+    private fun interceptCloudflareChallenge(
+        url: String,
+        request: android.webkit.WebResourceRequest
+    ): android.webkit.WebResourceResponse? {
+        val u = try { java.net.URI(url) } catch (_: Throwable) { return null }
+        val host = u.host ?: return null
+        // Resolve challenges.cloudflare.com (the parent) via DoH or system DNS. This IP serves
+        // all *.challenges.cloudflare.com subdomains via Host-header routing.
+        val ip = try {
+            java.net.InetAddress.getByName("challenges.cloudflare.com").hostAddress
+                ?: "104.18.94.41"
+        } catch (_: Throwable) { "104.18.94.41" }
+        val port = if (u.port > 0) u.port else 443
+        val path = u.rawPath ?: "/"
+        val query = u.rawQuery
+        val fullPath = if (query != null) "$path?$query" else path
+
+        val conn = try {
+            // Open a TLS connection to the resolved IP with SNI = original subdomain host.
+            val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS")
+            sslCtx.init(null, arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
+                override fun checkClientTrained(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+                override fun checkServerTrained(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+            }), java.security.SecureRandom())
+            // Use SSLSocket so we can set SNI before handshake.
+            val factory = sslCtx.socketFactory
+            val socket = factory.createSocket() as javax.net.ssl.SSLSocket
+            try {
+                socket.connect(java.net.InetSocketAddress(ip, port), 10_000)
+                val params = socket.sslParameters
+                if (android.os.Build.VERSION.SDK_INT >= 24) {
+                    params.serverNames = listOf(javax.net.ssl.SNIHostName(host))
+                }
+                socket.sslParameters = params
+                socket.startHandshake()
+            } catch (t: Throwable) {
+                Log.w(TAG, "interceptCloudflareChallenge: TLS to $ip:$port SNI=$host failed: ${t.message}")
+                try { socket.close() } catch (_: Throwable) {}
+                return null
+            }
+            socket
+        } catch (t: Throwable) {
+            Log.w(TAG, "interceptCloudflareChallenge: socket setup failed: ${t.message}")
+            return null
+        }
+
+        return try {
+            // Build the HTTP request manually over the TLS socket.
+            val reqHeaders = request.requestHeaders
+            val out = java.io.BufferedWriter(java.io.OutputStreamWriter(socket.outputStream, Charsets.UTF_8))
+            val method = request.method ?: "GET"
+            out.write("$method $fullPath HTTP/1.1\r\n")
+            out.write("Host: $host\r\n")
+            out.write("User-Agent: ${reqHeaders?.get("User-Agent") ?: "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}\r\n")
+            out.write("Accept: ${reqHeaders?.get("Accept") ?: "*/*"}\r\n")
+            out.write("Referer: ${reqHeaders?.get("Referer") ?: "https://serienstream.to/"}\r\n")
+            // Pass through cookie if present.
+            val cookie = reqHeaders?.get("Cookie")
+            if (cookie != null) out.write("Cookie: $cookie\r\n")
+            out.write("Connection: close\r\n")
+            out.write("\r\n")
+            out.flush()
+
+            // Read the raw HTTP response, parse status line + headers, then body.
+            val rawIn = java.io.BufferedInputStream(socket.inputStream)
+            // Read status line
+            val statusLine = readLineFromStream(rawIn) ?: return null
+            val parts = statusLine.split(" ", limit = 3)
+            val statusCode = parts.getOrNull(1)?.toIntOrNull() ?: 200
+            val reason = parts.getOrNull(2)?.trim() ?: "OK"
+            // Read headers
+            val respHeaders = java.util.HashMap<String, String>()
+            var line = readLineFromStream(rawIn)
+            while (line != null && line.isNotEmpty()) {
+                val idx = line.indexOf(':')
+                if (idx > 0) {
+                    val k = line.substring(0, idx).trim()
+                    val v = line.substring(idx + 1).trim()
+                    respHeaders[k] = v
+                }
+                line = readLineFromStream(rawIn)
+            }
+            // Read body (rest of stream)
+            val body = rawIn.readBytes()
+            Log.d(TAG, "interceptCloudflareChallenge: $url -> $statusCode (${body.size}B) via $ip SNI=$host")
+            val mimeType = respHeaders["Content-Type"] ?: "application/octet-stream"
+            val encoding = if (mimeType.contains("charset=")) {
+                mimeType.substringAfter("charset=").trim()
+            } else "UTF-8"
+            val cleanMime = mimeType.substringBefore(";").trim()
+            android.webkit.WebResourceResponse(cleanMime, encoding, java.io.ByteArrayInputStream(body))
+                .also { it.setStatusCodeAndReasonPhrase(statusCode, reason) }
+        } catch (t: Throwable) {
+            Log.w(TAG, "interceptCloudflareChallenge: read failed: ${t.message}")
+            null
+        } finally {
+            try { conn.close() } catch (_: Throwable) {}
+        }
+    }
+
+    private fun readLineFromStream(stream: java.io.InputStream): String? {
+        val baos = java.io.ByteArrayOutputStream()
+        var b: Int
+        while (true) {
+            b = try { stream.read() } catch (_: Throwable) { return null }
+            if (b == -1) {
+                return if (baos.size() == 0) null else baos.toString(Charsets.UTF_8.name())
+            }
+            if (b == 0x0d) { // \r
+                val next = stream.read()
+                if (next == 0x0a) break // \n
+                baos.write(0x0d)
+                if (next != -1) baos.write(next)
+            } else if (b == 0x0a) {
+                break
+            } else {
+                baos.write(b)
+            }
+        }
+        return baos.toString(Charsets.UTF_8.name())
     }
 
     /**
