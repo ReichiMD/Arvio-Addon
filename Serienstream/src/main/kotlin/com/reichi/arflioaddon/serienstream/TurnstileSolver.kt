@@ -339,6 +339,19 @@ internal object TurnstileSolver {
       var al=f.querySelector('[name=altcha]');
       var tsVal=(ts&&ts.value&&ts.value.length>10)?ts.value:'';
       var alVal=(al&&al.value&&al.value.length>10)?al.value:'';
+      // Diagnose: every 5 seconds (10 tries), log the full state so we can see exactly
+      // what is rendered and what is missing.
+      if(tries%10===1){
+        var tp=document.getElementById('player-prepare-turnstile');
+        var ap=document.getElementById('player-prepare-altcha');
+        var modal=document.getElementById('playerPrepareModal');
+        var tsHtml=tp?(tp.innerHTML.length+'c,iframe='+(tp.querySelector('iframe')?'yes':'no')+')':'null';
+        var alHtml=ap?(ap.innerHTML.length+'c,widget='+(ap.querySelector('altcha-widget')?'yes':'no')+')':'null';
+        var modalVis=modal?(modal.classList.contains('show')?'show':'hidden'):'null';
+        var errEl=document.getElementById('player-prepare-error');
+        var errTxt=errEl?(errEl.textContent||''):'';
+        log('diag try='+tries+': ts='+tsVal.slice(0,8)+' al='+alVal.slice(0,8)+' turnstile=['+tsHtml+'] altcha=['+alHtml+'] modal='+modalVis+' err='+errTxt.slice(0,30));
+      }
       // ALTCHA widget may set the value into a hidden input named 'altcha' only after solving.
       if(tsVal&&alVal){
         clearInterval(iv);
