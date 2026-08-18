@@ -445,11 +445,10 @@ internal object TurnstileSolver {
             // Open a TLS connection to the resolved IP with SNI = original subdomain host.
             val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS")
             sslCtx.init(null, arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
-                override fun checkClientTrained(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
-                override fun checkServerTrained(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+                override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
                 override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
             }), java.security.SecureRandom())
-            // Use SSLSocket so we can set SNI before handshake.
             val factory = sslCtx.socketFactory
             val socket = factory.createSocket() as javax.net.ssl.SSLSocket
             try {
@@ -474,7 +473,7 @@ internal object TurnstileSolver {
         return try {
             // Build the HTTP request manually over the TLS socket.
             val reqHeaders = request.requestHeaders
-            val out = java.io.BufferedWriter(java.io.OutputStreamWriter(socket.outputStream, Charsets.UTF_8))
+            val out = java.io.BufferedWriter(java.io.OutputStreamWriter(conn.outputStream, Charsets.UTF_8))
             val method = request.method ?: "GET"
             out.write("$method $fullPath HTTP/1.1\r\n")
             out.write("Host: $host\r\n")
@@ -489,7 +488,7 @@ internal object TurnstileSolver {
             out.flush()
 
             // Read the raw HTTP response, parse status line + headers, then body.
-            val rawIn = java.io.BufferedInputStream(socket.inputStream)
+            val rawIn = java.io.BufferedInputStream(conn.inputStream)
             // Read status line
             val statusLine = readLineFromStream(rawIn) ?: return null
             val parts = statusLine.split(" ", limit = 3)
