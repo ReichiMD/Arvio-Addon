@@ -140,7 +140,14 @@ internal object TurnstileSolver {
                 CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
                 webView.addJavascriptInterface(bridge, "Bridge")
 
-                webView.webChromeClient = WebChromeClient()
+                webView.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage): Boolean {
+                        val msg = consoleMessage.message()
+                        val line = consoleMessage.lineNumber()
+                        Log.d(TAG, "js:[$line] $msg")
+                        return true
+                    }
+                }
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, loadedUrl: String?) {
                         Log.d(TAG, "onPageFinished: phase=${phase.get()} url=$loadedUrl")
@@ -303,21 +310,17 @@ internal object TurnstileSolver {
         return """
 (function(){
   try{
-  function log(m){try{Bridge.onLog(m);}catch(e){}}
-  function done(u){try{Bridge.onResult(u||'');}catch(e){}}
-  log('driver start');
+  function log(m){try{console.log(m);}catch(e){}try{Bridge.onLog(m);}catch(e){}}
+  function done(u){try{Bridge.onResult(u||'');}catch(e){try{console.log('DONE:'+(u||''));}catch(e2){}}}
+  console.log('driver start');
+  log('driver start2');
   var started=false;
-  // Capture frameBridge postMessages. The gate iframe sends:
-  //   {type:"frameBridge", v:1, t:"<prepare-token>"}  (initial load -> parent shows modal+turnstile+altcha)
-  //   {type:"frameBridge", v:1, t:"<hoster-url>"}     (after form submit -> final hoster url)
-  //   {type:"frameBridge", v:1, err:"..."}            (error)
   window.addEventListener('message',function(e){
     var d=e.data;
     if(!d||d.type!=='frameBridge'||d.v!==1)return;
     log('frameBridge: t='+(d.t||'').slice(0,40)+' err='+(d.err||''));
     if(d.err&&d.err.length){done('');return;}
     if(d.t&&d.t.indexOf('http')===0){done(d.t);return;}
-    // prepare-token received -> the page's gate JS renders Turnstile+ALTCHA. Start polling for submit.
     if(d.t&&!started){started=true;pollAndSubmit();}
   },false);
   var f=document.getElementById('player-prepare-form')||document.querySelector('form[action="/r"]');
@@ -360,7 +363,7 @@ internal object TurnstileSolver {
       }
     },500);
   }
-  }catch(e){log('driver threw: '+e.message);}
+  }catch(e){try{console.log('driver threw: '+e.message);}catch(e2){}}
 })();
 """.trimIndent()
     }
