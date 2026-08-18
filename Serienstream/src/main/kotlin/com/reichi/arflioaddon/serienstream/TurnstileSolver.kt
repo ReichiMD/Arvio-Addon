@@ -355,7 +355,13 @@ internal object TurnstileSolver {
         var modalVis=modal&&modal.classList.contains('show')?'show':'hidden';
         var errEl=document.getElementById('player-prepare-error');
         var errTxt=errEl?(errEl.textContent||''):'';
-        log('diag try='+tries+': ts='+tsVal.slice(0,8)+' al='+alVal.slice(0,8)+' turnstile='+tpLen+'c,if='+tpIframe+' altcha='+apLen+'c,w='+apWidget+' modal='+modalVis+' err='+errTxt.slice(0,30));
+        var tsApi=(typeof window.turnstile!=='undefined')?'yes':'no';
+        var tsScript=document.querySelector('script[src*="challenges.cloudflare.com"]')?1:0;
+        var alScript=document.querySelector('script[src*="altcha"]')?1:0;
+        var gateInit='?';var gr=document.getElementById('episode-redirect-gate-root');if(gr){gateInit=gr.getAttribute('data-episode-redirect-gate-init')||'0';}
+        var tpHtml=tp?tp.innerHTML.substring(0,120):'null';
+        log('diag try='+tries+': ts='+tsVal.slice(0,8)+' al='+alVal.slice(0,8)+' tpIF='+tpIframe+' tsApi='+tsApi+' tsScript='+tsScript+' alScript='+alScript+' gateInit='+gateInit+' apW='+apWidget+' modal='+modalVis+' err='+errTxt.slice(0,30));
+        log('tpHtml='+tpHtml);
       }
       if(tsVal&&alVal){
         clearInterval(iv);
