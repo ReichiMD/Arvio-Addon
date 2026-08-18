@@ -95,10 +95,7 @@ internal object TurnstileSolver {
      */
     fun solveGate(
         episodePageUrl: String,
-        gateUrl: String,
-        csrfToken: String,
-        tToken: String,
-        altchaPayload: String,
+        hosterIndex: Int,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS
     ): String? {
         val ctx = context ?: run {
@@ -108,9 +105,12 @@ internal object TurnstileSolver {
         val latch = CountDownLatch(1)
         // resultUrl[0] holds the final hoster URL.
         val resultUrl = arrayOfNulls<String>(1)
+        // extracted[0] = "/r?t=<token>" URL (from the episode page, bound to the WebView session),
+        // extracted[1] = CSRF _token (from the episode page).
+        val extracted = arrayOfNulls<String>(2)
         val mainHandler = Handler(Looper.getMainLooper())
         val webViewRef = arrayOfNulls<WebView>(1)
-        // Phases: 0 = warm-up (episode), 1 = gate (/r?t=, wait for Turnstile), 2 = submit, 3 = read answer.
+        // Phases: 0 = warm-up (episode), 1 = extract+gate, 2 = wait for Turnstile, 3 = submit, 4 = read answer.
         val phase = java.util.concurrent.atomic.AtomicInteger(0)
 
         mainHandler.post {
@@ -133,28 +133,23 @@ internal object TurnstileSolver {
                         Log.d(TAG, "onPageFinished: phase=${phase.get()} url=$loadedUrl")
                         when (phase.get()) {
                             0 -> {
-                                // Episode-Seite geladen -> prГјfen ob es die ECHTE Seite ist (enthГӨlt
-                                // player-prepare-form) oder eine DDoS-Guard-Challenge-Seite. Der WebView
-                                // hat eine frische Session ohne __ddg-Cookies, deshalb liefert die
-                                // Episode-Seite evtl. erst eine DDoS-Guard-Challenge (JS, das __ddg
-                                // setzt + weiterleitet). onPageFinished feuert fГјr die Challenge, nicht
-                                // die echte Seite -> wГјrden das Gate ohne __ddg laden -> Gate redirectet
-                                // auf die Startseite. Also: auf die echte Seite warten (Form vorhanden),
-                                // erst dann Gate laden.
+                                // Episode-Seite geladen -> echte Seite abwarten (Form + __ddg),
+                                // dann /r?t= Token + CSRF aus dem WebView extrahieren und Gate laden.
                                 val warmupDeadline = System.currentTimeMillis() + 15_000L
-                                checkEpisodePageReady(view, mainHandler, phase, latch, gateUrl, warmupDeadline)
+                                checkEpisodePageReadyAndExtract(view, mainHandler, phase, latch,
+                                    extracted, hosterIndex, warmupDeadline)
                             }
                             1 -> {
-                                // Gate-Seite geladen. Auf Turnstile-Token warten, dann Form submitten.
-                                // deadlineMs = currentTimeMillis + remaining timeout (not the raw
-                                // timeoutMs, which would be interpreted as an absolute epoch time).
-                                val deadline = System.currentTimeMillis() + 20_000L
+                                // Gate-Seite geladen. Auf Turnstile-Token warten, dann verify-init
+                                // fetchen + ALTCHA + Form submitten.
+                                phase.set(2)
+                                val turnstileDeadline = System.currentTimeMillis() + 20_000L
                                 pollForTurnstileThenSubmit(view, mainHandler, phase, latch, resultUrl,
-                                    csrfToken, tToken, altchaPayload, deadline)
+                                    extracted, turnstileDeadline)
                             }
-                            2 -> {
+                            3 -> {
                                 // Form submitted -> POST /r Antwort geladen. Body nach Hoster-URL durchsuchen.
-                                phase.set(3)
+                                phase.set(4)
                                 extractHosterUrlFromBody(view, mainHandler, latch, resultUrl)
                             }
                             else -> {
@@ -219,54 +214,71 @@ internal object TurnstileSolver {
 
     /**
      * Check whether the episode page is the REAL page (contains player-prepare-form) or a
-     * DDoS-Guard challenge page. If the form is present, the page is ready -> load the gate.
-     * If not, poll again every 500ms (the DDoS-Guard JS is still running, setting __ddg cookies
-     * and will redirect to the real page). Timeout if the form never appears.
+     * DDoS-Guard challenge page. Once the real page is present, extract the /r?t= token
+     * (data-play-url of the [hosterIndex]-th hoster button) AND the CSRF _token from the
+     * WebView DOM. Both are stored in [extracted] (extracted[0] = gateUrl, extracted[1] = csrf).
+     * Then load the gate URL in the SAME WebView so the token matches the WebView session.
      */
-    private fun checkEpisodePageReady(
+    private fun checkEpisodePageReadyAndExtract(
         webView: WebView,
         handler: Handler,
         phase: java.util.concurrent.atomic.AtomicInteger,
         latch: CountDownLatch,
-        gateUrl: String,
+        extracted: Array<String?>,
+        hosterIndex: Int,
         deadlineMs: Long
     ) {
         if (System.currentTimeMillis() >= deadlineMs) {
-            Log.w(TAG, "checkEpisodePageReady: TIMEOUT (no player-prepare-form)")
+            Log.w(TAG, "checkEpisodePageReadyAndExtract: TIMEOUT (no player-prepare-form)")
             latch.countDown()
             return
         }
-        val js = "(function(){try{return !!document.getElementById('player-prepare-form')||!!document.querySelector('form[action=\"/r\"]');}catch(e){return false;}})();"
+        // JS: check form present, and if so, return JSON {gateUrl, csrf} for the hosterIndex-th button.
+        val js = "(function(){try{var f=document.getElementById('player-prepare-form')||document.querySelector('form[action=\"/r\"]');if(!f)return 'noform';var btns=document.querySelectorAll('[data-play-url]');if(!btns||btns.length<=" + hosterIndex + ")return 'nobtn';var pu=btns[" + hosterIndex + "].getAttribute('data-play-url');var ti=f.querySelector('[name=\"_token\"]');var csrf=ti?ti.value:'';return JSON.stringify({gateUrl:pu,csrf:csrf});}catch(e){return 'err:'+e.message;}})();"
         try {
             webView.evaluateJavascript(js) { value ->
-                if (value == "true") {
-                    // Echte Seite -> Cookies flushen, dann Gate laden.
-                    try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
-                    val hasDdg = try {
-                        (CookieManager.getInstance().getCookie("https://serienstream.to") ?: "").contains("__ddg")
-                    } catch (_: Throwable) { false }
-                    Log.d(TAG, "episode page ready (form found, __ddg=$hasDdg), loading gate")
-                    phase.set(1)
-                    handler.postDelayed({
-                        if (latch.count > 0) {
-                            Log.d(TAG, "warm-up done, loading gate: $gateUrl")
-                            try { webView.loadUrl(gateUrl) } catch (_: Throwable) {}
+                if (value != null && value != "null" && value.length > 10 && value.startsWith("\"")) {
+                    // Strip JSON quotes.
+                    val raw = value.substring(1, value.length - 1).replace("\\\"", "\"").replace("\\/", "/").replace("\\\\", "\\")
+                    if (raw.startsWith("{") && raw.contains("gateUrl")) {
+                        try {
+                            val json = org.json.JSONObject(raw)
+                            val gateUrl = json.optString("gateUrl")
+                            val csrf = json.optString("csrf")
+                            if (gateUrl.isNotEmpty()) {
+                                extracted[0] = gateUrl
+                                extracted[1] = csrf
+                                // Echte Seite + Token extrahiert -> Cookies flushen, Gate laden.
+                                try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
+                                val hasDdg = try {
+                                    (CookieManager.getInstance().getCookie("https://serienstream.to") ?: "").contains("__ddg")
+                                } catch (_: Throwable) { false }
+                                Log.d(TAG, "episode page ready (form found, __ddg=$hasDdg), extracted gate token, loading gate: $gateUrl")
+                                phase.set(1)
+                                handler.postDelayed({
+                                    if (latch.count > 0) {
+                                        try { webView.loadUrl(gateUrl) } catch (_: Throwable) {}
+                                    }
+                                }, 300L)
+                                return@evaluateJavascript
+                            }
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "checkEpisodePageReadyAndExtract: JSON parse threw ${t.javaClass.name}: ${t.message}")
                         }
-                    }, 300L)
-                } else {
-                    // Noch Challenge-Seite -> __ddg-Cookies fehlen, weiter pollen.
-                    handler.postDelayed({
-                        if (phase.get() < 1 && latch.count > 0) {
-                            checkEpisodePageReady(webView, handler, phase, latch, gateUrl, deadlineMs)
-                        }
-                    }, POLL_INTERVAL_MS)
+                    }
                 }
+                // Not ready yet -> poll again.
+                handler.postDelayed({
+                    if (phase.get() < 1 && latch.count > 0) {
+                        checkEpisodePageReadyAndExtract(webView, handler, phase, latch, extracted, hosterIndex, deadlineMs)
+                    }
+                }, POLL_INTERVAL_MS)
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "checkEpisodePageReady: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
+            Log.w(TAG, "checkEpisodePageReadyAndExtract: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
             handler.postDelayed({
                 if (phase.get() < 1 && latch.count > 0) {
-                    checkEpisodePageReady(webView, handler, phase, latch, gateUrl, deadlineMs)
+                    checkEpisodePageReadyAndExtract(webView, handler, phase, latch, extracted, hosterIndex, deadlineMs)
                 }
             }, POLL_INTERVAL_MS)
         }
@@ -283,9 +295,7 @@ internal object TurnstileSolver {
         phase: java.util.concurrent.atomic.AtomicInteger,
         latch: CountDownLatch,
         resultUrl: Array<String?>,
-        csrfToken: String,
-        tToken: String,
-        altchaPayload: String,
+        extracted: Array<String?>,
         deadlineMs: Long
     ) {
         if (System.currentTimeMillis() >= deadlineMs) {
@@ -300,24 +310,13 @@ internal object TurnstileSolver {
                     val cleaned = if (value.startsWith("\"") && value.endsWith("\"")) {
                         value.substring(1, value.length - 1).replace("\\\"", "\"").replace("\\/", "/")
                     } else value
-                    Log.d(TAG, "Turnstile token erhalten (${cleaned.take(20)}…), submitten")
-                    // Inject the form fields + submit. The form id on the gate page is "player-prepare-form".
-                    phase.set(2)
-                    val submitJs = buildSubmitJs(csrfToken, tToken, altchaPayload)
-                    try {
-                        webView.evaluateJavascript(submitJs) { _ ->
-                            // Submission triggers a navigation; onPageFinished (phase 2) reads the body.
-                            Log.d(TAG, "form submit injected")
-                        }
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "submit inject threw ${t.javaClass.name}: ${t.message}")
-                        latch.countDown()
-                    }
+                    Log.d(TAG, "Turnstile token obtained (${cleaned.take(20)}...), fetch verify-init + solve ALTCHA")
+                    phase.set(3)
+                    fetchVerifyInitAndSubmit(webView, handler, phase, latch, resultUrl, extracted)
                 } else {
                     handler.postDelayed({
-                        if (phase.get() < 2 && latch.count > 0) {
-                            pollForTurnstileThenSubmit(webView, handler, phase, latch, resultUrl,
-                                csrfToken, tToken, altchaPayload, deadlineMs)
+                        if (phase.get() < 3 && latch.count > 0) {
+                            pollForTurnstileThenSubmit(webView, handler, phase, latch, resultUrl, extracted, deadlineMs)
                         }
                     }, POLL_INTERVAL_MS)
                 }
@@ -325,11 +324,74 @@ internal object TurnstileSolver {
         } catch (t: Throwable) {
             Log.w(TAG, "pollForTurnstile: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
             handler.postDelayed({
-                if (phase.get() < 2 && latch.count > 0) {
-                    pollForTurnstileThenSubmit(webView, handler, phase, latch, resultUrl,
-                        csrfToken, tToken, altchaPayload, deadlineMs)
+                if (phase.get() < 3 && latch.count > 0) {
+                    pollForTurnstileThenSubmit(webView, handler, phase, latch, resultUrl, extracted, deadlineMs)
                 }
             }, POLL_INTERVAL_MS)
+        }
+    }
+
+    /**
+     * Fetch /api/inline/verify-init from the WebView context (so it uses the WebView session cookies),
+     * solve the ALTCHA PoW in Kotlin (java.security.MessageDigest), then inject JS that fills the
+     * player-prepare-form with _token + t + altcha and submits it.
+     */
+    private fun fetchVerifyInitAndSubmit(
+        webView: WebView,
+        handler: Handler,
+        phase: java.util.concurrent.atomic.AtomicInteger,
+        latch: CountDownLatch,
+        resultUrl: Array<String?>,
+        extracted: Array<String?>
+    ) {
+        val csrf = extracted[1] ?: ""
+        val gateUrl = extracted[0] ?: ""
+        val tToken = try {
+            val raw = gateUrl.substringAfter("t=").substringBefore("&")
+            java.net.URLDecoder.decode(raw, "UTF-8")
+        } catch (_: Throwable) {
+            gateUrl.substringAfter("t=").substringBefore("&")
+        }
+        val cs = escapeJsString(csrf)
+        val ts = escapeJsString(tToken)
+        // JS: fetch verify-init (runs in the WebView so it sends the WebView session cookies), return JSON text.
+        val fetchJs = "(function(){return fetch('/api/inline/verify-init',{credentials:'include'}).then(function(r){return r.text();}).then(function(t){return t;}).catch(function(e){return 'err:'+e.message;});})();"
+        try {
+            webView.evaluateJavascript(fetchJs) { value ->
+                val raw = if (value != null && value != "null" && value.startsWith("\"") && value.endsWith("\"")) {
+                    value.substring(1, value.length - 1).replace("\\\"", "\"").replace("\\/", "/").replace("\\n", "\n").replace("\\\\", "\\")
+                } else value ?: ""
+                if (raw.startsWith("{") && raw.contains("challenge")) {
+                    val payload = try {
+                        SerienstreamProvider.solveAltchaStatic(raw)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "fetchVerifyInitAndSubmit: solveAltcha threw ${t.javaClass.name}: ${t.message}")
+                        ""
+                    }
+                    if (payload.isEmpty()) {
+                        Log.w(TAG, "fetchVerifyInitAndSubmit: ALTCHA PoW not solvable")
+                        latch.countDown()
+                        return@evaluateJavascript
+                    }
+                    Log.d(TAG, "ALTCHA PoW solved (payload ${payload.length} chars), submitting form")
+                    val ap = escapeJsString(payload)
+                    val submitJs = buildSubmitJs(cs, ts, ap)
+                    try {
+                        webView.evaluateJavascript(submitJs) { _ ->
+                            Log.d(TAG, "form submit injected")
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "submit inject threw ${t.javaClass.name}: ${t.message}")
+                        latch.countDown()
+                    }
+                } else {
+                    Log.w(TAG, "fetchVerifyInitAndSubmit: verify-init fetch failed: ${raw.take(80)}")
+                    latch.countDown()
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "fetchVerifyInitAndSubmit: evaluateJavascript threw ${t.javaClass.name}: ${t.message}")
+            latch.countDown()
         }
     }
 

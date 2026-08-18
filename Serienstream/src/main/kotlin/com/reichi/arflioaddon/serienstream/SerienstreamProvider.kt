@@ -495,10 +495,10 @@ class SerienstreamProvider : TmdbProvider() {
         // Handler interfere with each other + exhaust the 60s loadLinks timeout (4 x 30s = 120s).
         // Resolve hosters one at a time; stop at the first that emits a source.
         var any = false
-        for ((hostUrl, provider, language) in entries) {
-            if (any) break
+        entries.forEachIndexed { idx, (hostUrl, provider, language) ->
+            if (any) return@forEachIndexed
             try {
-                if (resolveHost(hostUrl, provider, language, data, callback)) any = true
+                if (resolveHost(hostUrl, provider, language, data, callback, idx)) any = true
             } catch (t: Throwable) {
                 DebugLog.w(dbg, "loadLinks: hoster threw ${t.javaClass.name}: ${t.message}")
             }
@@ -517,18 +517,25 @@ class SerienstreamProvider : TmdbProvider() {
         provider: String,
         language: String,
         episodePageUrl: String,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        hosterIndex: Int
     ): Boolean {
         return try {
-            // Follow the /r? redirect to the real hoster embed URL. httpGet follows redirects
-            // and attempts the DDoS-Guard bypass; the .url field is the final URL after redirects.
-            // Serienstream's data-play-url is a /r?t=<encrypted> redirect protected by ALTCHA
-            // Proof-of-Work (see Erkenntnis #20). The old DDoS-Guard bypass doesn't help here;
-            // we solve the ALTCHA PoW and POST /r with the solution to get the real hoster URL.
-            // Falls the ALTCHA flow fails (DDoS-Guard blocks verify-init on this IP), we fall
-            // back to a direct httpGet (which may work on the TV where it fails on laptop).
+            // Follow the /r? redirect to the real hoster embed URL. Serienstream's data-play-url is
+            // a /r?t=<encrypted> redirect protected by Cloudflare Turnstile + ALTCHA PoW (Erkenntnis
+            // #20). Strategie D: der WebView macht den gesamten Gate-Flow in EINER Session (Episode
+            // laden -> /r?t= Token aus dem WebView extrahieren -> Gate laden -> Turnstile -> Form
+            // submitten -> Hoster-URL). Siehe TurnstileSolver.solveGate + AGENTS.md #40.
             val resolved: HttpResp = if (hostUrl.contains("/r?t=") || hostUrl.contains("/r%3Ft%3D")) {
-                resolveRedirectGate(hostUrl, episodePageUrl)
+                DebugLog.t(dbg, "redirectGate: solveGate (WebView full flow) start, hosterIndex=$hosterIndex")
+                val resolvedUrl = TurnstileSolver.solveGate(episodePageUrl, hosterIndex)
+                if (resolvedUrl == null) {
+                    DebugLog.w(dbg, "redirectGate: solveGate lieferte keine Hoster-URL (Timeout/Server lehnt ab)")
+                    HttpResp(0, "", hostUrl)
+                } else {
+                    DebugLog.t(dbg, "redirectGate: solveGate resolved to $resolvedUrl")
+                    HttpResp(200, "", resolvedUrl)
+                }
             } else {
                 httpGet(hostUrl, referer = episodePageUrl)
             }
@@ -560,115 +567,18 @@ class SerienstreamProvider : TmdbProvider() {
 
     // ---- Hoster extractors ----
 
-    /**
-     * Resolve Serienstream's /r?t=<encrypted> redirect via ALTCHA Proof-of-Work (Erkenntnis #20).
-     *
-     * Flow (verified live, Aug 2026):
-     *  1. GET episode page (with session cookies) -> extract CSRF _token + the /r?t= token.
-     *  2. GET /api/inline/verify-init -> {algorithm:"SHA-256", challenge, salt, maxnumber, signature}.
-     *  3. Solve PoW: find n in 0..maxnumber where SHA-256(salt + str(n)) == challenge.
-     *  4. Build ALTCHA payload = base64(JSON{algorithm, challenge, number, salt, signature}).
-     *  5. POST /r with form fields _token + t (decoded token) + altcha (payload) -> 200 with JS body.
-     *  6. The 200 body contains either `var err = "..."` (failure -> retry/fallback) or a redirect
-     *     to the real hoster URL (window.location / iframe src / postMessage t=<real-url>).
-     *
-     * All non-suspend (java.net + java.security.MessageDigest). java.security is JDK, never
-     * obfuscated by R8. android.util.Base64 already used in voeDecode. The whole flow uses a
-     * dedicated CookieJar so the Laravel session + XSRF-TOKEN persist from episode page to POST.
-     *
-     * Note: on laptop this fails at step 5 with err="Das hat leider nicht geklappt" because the
-     * DDoS-Guard blocks the /r?t= preflight (403). On the TV (different IP) the /r?t= returns 200
-     * with the challenge iframe, so the session has valid DDoS-Guard cookies -> POST succeeds.
-     */
-    private fun resolveRedirectGate(redirectUrl: String, episodePageUrl: String): HttpResp {
-        val cj = CookieJar()
-        val headers = mapOf(
-            "User-Agent" to mobileUA,
-            "Accept" to "text/html,application/json,*/*",
-            "Accept-Language" to "de-DE,de;q=0.9,en;q=0.8"
-        )
-        // 1. Episode-Seite laden (setzt Session + XSRF-TOKEN Cookies).
-        val epHeaders = HashMap(headers)
-        epHeaders["Referer"] = mainUrl
-        val epResp = doRequest(episodePageUrl, epHeaders, cj)
-        if (epResp.code !in 200..299) {
-            DebugLog.w(dbg, "redirectGate: episode page $episodePageUrl -> HTTP ${epResp.code}")
-            return epResp
-        }
-        val csrf = Regex("""name="_token"\s+value="([^"]+)"""").find(epResp.text)?.groupValues?.get(1) ?: ""
-        if (csrf.isEmpty()) {
-            DebugLog.w(dbg, "redirectGate: no CSRF _token on episode page")
-            return epResp
-        }
-
-        // 1b. ALTCHA Challenge holen (java.net, mit Episode-Page-Session). Der WebView in solveGate
-        // holt sich seine eigene Session, aber das ALTCHA-PoW-Payload ist serverseitig stateless
-        // (nur salt+number+signature in der Payload) -> wir können es hier in java.net holen und an
-        // solveGate übergeben. verify-init ist NICHT DDoS-Guard-geschützt (lieferte im v41/v42-Log
-        // 200), nur der /r-Gate-Endpunkt braucht die WebView-Session.
-        val chalHeaders = HashMap(headers)
-        chalHeaders["Referer"] = episodePageUrl
-        val chalResp = doRequest(
-            "https://serienstream.to/api/inline/verify-init",
-            chalHeaders,
-            cj
-        )
-        if (chalResp.code !in 200..299) {
-            DebugLog.w(dbg, "redirectGate: verify-init -> HTTP ${chalResp.code} (DDoS-Guard blocks API?)")
-            return HttpResp(chalResp.code, chalResp.text, redirectUrl)
-        }
-        // 1c. t-token aus der redirectUrl (/r?t=<urlencoded>) dekodieren. Wird an solveGate übergeben
-        // und dort im Formular als Feld "t" gesetzt.
-        val tToken = try {
-            val raw = redirectUrl.substringAfter("t=").substringBefore("&")
-            java.net.URLDecoder.decode(raw, "UTF-8")
-        } catch (_: Throwable) {
-            redirectUrl.substringAfter("t=").substringBefore("&")
-        }
-
-        // 2. ALTCHA PoW lösen (java.security.MessageDigest, JDK). Das Payload ist serverseitig
-        // stateless (salt+number+signature) und wird an solveGate übergeben, das es ins Formular
-        // injiziert. Das Turnstile-Token holt der WebView selbst (Cloudflare Widget).
-        val payload = try {
-            solveAltcha(chalResp.text)
-        } catch (t: Throwable) {
-            DebugLog.w(dbg, "redirectGate: solveAltcha threw ${t.javaClass.name}: ${t.message}")
-            return HttpResp(0, "", redirectUrl)
-        }
-        if (payload.isEmpty()) {
-            DebugLog.w(dbg, "redirectGate: ALTCHA PoW not solvable (maxnumber too low?)")
-            return HttpResp(0, "", redirectUrl)
-        }
-
-        // 4. STRATEGIE D: der WebView macht den GESAMTEN /r-Gate-Flow (Episode -> Gate -> Turnstile ->
-        // Form-Submit -> Hoster-URL). Alle vorherigen Versuche (Strategie A: WebView löst nur
-        // Turnstile, java.net macht POST /r) scheiterten am Cookie/Session-Mismatch — der /r?t=
-        // Token war an die java.net-Session gebunden, der WebView hatte eine eigene Session, also
-        // lehnte Serienstream ab und redirectete auf die Startseite. Strategie D macht alles in
-        // EINEM WebView, damit der Token zur WebView-Session passt. Siehe TurnstileSolver.solveGate
-        // + AGENTS.md "ERKENNTNIS #40-WebView-Turnstile" Strategie D.
-        DebugLog.t(dbg, "redirectGate: solveGate (WebView full flow) start")
-        val resolvedHosterUrl = try {
-            TurnstileSolver.solveGate(episodePageUrl, redirectUrl, csrf, tToken, payload)
-        } catch (t: Throwable) {
-            DebugLog.w(dbg, "redirectGate: solveGate threw ${t.javaClass.name}: ${t.message}")
-            null
-        }
-        if (resolvedHosterUrl == null) {
-            DebugLog.w(dbg, "redirectGate: solveGate lieferte keine Hoster-URL (Timeout/Server lehnt ab)")
-            return HttpResp(200, "", redirectUrl)
-        }
-        DebugLog.t(dbg, "redirectGate: solveGate resolved to $resolvedHosterUrl")
-        // Die Hoster-URL direkt an resolveHost zurückgeben (finalUrl = Hoster-Embed-URL).
-        return HttpResp(200, "", resolvedHosterUrl)
-    }
 
     /**
      * ALTCHA Proof-of-Work solver. Given the verify-init JSON response, finds n in 0..maxnumber
      * where SHA-256(salt + str(n)) == challenge, then returns base64(JSON payload).
      * Uses java.security.MessageDigest (JDK, never R8-obfuscated).
      */
-    private fun solveAltcha(initJson: String): String {
+    /** Static wrapper so TurnstileSolver can solve ALTCHA PoW without a provider instance. */
+    internal fun solveAltchaStatic(initJson: String): String = solveAltchaImpl(initJson)
+
+    private fun solveAltcha(initJson: String): String = solveAltchaImpl(initJson)
+
+    private fun solveAltchaImpl(initJson: String): String {
         val obj = JSONObject(initJson)
         val algorithm = obj.optString("algorithm", "SHA-256")
         val challenge = obj.optString("challenge", "")
