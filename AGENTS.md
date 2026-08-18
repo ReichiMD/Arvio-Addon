@@ -3,6 +3,159 @@
 Dieses Repo baut ein **Cloudstream3-kompatibles Plugin** fвҖ“ДҸвҖңДҸвҖ“ГӯвҖ”Д—r die **ARVIO** Android-TV-App (sideload-APK).
 Ziel: Ventix-FunktionalitвҖ“ДҸвҖңДҸвҖ“ГӯвҖқВ®t (deutsche Web-Scraper + Stalker-VOD) als Plugin in ARVIO laufen lassen вҖ“ДҸвҖ”ДӣвҖ“ГӯвҖңД–вҖ“ГӯвҖҡГ„Гә clientseitig, ohne Server.
 
+---
+
+## вҖјпёҸ NEUESTER STAND (18.08.2026, Ende Session вҖ” VOR ALLEM ANDEREN LESEN)
+
+**DREI Scraper liefern Quellen (stabil, getestet), SERIENSTREAM BLOCKIERT (Turnstile-iframe rendert nicht).**
+
+**Builds-Branch (nach CI-Push von Commit da36007):**
+- **KinoGer.cs3 v11** (status=1) вҖ” вң… liefert 3 Quellen (Incvideo 360p/720p/1080p MP4).
+- **FilmPalast.cs3 v37** (status=1) вҖ” вң… liefert 2 Quellen (Odysseusa 720p m3u8, Vidsonic 720p m3u8).
+- **Vavoo.cs3 v5** (status=1) вҖ” вң… liefert 6 Mirrors (API-basiert, MediaHubMX). Vavoo-Module gelГӨuft seit v48 (Download + load + 30 episodes + ping + mediahubmx-source.json + 6 Mirrors). Hoster-Extraktion: vidoza/dood 403/404 (DDoS-Guard), Rest via genericResolve.
+- **Serienstream.cs3 v53** (status=1) вҖ” вқҢ Turnstile-iframe rendert nicht. **Strategie D + shouldInterceptRequest-Bridge implementiert, aber Widget blockiert.**
+
+### SERIENSTREAM TURNSTILE-BYPASS вҖ” VOLLSTГ„NDIGE DOKUMENTATION (Stand 18.08.2026)
+
+**Das Ziel:** Serienstream.to nutzt fГјr /r?-Redirect-Gate `turnstile_altcha` (Cloudflare Turnstile + ALTCHA-PoW). Hoster-URLs sind hinter diesem Gate versteckt. Ohne LГ¶sung = 0 Quellen.
+
+**ARCHITEKTUR (Strategie D, implementiert in v45-v53):**
+- `TurnstileSolver.kt` nutzt echten Android WebView, um Serienstreams EIGENE Gate-JS laufen zu lassen.
+- Flow: WebView lГӨdt Episode-Seite вҶ’ injiziert "driver-JS" вҶ’ driver-JS setzt `player-iframe.src = /r?t=...` вҶ’ iframe lГӨdt Gate-Seite вҶ’ iframe postMessage({type:"frameBridge", v:1, t:"<prepare-token>"}) an Parent вҶ’ Serienstreams eigene Gate-JS rendert Turnstile + ALTCHA in Modal вҶ’ driver-JS pollt bis beide Tokens da вҶ’ driver-JS submittet Form (POST /r) вҶ’ iframe lГӨdt Antwort вҶ’ postMessage({t:"<hoster-url>"}) вҶ’ driver-JS gibt hoster-url an Kotlin via Bridge.
+- **WICHTIG:** /r?t= MUSS im iframe geladen werden (nicht top-level!). Top-level = Redirect zur Startseite. (Erkenntnis v47.)
+- **WICHTIG:** data-play-url ist RELATIV (/r?t=...). WebView.loadUrl macht KEINE relative AuflГ¶sung (interpretiert als file:///). Muss via `new URL(pu, window.location.origin).href` im JS zu absolutem URL machen. (Erkenntnis v46.)
+
+**was FUNKTIONIERT (v53 bestГӨtigt):**
+- ✅ driver-JS lГӨuft (Log: `driver start`, `form found=true`, `iframe found=true`)
+- ✅ iframe lГӨdt, `frameBridge: t=... err=` postMessage kommt an (nach ~150ms)
+- ✅ Gate-JS initialisiert (`gateInit=1`), Modal sichtbar (`modal=show`)
+- ✅ Turnstile-API geladen (`tsApi=yes`, `tsScript=1`), `turnstile.render()` aufgerufen (hidden input `cf-turnstile-response` im DOM)
+- ✅ **shouldInterceptRequest-DoH-Bridge FUNKTIONIERT**: `interceptCloudflareChallenge: brunhild.challenges.cloudflare.com -> 204 (0B) via 104.18.94.41 SNI=brunhild.challenges.cloudflare.com` (kein ERR_NAME_NOT_RESOLVED mehr!)
+
+**was NICHT FUNKTIONIERT (v53 bestГӨtigt, offen):**
+- вқҢ `tpIF=0` (konstant Гјber alle 8 diag-Versuche): Turnstile-Widget rendert KEINEN iframe. `turnstile.render()` wurde aufgerufen (hidden input da), aber der challenge-iframe fehlt. Das Widget bleibt im "Loading"-Zustand, kein Token.
+- вқҢ `ts=` (cf-turnstile-response bleibt leer): kein Token.
+- вқҢ `alScript=0`, `apW=0`: ALTCHA-Widget wird GAR NICHT geladen. Kein `<script src*="altcha">`, kein `<altcha-widget>` custom element im DOM.
+- вқҢ Cloudflare liefert HTTP 204 (No Content, 0 Bytes) fГјr die brunhild-Challenge-Ressource. Erwartet wГӨre HTTP 200 mit Challenge-Script. MГ¶gliche Ursache: fehlende Cookies, fehlende Headers, oder der TrustManager (akzeptiert alle Zertifikate) stГ¶rt.
+
+**DIAGNOSE-LOGS (v53, SchlГјsselzeilen):**
+```
+episode page ready (form found, __ddg=true), starting gate flow: https://serienstream.to/r?t=...
+gate driver JS injected
+bridge.log: frameBridge: t=eyJpdiI6... err=
+interceptCloudflareChallenge: brunhild.challenges.cloudflare.com/... -> 204 (0B) via 104.18.94.41 SNI=brunhild.challenges.cloudflare.com
+diag try=1/11/21/.../71: ts= al= tpIF=0 tsApi=yes tsScript=1 alScript=0 gateInit=1 apW=0 modal=show err=
+tpHtml=<div><input type="hidden" name="cf-turnstile-response" id="cf-chl-widget-ujuyf_response"></div>
+submit poll timeout
+```
+
+### NAECHSTE SCHRITTE FГңR SERIENSTREAM (Prio 1, Reihenfolge beachten)
+
+**Problem 1 (hГ¶chste Prio): Turnstile-iframe rendert nicht (tpIF=0).**
+- Hypothese A: HTTP 204 statt 200. Die shouldInterceptRequest-Bridge liefert eine leere Antwort. Cloudflare erwartet vielleicht echte Challenge-Daten. PrГјfen: ob Cookies weitergegeben werden (Cookie-Header im Request?), ob der TrustManager stГ¶rt, ob der SNI/Host-Header korrekt ist, ob HTTP/2 nГ¶tig ist (wir nutzen HTTP/1.1).
+- Hypothese B: Die IP des Handys wird als "medium-trust" eingestuft, und das Widget braucht eine sichtbare Challenge (Bilderauswahl), die im unsichtbaren WebView nicht gelГ¶st werden kann. Test: WebView sichtbar machen? Nicht mГ¶glich im Plugin.
+- Hypothese C: Der WebView-Cookie-Speicher und der shouldInterceptRequest-Cookie-Header sind getrennt. Die Challenge-Ressource braucht vielleicht DDoS-Guard-Cookies (`__ddg*`), die im WebView gesetzt wurden, aber im shouldInterceptRequest nicht weitergegeben werden.
+- **Fix-Versuche (Reihenfolge):**
+  1. PrГјfen, welche Cookies der WebView fГјr *.challenges.cloudflare.com gesetzt hat (CookieManager.getCookie), und sie im shouldInterceptRequest als Cookie-Header mitsenden. (Aktuell wird nur der Cookie aus request.requestHeaders weitergegeben вҖ” aber der WebView setzt die Cookies vielleicht nicht in requestHeaders.)
+  2. PrГјfen, ob HTTP/2 nГ¶tig ist. Cloudflare liefert Гјber HTTP/2 vielleicht andere Antworten. Wir nutzen HTTP/1.1 Гјber den raw socket.
+  3. PrГјfen, ob der TrustManager (akzeptiert alle Zertifikate) das Problem ist. Echten TrustManager nutzen (system default).
+  4. Alternativ: die gesamte Challenge-Ressource Гјber java.net + DohHttp laden (wie die anderen Scraper), nicht Гјber raw socket. DohHttp hat schon SNI + Cookie + HTTP/2 (Гјber HttpURLConnection). Aber: HttpURLConnection nutzt HTTP/1.1, kein HTTP/2.
+  5. Diagnose: den Response-Body der 204-Antwort loggen ( aktuell 0 Bytes, aber vielleicht sind es gar nicht 0 Bytes, sondern der InputStream ist geschlossen).
+
+**Problem 2: ALTCHA-Widget fehlt (alScript=0, apW=0).**
+- Das Gate-JS ruft `await x()` auf, das `import("./altcha-BhBXWxP7.js")` macht (ES-Module-Import). Der Import schlГӨgt vielleicht fehl (CSP, oder der WebView unterstГјtzt keine ES-Module, oder der relative Pfad ist falsch).
+- PrГјfung: loggen, ob der Import fehlschlГӨgt (console.error abfangen). Oder: ALTCHA manuell nachladen (script-tag fГјr altcha-BhBXWxP7.js injizieren).
+- Bedingung im Gate-JS: `if("turnstile_altcha"===c&&y&&m&&window.isSecureContext)`. PrГјfen, ob `window.isSecureContext` true ist (sollte true sein bei HTTPS, aber WebView verhГӨlt sich evtl. anders).
+- **Fix-Versuche:**
+  1. `window.isSecureContext` in diag loggen. Wenn false: WebView-Konfiguration anpassen.
+  2. ALTCHA-Modul manuell laden: script-tag fГјr `https://serienstream.to/build/assets/altcha-BhBXWxP7.js` injizieren, dann das `<altcha-widget>` custom element manuell erstellen.
+  3. ALTCHA selbst lГ¶sen (PoW in Kotlin, wie in alter solveAltcha-Methode) und das Form-Feld `altcha` manuell setzen. Das umgeht das ALTCHA-Widget komplett.
+
+**Problem 3 (fallback): Falls Turnstile nicht lГ¶sbar, ALTCHA allein nutzen.**
+- Das Gate heiГҹt `turnstile_altcha` вҖ” es braucht BEIDE. Ohne Turnstile-Token lehnt der Server ab. ALTCHA allein reicht nicht (in v32 bestГӨtigt: "Das hat leider nicht geklappt").
+- Falls Turnstile gar nicht lГ¶sbar: Serienstream DEAKTIVIEREN (wie in v39, status=0 + registerMainAPI auskommentiert). Provider-Code + TurnstileSolver + Bridge BEHALTEN fГјr spГӨtere Reaktivierung.
+
+### TECHNISCHE DETAILS FГңR DIE NГ„CHSTE SESSION
+
+**WICHTIGE DATEIEN:**
+- `Serienstream/src/main/kotlin/com/reichi/arflioaddon/serienstream/TurnstileSolver.kt` вҖ” der ganze WebView-Flow (solveGate, checkEpisodePageReadyAndStartGate, buildGateDriverJs, interceptCloudflareChallenge, readLineFromStream, resolveAgainstEpisode). Version in `Serienstream/build.gradle.kts` (aktuell v53).
+- `Serienstream/src/main/kotlin/com/reichi/arflioaddon/serienstream/SerienstreamProvider.kt` вҖ” ruft `TurnstileSolver.solveGate(episodePageUrl, hosterIndex)` in resolveHost. Hoster-AuflГ¶sung SEQUENTIELL (nicht parallel, sonst WebView-Race).
+- `Serienstream/src/main/kotlin/com/reichi/arflioaddon/serienstream/SerienstreamPlugin.kt` вҖ” init(context) speichert Activity-Context fГјr WebView.
+
+**shouldInterceptRequest-Logik (v53):**
+- FГӨngt alle URLs mit `.challenges.cloudflare.com` ab (Suffix-Match).
+- LГӨdt die Ressource Гјber einen raw TLS-Socket (SSLSocket) mit:
+  - IP = `challenges.cloudflare.com` (via `InetAddress.getByName`, Fallback 104.18.94.41)
+  - SNI = originaler Host (z.B. brunhild.challenges.cloudflare.com) via `params.serverNames = listOf(SNIHostName(host))` (API 24+)
+  - Host-Header = originaler Host
+  - TrustManager akzeptiert ALLE Zertifikate (X509TrustManager mit leeren Methoden)
+  - HTTP/1.1, Connection: close
+  - Header: User-Agent, Accept, Referer, Cookie (aus request.requestHeaders)
+- Antwort: parsed status line + headers + body, zurГјck als `WebResourceResponse` mit `setStatusCodeAndReasonPhrase`.
+- Log: `interceptCloudflareChallenge: <url> -> <status> (<bytes>B) via <ip> SNI=<host>`
+
+**driver-JS (buildGateDriverJs, v53):**
+- Injiziert via `webView.evaluateJavascript(driverJs)`.
+- Loggt via `console.log` (abgefangen von `WebChromeClient.onConsoleMessage`, zuverlГӨssig, R8-unabhГӨngig) UND `Bridge.onLog` (JavascriptInterface, als Fallback).
+- Ergebnis via `Bridge.onResult(url)` (JavascriptInterface) mit `console.log('DONE:'+url)` als Fallback.
+- WICHTIG: console.log ist zuverlГӨssiger als Bridge (R8 kann JavascriptInterface @Annotationen strippen вҖ” Erkenntnis v50).
+- driver-JS muss syntaktisch korrekt sein! (v48-v50 scheiterten an SyntaxError in verschachteltem Ternary вҖ” immer `node --check` vor Build!)
+- diag-Felder: `ts= al= tpIF= tsApi= tsScript= alScript= gateInit= apW= modal= err= tpHtml=`
+
+**diagnose-polling (v52):**
+- Alle 10 tries (5 Sekunden) loggt der driver-JS den vollen Zustand:
+  - tpIF: iframe im turnstile-div? (0/1)
+  - tsApi: typeof window.turnstile !== 'undefined'? (yes/no)
+  - tsScript: <script src*=challenges.cloudflare.com> vorhanden? (0/1)
+  - alScript: <script src*=altcha> vorhanden? (0/1)
+  - gateInit: data-episode-redirect-gate-init auf root? (0/1/?)
+  - apW: <altcha-widget> im altcha-div? (0/1)
+  - modal: playerPrepareModal.classList.contains('show')? (show/hidden)
+  - err: player-prepare-error.textContent?
+  - tpHtml: innerHTML von turnstile-div (erste 120 Zeichen)
+
+**Cloudflare-Turnstile-Sitekey:** `0x4AAAAAAAFBfchmT6XFij7y` (aus data-turnstile-sitekey).
+**ALTCHA-Challenge-URL:** `https://serienstream.to/api/inline/verify-init` (aus data-altcha-challenge-url).
+**ALTCHA-Modul-URL:** `https://serienstream.to/build/assets/altcha-BhBXWxP7.js` (aus Gate-JS import()).
+**Gate-JS-URL:** `https://serienstream.to/build/assets/episode-redirect-gate-C_Px7kjn.js` (live analysiert, 4526 Bytes).
+**brunhild-Domain:** `brunhild.challenges.cloudflare.com` вҖ” rotierende Subdomain, KEIN Г¶ffentlicher A-Record (DoH 1.1.1.1 liefert nur SOA). Гңber IP von challenges.cloudflare.com (104.18.94.41) + Host-Header erreichbar (curl --resolve bestГӨtigt, HTTP 404 auf bogus path, HTTP 204 auf echte Challenge-URL).
+
+### VERSIONSVERLAUF SERIENSTREAM (v39-v53)
+- v39: DEAKTIVIERT (status=0, Turnstile unlГ¶sbar).
+- v45-v46: Strategie D (WebView full flow), relativer /r?t= URL Bug (ERR_ACCESS_DENIED).
+- v47: iframe-basierte Flow (Strategie D vollstГӨndig) вҖ” frameBridge postMessage kommt an, aber Turnstile rendert nicht.
+- v48-v50: Diagnose-Polling, SyntaxError im driver-JS (verschachtelter Ternary), Bridge.log fehlte (R8 strippte @JavascriptInterface).
+- v51: SyntaxError behoben (separate var-Statements, `node --check`), console.log via onConsoleMessage.
+- v52: diag zeigte tsApi=yes, tsScript=1, gateInit=1, tpIF=0, alScript=0, apW=0, ERR_NAME_NOT_RESOLVED fГјr brunhild.
+- v53: shouldInterceptRequest-DoH-Bridge fГјr *.challenges.cloudflare.com (raw TLS-Socket, SNI+Host, IP von challenges.cloudflare.com). DNS-Fehler WEG, aber HTTP 204 (No Content) und Turnstile-iframe rendert immer noch nicht.
+
+### TEST-ABLAUF FГңR NГ„CHSTE SESSION (unverГӨndert)
+1. In ARVIO: Repo LГ–SCHEN + neu hinzufГјgen DIREKT (NICHT Cloud-Sync!) вҶ’ URL `https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json` вҶ’ Scraper einschalten.
+2. In Termux: `logcat -c` (Handy) oder `adb logcat -c` (TV via WLAN-ADB `adb connect 192.168.0.59:5555`).
+3. In ARVIO: Film/Serie suchen вҶ’ "Nach Quellen suchen" вҶ’ 60s warten (Serienstream braucht lГӨnger wegen WebView).
+4. In Termux: `~/save-handy-log.sh vXX` (Handy) oder `~/save-tv-log.sh vXX` (TV).
+5. Log-Datei weiterleiten (Dateimanager вҶ’ Downloads вҶ’ arvio-logs вҶ’ Teilen).
+**Filter:** `Filmpalast|Kinoger|Vavoo|Serienstream|ArvioAddon|ExternalExtension|ExtExt|PluginManager|No API loaded|ErrorLoading|verify dex|emitLink|loadLinks|detectQuality|httpGet|httpPost|resolveHost|DohResolver|TurnstileSolver|bridge\.log|js:|diag try|frameBridge|interceptCloudflare|ERR_|onReceivedError|submit poll|solveGate`
+
+### NГ„CHSTE SCHRITTE NACH SERIENSTREAM (Prio 2-4)
+
+**Prio 2 вҖ” Hoster-Vielfalt erweitern (Vavoo + FilmPalast haben noch unerschlossene Hoster).**
+- VOE (voesx.py, voe_decode): ROT+Base64+Caesar-Decrypt, 200+ Mirror-Domains. Algorithmus dokumentiert (siehe "VOE-EXTRACTOR: KOMPLETTE LOGIK" weiter unten).
+- FileMoon, DoodStream, Streamtape: resolveurl Python als Vorlage.
+- Workflow: resolveurl Python lesen вҶ’ Kotlin portieren вҶ’ curl testen вҶ’ TV testen.
+
+**Prio 3 вҖ” Stalker-VOD als .cs3-Modul (BLOCKED bis Nutzer Portal+MAC hat).**
+- Ventix StalkerApi.kt (17 Methoden, VOD+Serien) als Cloudstream3-Provider portieren + Config-Seite fГјr Portal-URL + MAC.
+- BLOCKED: Nutzer hat aktuell keine Portal-URL + MAC-Adresse.
+
+**Prio 4 вҖ” GitHub-Issue bei ARVIO (nach Absprache mit Nutzer).**
+- Drei dokumentierte Bugs (R8-Obfuskation, Cloud-Sync-Download, ehem. Touch-Bug behoben).
+- NOCH NICHT erГ¶ffnen вҖ” erst nach Nutzer-Freigabe.
+
+---
+
+
+
 ## вҖјГ”ЕӮЕ№ WICHTIG FвҖ“ДҸвҖ”ДӣвҖ“Гӯ"ДӘR ALLE SESSIONS: NUTZER-PROFIL & KOMMUNIKATION
 
 **Der Nutzer ist KEIN Programmierer.** Er erklвҖ“ДҸвҖңДҸвҖ“ГӯвҖқВ®rt sich selbst als Laie im technischen Bereich und bittet darum:
