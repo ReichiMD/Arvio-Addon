@@ -348,12 +348,14 @@ internal object TurnstileSolver {
         var tp=document.getElementById('player-prepare-turnstile');
         var ap=document.getElementById('player-prepare-altcha');
         var modal=document.getElementById('playerPrepareModal');
-        var tsHtml=tp?(tp.innerHTML.length+'c,iframe='+(tp.querySelector('iframe')?'yes':'no')+')':'null';
-        var alHtml=ap?(ap.innerHTML.length+'c,widget='+(ap.querySelector('altcha-widget')?'yes':'no')+')':'null';
-        var modalVis=modal?(modal.classList.contains('show')?'show':'hidden'):'null';
+        var tpLen=tp?tp.innerHTML.length:0;
+        var tpIframe=tp&&tp.querySelector('iframe')?1:0;
+        var apLen=ap?ap.innerHTML.length:0;
+        var apWidget=ap&&ap.querySelector('altcha-widget')?1:0;
+        var modalVis=modal&&modal.classList.contains('show')?'show':'hidden';
         var errEl=document.getElementById('player-prepare-error');
         var errTxt=errEl?(errEl.textContent||''):'';
-        log('diag try='+tries+': ts='+tsVal.slice(0,8)+' al='+alVal.slice(0,8)+' turnstile=['+tsHtml+'] altcha=['+alHtml+'] modal='+modalVis+' err='+errTxt.slice(0,30));
+        log('diag try='+tries+': ts='+tsVal.slice(0,8)+' al='+alVal.slice(0,8)+' turnstile='+tpLen+'c,if='+tpIframe+' altcha='+apLen+'c,w='+apWidget+' modal='+modalVis+' err='+errTxt.slice(0,30));
       }
       if(tsVal&&alVal){
         clearInterval(iv);
