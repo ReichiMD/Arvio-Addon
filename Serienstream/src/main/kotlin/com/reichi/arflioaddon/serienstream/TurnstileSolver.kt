@@ -123,11 +123,22 @@ internal object TurnstileSolver {
                         Log.d(TAG, "onPageFinished: phase=${phase.get()} url=$loadedUrl")
                         when (phase.get()) {
                             0 -> {
-                                // Warm-up done (episode page loaded, cookies collected). Now load the
-                                // /r?t= gate page in the SAME WebView so it shares the session.
+                                // Warm-up done (episode page loaded, cookies collected). Persist the
+                                // cookies NOW so the subsequent gate load sends them. CookieManager
+                                // keeps cookies in memory but the WebView only sends them on the next
+                                // navigation once they are committed; flush() forces that.
+                                try {
+                                    CookieManager.getInstance().flush()
+                                } catch (_: Throwable) {}
+                                // Small delay so the Set-Cookie headers from the episode page are
+                                // captured before we navigate to the gate.
                                 phase.set(1)
-                                Log.d(TAG, "warm-up done, loading gate: $turnstileUrl")
-                                view.loadUrl(turnstileUrl)
+                                mainHandler.postDelayed({
+                                    if (latch.count > 0) {
+                                        Log.d(TAG, "warm-up done, loading gate: $turnstileUrl")
+                                        try { view.loadUrl(turnstileUrl) } catch (_: Throwable) {}
+                                    }
+                                }, 300L)
                             }
                             1 -> {
                                 // Gate page loaded. Start polling for the Turnstile token.

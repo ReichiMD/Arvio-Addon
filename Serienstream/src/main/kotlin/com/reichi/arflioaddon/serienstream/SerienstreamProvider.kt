@@ -490,23 +490,18 @@ class SerienstreamProvider : TmdbProvider() {
         DebugLog.t(dbg, "loadLinks: ${entries.size} hoster entries")
         entries.take(20).forEach { DebugLog.t(dbg, "  hoster: ${it.second} [${it.third}] -> ${it.first.take(60)}") }
 
-        val pool = java.util.concurrent.Executors.newFixedThreadPool(minOf(entries.size, 4))
+        // Serial resolution (not parallel): each /r?t= hoster starts its own WebView on the main
+        // thread to solve the Cloudflare Turnstile, and multiple WebViews racing on the same
+        // Handler interfere with each other + exhaust the 60s loadLinks timeout (4 x 30s = 120s).
+        // Resolve hosters one at a time; stop at the first that emits a source.
         var any = false
-        try {
-            val futures = entries.map { (hostUrl, provider, language) ->
-                pool.submit(java.util.concurrent.Callable {
-                    resolveHost(hostUrl, provider, language, data, callback)
-                })
+        for ((hostUrl, provider, language) in entries) {
+            if (any) break
+            try {
+                if (resolveHost(hostUrl, provider, language, data, callback)) any = true
+            } catch (t: Throwable) {
+                DebugLog.w(dbg, "loadLinks: hoster threw ${t.javaClass.name}: ${t.message}")
             }
-            for (f in futures) {
-                try {
-                    if (f.get(3, java.util.concurrent.TimeUnit.SECONDS)) any = true
-                } catch (t: Throwable) {
-                    DebugLog.w(dbg, "loadLinks: hoster future threw ${t.javaClass.name}: ${t.message}")
-                }
-            }
-        } finally {
-            pool.shutdownNow()
         }
         DebugLog.t(dbg, "loadLinks: DONE, any=$any")
         return any
