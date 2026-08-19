@@ -2196,3 +2196,9 @@ Die TV-IP steht hartkodiert im `save-tv-log.sh` als `TV_IP="192.168.0.59"`. Fall
 - **Live-Streams: DIREKT ABPIELBAR, ohne play_token!** create_link -> 302 -> CDN `http://192.142.24.175:8080/live/play/<token64>/<streamId>` -> 200 video/mp2t. Wichtig: `play/live.php?mac=<MAC>&stream=<id>&extension=ts` funktioniert AUCH OHNE play_token (verifiziert 3 Kanaele, alle 200). -> M3U-URL-Schema stabil: `$ROOT/play/live.php?mac=<MAC>&stream=<id>&extension=ts`. Stream-IDs aus Kanal-cmd `ffmpeg http://localhost/ch/<id>_`.
 - **ARVIO akzeptiert M3U nur via http(s)-URL** (`validatedIptvHttpUrl`, kein file://, kein File-Picker). -> M3U-Datei liegt auf Handy, wird per `python -m http.server 8088` im eigenen WLAN bereitgestellt, ARVIO holt `http://<handy-ip>:8088/stalker-playlist.m3u`. Alternativ Termux direkt auf dem TV.
 - **build-stalker-m3u.sh** (docs/) baut die Playlist lokal aus ~/stalker-channels.json. NIEMALS die .m3u (enthaelt MAC) oeffentlich hochladen.
+- **Nutzer lehnt Handy-Server-Loesung ab** („keine gute Loesung" - will einmal eingeben und fertig). -> Handy-Termux-Server nur als Notfall-Fallback dokumentiert lassen.
+
+**Alternativen recherchiert (19.08.2026):**
+- **TiviMate hat eingebauten Stalker-Client** (Playlist-Typ „Stalker Portal": nur Server-Adresse + MAC, kein M3U/Server noetig). Free-Version: nur 1 Playlist (reicht fuer 1 Portal). Premium ~$10/Jahr oder ~$30 Lifetime (5 Geraete, unbegrenzte Playlists, Aufnahme, EPG-Auto-Sync). Kostenlose Alternative: STBemu (MAG-Box-Emulation, Portal+MAC).
+- **PRIORITAET: Anbieter nach Xtream-Codes-Zugang fragen** (Server + Benutzername + Passwort). ARVIO kann Xtream NATIV mit UI (Live+VOD+Serien) - dann alles in ARVIO ohne Plugin/Server. Viele Stalker-Anbieter betreiben parallel Xtream auf demselben Server.
+- **M3U-Weg bleibt Fallback** (nutzt das verifizierte URL-Schema `play/live.php?mac=...&stream=<id>&extension=ts`, play_token NICHT noetig).
