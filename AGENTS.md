@@ -2151,3 +2151,29 @@ Die TV-IP steht hartkodiert im `save-tv-log.sh` als `TV_IP="192.168.0.59"`. Fall
 - **TV neu gestartet** вҶ’ Wireless Debugging schaltet sich AB. Am TV wieder AN stellen (kein neues Paaren nГ¶tig вҖ” Pairing-Key bleibt), dann `adb connect` wiederholen.
 - **`unauthorized`** bei `adb devices` вҶ’ TV zeigt вҖһUSB-Debugging zulassen?"-Dialog, am TV bestГӨtigen.
 - **ARVIO auf Handy** = gleiche sideload-APK wie TV вҶ’ gleiche Obfuskation вҶ’ Tests auf Handy reprГӨsentativ fГјr TV (aber Handy-UI-Bug bei Add-Repo behoben in v1.9.994, siehe unten).
+
+---
+
+## Referenz-Notiz: Externe Stremio-Addons (19.08.2026, Recherche vom Nutzer)
+- **PenguPlay (pengu.uk):** kostenloses Stremio-Addon (HTTP-Scraper, kein Debrid/Torrent noetig). Config-Website erzeugt manifest.json-URL (Google-Login noetig). 16 Provider: 4KHDHub, MovieBox, VegaMovies, MoviesDrives, Miruro/Antova (Anime), CineFreak, MKVBase, VAPlayer, VidKing, ZXCStream, VidLink, VidFast, HDGharTV, Cinejoy, 2Peckle. Fokus: englischer Mainstream, Bollywood/Regional, Anime, Asian Drama. **KEINE deutschen Inhalte** (kein deutscher Scraper dabei; nur vereinzelt Multi-Audio-Spuren). Fuer ARVIO als Ergaenzung fuer internationale Inhalte nutzbar (als Stremio-Addon, nicht .cs3) - fuer Deutsch bleiben unsere eigenen .cs3-Plugins (KinoGer, FilmPalast, Vavoo) die Loesung.
+
+---
+
+## Stalker-Middleware: Verifizierter Stand (19.08.2026, im aktuellen ARVIO-main + Ventix-Repo nachgeprueft)
+
+**Trennung Live-TV vs. VOD ist real (zwei getrennte Wege):**
+- **ARVIO eingebauter Stalker-Client = NUR Live-TV.** Verifiziert in `app/src/main/kotlin/com/arflix/tv/data/api/StalkerApi.kt`: exakt 4 Methoden (handshake, getProfile, getChannels, resolveStreamUrl). Kein VOD, keine Serien. TvScreen.kt loest Stalker-Portal-cmds zu Stream-URLs auf.
+- **Stalker-Config-UI fehlt weiterhin in ARVIO** (Stand main, 19.08.2026): `saveStalkerConfig(portalUrl, macAddress)` existiert in SettingsViewModel.kt:2295 + IptvRepository.kt:603, wird aber von KEINEM UI-Element aufgerufen (grep bestaetigt: nur Definition, kein Aufruf in Screens). Stalker-Live-TV in ARVIO daher praktisch nicht nutzbar; Live-TV laeuft bei ARVIO nur via M3U/Xtream (dafuer UI vorhanden).
+- **ARVIO ruft `openSettings` fuer .cs3-Plugins NIE auf** (verifiziert: `var openSettings` in sideload `Plugin.kt:24` definiert, aber kein einziger Aufruf in ganz ARVIO). -> Plugin-eigene Config-Seiten sind in ARVIO NICHT sichtbar, auch wenn das Cloudstream3-Format sie vorsieht.
+
+**Konsequenz fuer unser Stalker-VOD-Modul (Konsolidierungs-Phase 4):**
+- Ventix `StalkerApi.kt` (ReichiMD/IPTV-App, `app/src/main/java/com/iptv/stalker/data/api/`) verifiziert vorhanden, 17+ Methoden: handshake, getProfile, activateSession, getGenres, getChannels, createChannelLink, getAllFavChannels, setFavChannels, **getVodCategories, getVodList, createVodLink, setVodFav** (VOD), **getSeriesCategories, getSeriesList, getSeasons, setSeriesFav** (Serien), exportM3u, getEpgTable, sendWatchdog. Plus AuthManager/ResponseParser/StalkerInterceptor/StalkerSession im selben Ordner.
+- **Config ohne UI loesen via Config-Datei** (z.B. `stalker.json` im Download-Ordner, Plugin liest sie beim Start, Nutzer editiert mit Dateimanager). Alternativen: Portal+MAC beim Build fest einbacken, oder ARVIO-Issue (fehlende Stalker-UI + openSettings).
+- **Xtream-Abkuerzung:** ARVIO hat eingebaute Xtream-Codes-Unterstuetzung (VOD+Live+UI). Falls der Anbieter des Nutzers auch Xtream-Zugang (Server-URL+User+Pass) bietet, waere VOD sofort ohne Plugin nutzbar. Beim Anbieter nachfragen.
+- **Weiterhin BLOCKED:** Nutzer braucht Portal-URL + MAC-Adresse vom Anbieter.
+
+**Hinzu verifiziert (19.08.2026, Fragen: Plugin injiziert Stalker-Login? Mehrere Logins?):**
+- **Stalker-Config-Speicher (verifiziert):** `IptvRepository.saveStalkerConfig` schreibt in Preferences-DataStore (Protobuf). Portal-URL AES-256-GCM-verschluesselt mit Android-Keystore-Key (Alias CONFIG_KEY_ALIAS, selbstgeneriert). M3U/EPG-URLs ebenfalls verschluesselt (ENC_PREFIX + `ivB64:dataB64`). MAC-Klartext. Config-Keys sind PER-PROFIL (profileId im Key).
+- **Plugin-Injection theoretisch moeglich, praktisch fragil:** Plugin laeuft im ARVIO-Prozess (gleiche UID) -> koennte Keystore-Alias nutzen + DataStore-Datei schreiben. ABER: Protobuf-Format, DataStore cached in-memory (externe Edits werden ueberschrieben/erst nach Neustart sichtbar), per-profile Keys, R8-Obfuskation der internen Klassen. -> Hack, bricht bei Updates. Harter Fix = ARVIO-UI (GitHub-Issue, ~15 Zeilen). Workaround HEUTE: Stalker-Portal->M3U-Link (viele Portale liefern M3U; Ventix exportM3u als Vorlage) -> ARVIO M3U-Playlists (UI vorhanden).
+- **Mehrere Logins (verifiziert):** M3U/Xtream = **bis zu 3 Playlists** gleichzeitig (`savePlaylists`: normalize, `.take(3)`, enabled-Flag pro Eintrag). Stalker = **1 Login pro Profil** (ein portalUrl+macAddress-Paar in IptvConfig). ARVIO **Profile** (ProfileRepository/ProfileSelectionScreen) = mehrere Logins ueber mehrere Profile moeglich (jede Profil-ID eigene Config).
+- Xtream-Eingabe wird in kanonische M3U-URL konvertiert (`Accept common Xtream Codes inputs and convert to a canonical M3U URL`).
