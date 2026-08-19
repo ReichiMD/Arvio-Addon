@@ -2177,3 +2177,15 @@ Die TV-IP steht hartkodiert im `save-tv-log.sh` als `TV_IP="192.168.0.59"`. Fall
 - **Plugin-Injection theoretisch moeglich, praktisch fragil:** Plugin laeuft im ARVIO-Prozess (gleiche UID) -> koennte Keystore-Alias nutzen + DataStore-Datei schreiben. ABER: Protobuf-Format, DataStore cached in-memory (externe Edits werden ueberschrieben/erst nach Neustart sichtbar), per-profile Keys, R8-Obfuskation der internen Klassen. -> Hack, bricht bei Updates. Harter Fix = ARVIO-UI (GitHub-Issue, ~15 Zeilen). Workaround HEUTE: Stalker-Portal->M3U-Link (viele Portale liefern M3U; Ventix exportM3u als Vorlage) -> ARVIO M3U-Playlists (UI vorhanden).
 - **Mehrere Logins (verifiziert):** M3U/Xtream = **bis zu 3 Playlists** gleichzeitig (`savePlaylists`: normalize, `.take(3)`, enabled-Flag pro Eintrag). Stalker = **1 Login pro Profil** (ein portalUrl+macAddress-Paar in IptvConfig). ARVIO **Profile** (ProfileRepository/ProfileSelectionScreen) = mehrere Logins ueber mehrere Profile moeglich (jede Profil-ID eigene Config).
 - Xtream-Eingabe wird in kanonische M3U-URL konvertiert (`Accept common Xtream Codes inputs and convert to a canonical M3U URL`).
+
+---
+
+## Stalker Portal des Nutzers: ERFOLGREICH GETESTET (19.08.2026) - UNBLOCKED
+
+**Wichtig:** Nutzer hat mittlerweile Portal+MAC (Portal `http://a01.live:8080/c/`, MAC-Form `00:2A:01:97:13:EC`). Phase 4 ist NICHT MEHR BLOCKED.
+- **ASN-Block:** Der Anbieter sperrt Cloud/Rechenzentrums-IPs (tuerk. „ASN'inizden erisim engellenmistir"). Test muss vom HEIMNETZ des Nutzers laufen (Termux auf Handy). Scripte in `docs/test-stalker.sh` / `test-stalker2.sh` / `test-stalker3.sh` / `test-stalker4.sh` (keine Credentials im Repo!).
+- **API-Basis verifiziert (Handy-Test):** `http://a01.live:8080/server/load.php` (Ventix-Regel: `/c/` wegstreifen -> `/server/load.php`). Handshake -> Token OK, Profil OK.
+- **Inhalt:** 44 Kategorien (alle deutsch: Deutschland/HEVC/RAW/UHD/RTL+/Sky Cinema/Regional/Doku/News/Musik/Sky Bundesliga/DAZN/Champions League/Sport/Sky Sport/MyTeam Sport/DEL.2 Event), **2116 Kanaele**. Kanal-JSON beim Nutzer auf Handy in ~/stalker-channels.json.
+- **M3U Direkt-Export (`type=itv&action=export_m3u`): NEIN** (leere Antwort). M3U muss aus Kanal-JSON selbst gebaut werden (wie Ventix exportM3u-Fallback). Stream-URL-Zugriff noch zu verifizieren (ob Kanaele ohne Header direkt abspielbar sind = ARVIO-M3U moeglich).
+- **VOD/Serien ungeprueft** (test-stalker4.sh fragt `type=vod`+`type=series` Kategorien ab + testet create_link fuer 3 Kanaele auf direkte HTTP-Erreichbarkeit).
+- **Naechste Schritte:** (1) Wenn create_link ohne Header abspielbar -> M3U fuer ARVIO-LiveTV bauen (2116 Kanaele!). (2) Falls VOD/Serien vorhanden -> Stalker-VOD-.cs3-Modul bauen (Phase 4, Ventix-StalkerApi als Vorlage, Config via Download-Ordner-JSON).
