@@ -2189,3 +2189,10 @@ Die TV-IP steht hartkodiert im `save-tv-log.sh` als `TV_IP="192.168.0.59"`. Fall
 - **M3U Direkt-Export (`type=itv&action=export_m3u`): NEIN** (leere Antwort). M3U muss aus Kanal-JSON selbst gebaut werden (wie Ventix exportM3u-Fallback). Stream-URL-Zugriff noch zu verifizieren (ob Kanaele ohne Header direkt abspielbar sind = ARVIO-M3U moeglich).
 - **VOD/Serien ungeprueft** (test-stalker4.sh fragt `type=vod`+`type=series` Kategorien ab + testet create_link fuer 3 Kanaele auf direkte HTTP-Erreichbarkeit).
 - **Naechste Schritte:** (1) Wenn create_link ohne Header abspielbar -> M3U fuer ARVIO-LiveTV bauen (2116 Kanaele!). (2) Falls VOD/Serien vorhanden -> Stalker-VOD-.cs3-Modul bauen (Phase 4, Ventix-StalkerApi als Vorlage, Config via Download-Ordner-JSON).
+
+**Test 2+3 Ergebnis (19.08.2026, Handy, alles positiv):**
+- **VOD: JA.** 40 deutsche Kategorien (Vision Kino 2025-2026, Kino, IMDB Top 250 HQ, Prime Filme, Apple TV, Action/Komoedie/Horror/Drama...). Beispiele: Toy Story 5 (2026), Karate Tiger u.v.m. Titel-Liste in ~/stalker-vod.json auf Nutzer-Handy.
+- **Serien: JA.** 29 deutsche Kategorien (Netflix, Paramount+, Prime, Disney+, Drama, Krimi, IMDB Top 100...).
+- **Live-Streams: DIREKT ABPIELBAR, ohne play_token!** create_link -> 302 -> CDN `http://192.142.24.175:8080/live/play/<token64>/<streamId>` -> 200 video/mp2t. Wichtig: `play/live.php?mac=<MAC>&stream=<id>&extension=ts` funktioniert AUCH OHNE play_token (verifiziert 3 Kanaele, alle 200). -> M3U-URL-Schema stabil: `$ROOT/play/live.php?mac=<MAC>&stream=<id>&extension=ts`. Stream-IDs aus Kanal-cmd `ffmpeg http://localhost/ch/<id>_`.
+- **ARVIO akzeptiert M3U nur via http(s)-URL** (`validatedIptvHttpUrl`, kein file://, kein File-Picker). -> M3U-Datei liegt auf Handy, wird per `python -m http.server 8088` im eigenen WLAN bereitgestellt, ARVIO holt `http://<handy-ip>:8088/stalker-playlist.m3u`. Alternativ Termux direkt auf dem TV.
+- **build-stalker-m3u.sh** (docs/) baut die Playlist lokal aus ~/stalker-channels.json. NIEMALS die .m3u (enthaelt MAC) oeffentlich hochladen.
