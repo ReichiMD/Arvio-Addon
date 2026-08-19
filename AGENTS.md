@@ -2224,3 +2224,9 @@ Die TV-IP steht hartkodiert im `save-tv-log.sh` als `TV_IP="192.168.0.59"`. Fall
 - **ARVIO CI-Wissen:** build-check.yml = Unit-Tests bei PR (testSideloadDebugUnitTest, secrets.defaults.properties). Signierter Release-APK braucht deren Secrets (Supabase/TMDB/Keystore/Discord-SDK via privatem Repo) - haben wir nicht, brauchen wir nicht. Discord-SDK optional (`hasDiscordSdk = aar.isFile`).
 - **PR-Regeln (ARVIO):** Englisch, klein+fokussiert (2 PRs: erst UI, dann VOD/Serien/EPG), AI-Disclosure, deren Commit-Stil (feat:/fix:), Apache-2.0. Fork ist oeffentlich -> NIEMALS Credentials/MAC committen.
 - **Test-Pflichten Nutzer (TV):** Test-APK installieren, Portal+MAC eingeben, Live-TV zappen, VOD/Serien, Regression (Scraper+Suche laufen noch).
+
+**Fork-Fortschritt (19.08.2026, feat/stalker-settings-ui):**
+- Stalker-Dialog (Portal+MAC) implementiert, CI baut Debug-APK erfolgreich (101MB). Nutzer-Test: Knopf vorhanden, aber OK-Druck oeffnete Dialog nicht.
+- **Root-Cause gefunden:** ARVIOs TV-Schirm hat eine HART verdrahtete `when (contentFocusIndex)`-Dispatch-Map fuer OK-D-pad-Druccke. Meine eingefuegte Reihe (sort/refresh/delete um +1 verschoben) verwechselte Druecke: Stalker-Reihe loeste Sortierung aus. Fix: Dispatch-Indizes ebenfalls um +1 verschoben, Stalker bekommt eigene Index. **WICHTIG fuer alle zukuenftigen UI-Aenderungen in ARVIO: SettingsScreen.kt enthaelt hardcoded index-basierte Dispatch-Mappings (iptv: add-playlist=0, playlists=1..N, stalker=N+1, sort=N+2, refresh=N+3, delete=N+4). Bei jeder neuen Zeile IN der UI heisst es diese Dispatch-Mapping mitzueruecken.**
+- Zusaetzlich Logging (StalkerUiDbg tag) im Branch (vor PR zu entfernen).
+- Next: Nutzer testet auf TV.
