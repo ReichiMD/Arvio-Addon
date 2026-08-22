@@ -5,6 +5,10 @@ Ziel: Ventix-FunktionalitвҖ“ДҸвҖңДҸвҖ“ГӯвҖқВ®t (deutsche W
 
 ---
 
+> **PROJEKTÜBERGREIFENDER KONTEXT (21.08.2026):** Team-/Strategie-Themen (ARVIO-Discord, Linear, Play-Store-JS-Konzept, Entscheidungen, Gesamt-Roadmap) liegen im privaten Büro-Repo **ReichiMD/Arvio-B-ro** (`AGENTS.md` + `docs/`). Diese Datei hier bleibt die technische Plugin-Doku. Nichts löschen – Aufräumung/Archivierung der Historie ist geplant (Roadmap D3), nur mit Nutzer-Freigabe.
+
+
+
 ## вҖјпёҸ NEUESTER STAND (18.08.2026, Ende Session вҖ” VOR ALLEM ANDEREN LESEN)
 
 **DREI Scraper liefern Quellen (stabil, getestet), SERIENSTREAM BLOCKIERT (Turnstile-iframe rendert nicht).**
