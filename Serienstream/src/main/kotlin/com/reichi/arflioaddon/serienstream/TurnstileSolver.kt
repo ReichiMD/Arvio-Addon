@@ -413,9 +413,24 @@ internal object TurnstileSolver {
     };
     t.__h=1;
   }
+  // Never pre-define window.turnstile: api.js checks `"turnstile" in window`, and a placeholder
+  // property made it log "already has been loaded" and bail out without ever creating the widget
+  // (device, 23.09.2026, v58). Instead poll until Cloudflare has set it, then wrap render.
   if(window.turnstile){hookTs(window.turnstile);}else{
-    try{var _t;Object.defineProperty(window,'turnstile',{configurable:true,get:function(){return _t;},set:function(v){_t=v;hookTs(v);}});}catch(e){log('ts hook failed: '+e.message);}
+    var tsPolls=0,tsPoll=setInterval(function(){
+      tsPolls++;
+      if(window.turnstile){clearInterval(tsPoll);log('ts api present after '+(tsPolls*20)+'ms');hookTs(window.turnstile);}
+      else if(tsPolls>3000){clearInterval(tsPoll);}
+    },20);
   }
+  // Passive observation that cannot miss an early render: the Turnstile iframe reports every
+  // state change to its parent as {source:'cloudflare-challenge', event, widgetId, ...}.
+  window.addEventListener('message',function(e){
+    var d=e.data;
+    if(!d||typeof d!=='object'||d.source!=='cloudflare-challenge')return;
+    var x='';try{x=JSON.stringify(d);}catch(err){}
+    log('cf msg '+d.event+': '+x.slice(0,200));
+  },false);
   var tierEl=document.getElementById('episode-redirect-gate-root');
   var tier=tierEl?(tierEl.getAttribute('data-redirect-gate-tier')||'none'):'?';
   log('gate tier='+tier);
