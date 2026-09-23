@@ -648,6 +648,11 @@ class VavooProvider : TmdbProvider() {
             redirects++
         }
         if (redirects > 0) DebugLog.t(dbg, "resolveVoe: followed $redirects redirects to $currentUrl")
+        // The player page a browser would be on after the redirects -> its origin is the Referer
+        // the CDN sees from a real browser. All VOE streams go through LocalProxy with it.
+        val voeRef = try {
+            val u = java.net.URL(currentUrl); u.protocol + "://" + u.host + "/"
+        } catch (_: Throwable) { "https://voe.sx/" }
 
         val p1 = Regex("""json">\["([^"]+)"\]</script>\s*<script\s*src="([^"]+)""")
         val m1 = p1.find(currentText)
@@ -673,13 +678,13 @@ class VavooProvider : TmdbProvider() {
                     val direct = decoded.optString("direct_access_url", "")
                     when {
                         source.startsWith("http") -> {
-                            emitLink("VOE", source, "https://voe.sx/", callback); found = true
+                            emitLink("VOE", source, voeRef, callback, true); found = true
                             // Also offer VOE's progressive mp4 as a second choice: if the CDN refuses
                             // the HLS request, the plain download URL often still plays.
-                            if (direct.startsWith("http")) emitLink("VOE MP4", direct, "https://voe.sx/", callback)
+                            if (direct.startsWith("http")) emitLink("VOE MP4", direct, voeRef, callback, true)
                         }
-                        file.startsWith("http") -> { emitLink("VOE", file, "https://voe.sx/", callback); found = true }
-                        direct.startsWith("http") -> { emitLink("VOE", direct, "https://voe.sx/", callback); found = true }
+                        file.startsWith("http") -> { emitLink("VOE", file, voeRef, callback, true); found = true }
+                        direct.startsWith("http") -> { emitLink("VOE", direct, voeRef, callback, true); found = true }
                     }
                     DebugLog.t(dbg, "resolveVoe: voe_decode -> source=$source file=$file direct=$direct found=$found")
                 }
@@ -701,7 +706,7 @@ class VavooProvider : TmdbProvider() {
             )
             for (p in urlPatterns) {
                 p.findAll(text).forEach { m ->
-                    emitLink("VOE", m.groupValues[1], "https://voe.sx/", callback); found = true
+                    emitLink("VOE", m.groupValues[1], voeRef, callback, true); found = true
                 }
                 if (found) break
             }
@@ -841,13 +846,28 @@ class VavooProvider : TmdbProvider() {
     }
 
     private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit) {
+        emitLink(source, url, referer, callback, false)
+    }
+
+    // No default argument: keeps the call plain (no synthetic $default method, cf. Erkenntnis #18).
+    private fun emitLink(
+        source: String,
+        url: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit,
+        viaProxy: Boolean
+    ) {
         try {
             val isM3u8 = url.contains(".m3u8")
             val quality = detectQuality(url, isM3u8)
             // ARVIO blocks URLs containing "caching" etc. as pending debrid torrents (VOE CDN hosts
-            // are named that way) - hand it a local redirect instead, see LocalRedirect.
-            val playUrl = if (LocalRedirect.needsWrap(url)) LocalRedirect.wrap(url, isM3u8) else url
-            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 referer=$referer")
+            // are named that way), and its player drops our Referer when the source is picked on
+            // the details page - such streams are served through LocalProxy, which fetches them
+            // itself with Referer + our User-Agent.
+            val playUrl = if (viaProxy || LocalProxy.needsWrap(url)) {
+                LocalProxy.wrap(url, mapOf("Referer" to referer, "User-Agent" to mobileUA), isM3u8)
+            } else url
+            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 referer=$referer proxy=${playUrl != url}")
             // PRIMARY constructor (9 positional args, no default-args) — R8 strips the synthetic
             // DefaultConstructorMarker constructor (Erkenntnis #18).
             val link = ExtractorLink(
