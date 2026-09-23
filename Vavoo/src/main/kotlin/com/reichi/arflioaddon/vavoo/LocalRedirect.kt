@@ -83,10 +83,15 @@ object LocalRedirect {
             c.soTimeout = 10_000
             val reader = c.getInputStream().bufferedReader(Charsets.ISO_8859_1)
             val requestLine = reader.readLine() ?: return
+            val seen = StringBuilder()
             while (true) {
                 val h = reader.readLine() ?: break
                 if (h.isEmpty()) break
+                val name = h.substringBefore(":").trim().lowercase()
+                if (name == "user-agent" || name == "referer" || name == "origin" || name == "range") seen.append(" | ").append(h)
             }
+            // Diagnostics: proves the player reached us and with which headers it will hit the CDN.
+            DebugLog.t(TAG, "request: $requestLine$seen")
             // "GET /r/<id>.m3u8 HTTP/1.1"
             val path = requestLine.split(" ").getOrNull(1) ?: ""
             val id = path.substringAfter("/r/", "").substringBefore(".").substringBefore("?")

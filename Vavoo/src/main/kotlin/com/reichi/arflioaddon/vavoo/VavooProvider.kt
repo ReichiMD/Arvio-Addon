@@ -672,7 +672,12 @@ class VavooProvider : TmdbProvider() {
                     val file = decoded.optString("file", "")
                     val direct = decoded.optString("direct_access_url", "")
                     when {
-                        source.startsWith("http") -> { emitLink("VOE", source, "https://voe.sx/", callback); found = true }
+                        source.startsWith("http") -> {
+                            emitLink("VOE", source, "https://voe.sx/", callback); found = true
+                            // Also offer VOE's progressive mp4 as a second choice: if the CDN refuses
+                            // the HLS request, the plain download URL often still plays.
+                            if (direct.startsWith("http")) emitLink("VOE MP4", direct, "https://voe.sx/", callback)
+                        }
                         file.startsWith("http") -> { emitLink("VOE", file, "https://voe.sx/", callback); found = true }
                         direct.startsWith("http") -> { emitLink("VOE", direct, "https://voe.sx/", callback); found = true }
                     }
