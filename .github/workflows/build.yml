@@ -51,8 +51,10 @@ jobs:
           distribution: "adopt"
           java-version: 17
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # No setup-android step: GitHub's ubuntu runners ship an Android SDK ($ANDROID_HOME), and
+      # android-actions/setup-android (v2 and v3) crashes on the current runners (09/2026).
+      - name: Show Android SDK
+        run: echo "ANDROID_HOME=$ANDROID_HOME"; ls "$ANDROID_HOME"
 
       - name: Setup Python
         uses: actions/setup-python@v5
