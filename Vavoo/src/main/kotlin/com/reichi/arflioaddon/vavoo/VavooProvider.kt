@@ -490,6 +490,7 @@ class VavooProvider : TmdbProvider() {
                 // supervideo.cc (and its mirrors) pack the player config in a Dean-Edwards p.a.c.k.e.r
                 // eval block; unpack it and read the m3u8 from jwplayer setup sources. No bot protection.
                 host.contains("supervideo") || host.contains("supercdn") -> resolveSupervideo(url, callback)
+                host.contains("streamtape") || host.contains("strtape") || host.contains("tapecontent") -> resolveStreamtape(url, callback)
                 else -> genericResolve(url, callback)
             }
         } catch (t: Throwable) {
@@ -747,6 +748,55 @@ class VavooProvider : TmdbProvider() {
         String(android.util.Base64.decode(s, android.util.Base64.DEFAULT), Charsets.UTF_8)
 
     /** Generic best-effort resolver: scan embed page for direct mp4/m3u8 URLs. */
+    /**
+     * streamtape.com extractor. The embed page never contains the video URL in plain text: it
+     * builds it in JS from string pieces, e.g.
+     *   ById('robotlink').innerHTML = '//streamtape.com/get_v'+ ('xcdideo?id=..&token=..').substring(2).substring(1);
+     * and sets several DECOY elements the same way ('ideoolink' -> '.../get_vibdeo?...'). We evaluate
+     * every such line (string literals, each cut by its substring(n) calls, joined by '+') and only
+     * accept a result that really is '/get_video?id=' - preferring 'robotlink'. The resulting URL is
+     * token- and IP-bound and 302-redirects to the mp4, which the player follows.
+     * genericResolve used to pick up the bare file NAME from the page title instead (23.09.2026).
+     */
+    private fun resolveStreamtape(url: String, callback: (ExtractorLink) -> Unit): Boolean {
+        return try {
+            val embed = url.replace("/v/", "/e/")
+            val res = httpGet(embed, headers = mapOf("Referer" to "https://streamtape.com/", "User-Agent" to mobileUA))
+            if (res.code !in 200..299) {
+                DebugLog.w(dbg, "resolveStreamtape: GET $embed -> HTTP ${res.code}")
+                return false
+            }
+            var best: String? = null
+            Regex("""ById\('([A-Za-z]+)'\)\.innerHTML\s*=\s*([^;]+);""").findAll(res.text).forEach { m ->
+                val sb = StringBuilder()
+                for (part in m.groupValues[2].split("+")) {
+                    val lit = Regex("""["']([^"']*)["']""").find(part) ?: continue
+                    var piece = lit.groupValues[1]
+                    Regex("""substring\((\d+)\)""").findAll(part).forEach { n ->
+                        val k = n.groupValues[1].toInt()
+                        piece = if (k <= piece.length) piece.substring(k) else ""
+                    }
+                    sb.append(piece)
+                }
+                val candidate = sb.toString()
+                if (candidate.contains("/get_video?id=") && (best == null || m.groupValues[1] == "robotlink")) {
+                    best = candidate
+                }
+            }
+            val path = best ?: run {
+                DebugLog.w(dbg, "resolveStreamtape: no get_video line found in ${res.text.length} bytes")
+                return false
+            }
+            val direct = (if (path.startsWith("//")) "https:$path" else if (path.startsWith("/")) "https:/$path" else path) + "&stream=1"
+            DebugLog.t(dbg, "resolveStreamtape: $embed -> $direct")
+            emitLink("Streamtape", direct, "https://streamtape.com/", callback)
+            true
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "resolveStreamtape: $url threw ${t.javaClass.name}: ${t.message}")
+            false
+        }
+    }
+
     private fun genericResolve(url: String, callback: (ExtractorLink) -> Unit): Boolean {
         return try {
             val res = httpGet(url, headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to mobileUA))
