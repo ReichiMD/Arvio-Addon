@@ -136,8 +136,16 @@ internal object TurnstileSolver {
 
         mainHandler.post {
             try {
+                try { WebView.enableSlowWholeDocumentDraw() } catch (_: Throwable) {}
                 val webView = WebView(ctx)
                 webViewRef[0] = webView
+                // A hidden WebView is never laid out (0x0). Give it a phone-sized box so the snapshot
+                // below shows something; logged, because it may also change what Turnstile does.
+                webView.measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(SNAP_W, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(SNAP_H, android.view.View.MeasureSpec.EXACTLY))
+                webView.layout(0, 0, SNAP_W, SNAP_H)
+                Log.d(TAG, "solveGate: hidden WebView laid out ${SNAP_W}x$SNAP_H")
                 val settings = webView.settings
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
@@ -310,6 +318,11 @@ internal object TurnstileSolver {
                         } catch (_: Throwable) { false }
                         Log.d(TAG, "episode page ready (form found, __ddg=$hasDdg), starting gate flow: $gateUrl")
                         phase.set(1)
+                        for (sec in SNAP_AFTER_S) {
+                            handler.postDelayed({
+                                if (latch.count > 0) observe(webView, "${sec}s")
+                            }, sec * 1000L)
+                        }
                         // Inject the gate-flow driver JS. It:
                         //  1. Installs a window 'message' listener that captures the frameBridge
                         //     postMessages (both the prepare-token from the initial iframe load AND
@@ -380,6 +393,28 @@ internal object TurnstileSolver {
   log('form found='+(!!f));
   if(f){
     if(!f.getAttribute('target')){f.setAttribute('target','player-iframe');}
+  }
+  // Observation: wrap turnstile.render so Cloudflare's own verdict lands in the log.
+  function hookTs(t){
+    if(!t||t.__h||!t.render)return;
+    var orig=t.render;
+    t.render=function(el,o){
+      o=o||{};
+      var cb=o.callback,ecb=o['error-callback'];
+      o.callback=function(tok){log('ts callback: token len='+((tok||'').length));if(cb)cb(tok);};
+      o['error-callback']=function(c){log('ts error-callback code='+c);if(ecb)return ecb(c);};
+      o['timeout-callback']=function(){log('ts timeout-callback');};
+      o['expired-callback']=function(){log('ts expired-callback');};
+      o['unsupported-callback']=function(){log('ts unsupported-callback');};
+      o['before-interactive-callback']=function(){log('ts before-interactive: Cloudflare wants a tap');};
+      o['after-interactive-callback']=function(){log('ts after-interactive');};
+      log('ts render hooked');
+      return orig.call(this,el,o);
+    };
+    t.__h=1;
+  }
+  if(window.turnstile){hookTs(window.turnstile);}else{
+    try{var _t;Object.defineProperty(window,'turnstile',{configurable:true,get:function(){return _t;},set:function(v){_t=v;hookTs(v);}});}catch(e){log('ts hook failed: '+e.message);}
   }
   var tierEl=document.getElementById('episode-redirect-gate-root');
   var tier=tierEl?(tierEl.getAttribute('data-redirect-gate-tier')||'none'):'?';
@@ -565,6 +600,55 @@ internal object TurnstileSolver {
             null
         } finally {
             try { conn.close() } catch (_: Throwable) {}
+        }
+    }
+
+    private const val SNAP_W = 1080
+    private const val SNAP_H = 1920
+    private val SNAP_AFTER_S = longArrayOf(10L, 25L, 40L)
+
+    /**
+     * Observation only (Buero docs/themen/62): what does the hidden gate show? Logs the modal text,
+     * Turnstile state and page size, and saves a picture of the hidden WebView to
+     * Download/arvio-plugin/ so the user can send it along with the log.
+     */
+    private fun observe(webView: WebView, label: String) {
+        try {
+            webView.evaluateJavascript("(function(){try{var m=document.getElementById('playerPrepareModal');" +
+                "var f=document.querySelector('[name=cf-turnstile-response]');" +
+                "return 'modal='+(m?m.innerText.replace(/\\s+/g,' ').slice(0,200):'-')+' | tsResp='+(f&&f.value?f.value.length:0)" +
+                "+' | size='+window.innerWidth+'x'+window.innerHeight+' | vis='+document.visibilityState;}catch(e){return 'err '+e.message;}})()") { v ->
+                Log.d(TAG, "observe $label: $v")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "observe $label: js threw ${t.javaClass.name}: ${t.message}")
+        }
+        try {
+            val w = if (webView.width > 0) webView.width else SNAP_W
+            val h = if (webView.height > 0) webView.height else SNAP_H
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(bmp)
+            canvas.drawColor(android.graphics.Color.WHITE)
+            webView.draw(canvas)
+            val ctx = context ?: return
+            val name = "serienstream-$label-${System.currentTimeMillis()}.png"
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val cv = android.content.ContentValues()
+                cv.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                cv.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                cv.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/arvio-plugin")
+                val uri = ctx.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+                if (uri == null) { Log.w(TAG, "observe $label: MediaStore insert returned null"); return }
+                val out = ctx.contentResolver.openOutputStream(uri)
+                if (out == null) { Log.w(TAG, "observe $label: no output stream"); return }
+                try { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out) } finally { out.close() }
+                Log.d(TAG, "observe $label: picture saved Download/arvio-plugin/$name (${w}x$h)")
+            } else {
+                Log.w(TAG, "observe $label: Android < 10, picture not saved")
+            }
+            bmp.recycle()
+        } catch (t: Throwable) {
+            Log.w(TAG, "observe $label: picture failed ${t.javaClass.name}: ${t.message}")
         }
     }
 
