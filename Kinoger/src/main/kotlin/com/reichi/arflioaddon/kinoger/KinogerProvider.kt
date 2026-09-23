@@ -73,7 +73,10 @@ class KinogerProvider : TmdbProvider() {
                 instanceFollowRedirects = true
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", desktopUA)
-                setRequestProperty("Accept", "text/html,application/json,*/*")
+                // Browser-like Accept: KinoGers WAF (HostAdmin.online) answers 403 "Access Denied" as soon as
+                // "application/json" appears in Accept (checked 23.09.2026). JSON APIs set their own Accept.
+                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
             }
             conn.connect()
@@ -263,6 +266,10 @@ class KinogerProvider : TmdbProvider() {
             // The sibling <div class="content_text searchresult_img"> only holds the poster image (alt=title), not the link.
             val selected = doc.select("div.titlecontrol")
             DebugLog.t(dbg, "searchKinoger: CSS selector matched ${selected.size} elements")
+            if (selected.isEmpty()) {
+                // "Verification..." = HostAdmin.online WAF challenge page (JS + proof-of-work), not a result page.
+                DebugLog.w(dbg, "searchKinoger: 0 results. Page title: ${doc.title()} | first 200 chars: ${doc.body()?.text()?.take(200)}")
+            }
             selected.mapNotNull { it.parseSearchEntry() }
                 .filter { it.title.isNotEmpty() }
         } catch (t: Throwable) {

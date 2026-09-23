@@ -75,7 +75,10 @@ class FilmpalastProvider : TmdbProvider() {
                 instanceFollowRedirects = true
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", mobileUA)
-                setRequestProperty("Accept", "text/html,application/json,*/*")
+                // Browser-like Accept: Filmpalasts WAF (HostAdmin.online) answers 403 "Access Denied" as soon as
+                // "application/json" appears in Accept (checked 23.09.2026). JSON APIs set their own Accept.
+                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
             }
             conn.connect()
@@ -161,7 +164,7 @@ class FilmpalastProvider : TmdbProvider() {
     // search() is still implemented so the classic CloudStream app (and ARVIOs search path
     // fallback) can use it. Returns the Filmpalast stream URL as the SearchResponse url.
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = Jsoup.parse(httpGet("$mainUrl/search/title/$query").text)
+        val document = Jsoup.parse(httpGet("$mainUrl/search/title/${query.encode()}").text)
         return document.select("#content .glowliste").mapNotNull { it.toSearchResponse() }
     }
 
@@ -347,8 +350,11 @@ class FilmpalastProvider : TmdbProvider() {
         }
     }
 
+    // The query goes into the URL PATH (/search/title/<q>), where "+" is a literal plus, not a space.
+    // URLEncoder writes spaces as "+", and Filmpalast then finds nothing ("Super+Mario" -> 0 hits,
+    // "Super%20Mario" -> 3 hits, checked 23.09.2026). So spaces must be %20.
     private fun String.encode(): String =
-        java.net.URLEncoder.encode(this, "UTF-8")
+        java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
 
     /**
      * Match Filmpalast search results to the requested title/year/type.
