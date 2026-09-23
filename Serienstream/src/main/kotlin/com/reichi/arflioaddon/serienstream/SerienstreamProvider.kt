@@ -158,7 +158,7 @@ class SerienstreamProvider : TmdbProvider() {
                 readTimeout = NET_TIMEOUT_MS.toInt()
                 instanceFollowRedirects = true
                 requestMethod = "GET"
-                setRequestProperty("Accept", "text/html,application/json,*/*")
+                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 setRequestProperty("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
                 val cookieHeader = cookieJar.toCookieHeader(url)
@@ -585,7 +585,7 @@ class SerienstreamProvider : TmdbProvider() {
                 instanceFollowRedirects = true
                 requestMethod = "POST"
                 doOutput = true
-                setRequestProperty("Accept", "text/html,application/json,*/*")
+                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
                 val cookieHeader = cookieJar.toCookieHeader(url)
                 if (cookieHeader.isNotEmpty()) setRequestProperty("Cookie", cookieHeader)
@@ -672,18 +672,32 @@ class SerienstreamProvider : TmdbProvider() {
     private fun resolveVoe(url: String, source: String, callback: (ExtractorLink) -> Unit): Boolean {
         var found = false
         val res = httpGet(url, referer = "https://voe.sx/")
-        val text = res.text
         if (res.code !in 200..299 && res.code != 0) {
             DebugLog.w(dbg, "resolveVoe: $url -> HTTP ${res.code} (likely DDoS-Guard blocked)")
             return false
         }
+        // VOE first serves a JS redirect page ("const currentUrl" + window.location.href='...') to a
+        // rotating mirror domain; the player page is behind it (same as Vavoo/FilmPalast).
+        var currentUrl = url
+        var text = res.text
+        var redirects = 0
+        while (text.contains("const currentUrl") && redirects < 5) {
+            val r = Regex("""window\.location\.href\s*=\s*'([^']+)'""").find(text) ?: break
+            currentUrl = r.groupValues[1]
+            text = httpGet(currentUrl).text
+            redirects++
+        }
+        if (redirects > 0) DebugLog.t(dbg, "resolveVoe: followed $redirects redirects to $currentUrl")
+        val voeRef = try {
+            val u = java.net.URL(currentUrl); u.protocol + "://" + u.host + "/"
+        } catch (_: Throwable) { "https://voe.sx/" }
         // Pattern 1: json">["<encoded>"]</script><script src="<jsUrl>"
         val p1 = Regex("""json">\["([^"]+)"\]</script>\s*<script\s+src="([^"]+)""")
         val m1 = p1.find(text)
         if (m1 != null) {
             val ct = m1.groupValues[1]
             val jsUrlRaw = m1.groupValues[2]
-            val jsUrl = if (jsUrlRaw.startsWith("http")) jsUrlRaw else resolveRelative(jsUrlRaw, url)
+            val jsUrl = if (jsUrlRaw.startsWith("http")) jsUrlRaw else resolveRelative(jsUrlRaw, currentUrl)
             val jsRes = httpGet(jsUrl)
             val lutMatch = Regex("""(\[(?:'\W{2}'[,\]]){1,9})""").find(jsRes.text)
             if (lutMatch != null) {
@@ -692,7 +706,7 @@ class SerienstreamProvider : TmdbProvider() {
                     val streamUrl = decoded.optString("source", "").ifEmpty { decoded.optString("file", "") }
                         .ifEmpty { decoded.optString("direct_access_url", "") }
                     if (streamUrl.startsWith("http")) {
-                        emitLink(source, streamUrl, "https://voe.sx/", callback); found = true
+                        emitLink(source, streamUrl, voeRef, callback, true); found = true
                     }
                 }
             }
@@ -704,7 +718,7 @@ class SerienstreamProvider : TmdbProvider() {
                 Regex(""""mp4"\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
                 Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
             ).forEach { p ->
-                p.findAll(text).forEach { emitLink(source, it.groupValues[1], "https://voe.sx/", callback); found = true }
+                p.findAll(text).forEach { emitLink(source, it.groupValues[1], voeRef, callback, true); found = true }
                 if (found) return@forEach
             }
         }
@@ -829,17 +843,31 @@ class SerienstreamProvider : TmdbProvider() {
         else baseUrl.substringBeforeLast("/") + "/" + maybeRelative
     }
 
-    private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit): Boolean {
+    private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit): Boolean =
+        emitLink(source, url, referer, callback, false)
+
+    private fun emitLink(
+        source: String,
+        url: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit,
+        viaProxy: Boolean
+    ): Boolean {
         return try {
             val isM3u8 = url.contains(".m3u8")
             val quality = detectQuality(url, isM3u8)
-            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8")
+            // ARVIO blocks URLs containing "caching" (VOE CDN hosts) as pending debrid torrents and
+            // drops our User-Agent/Referer on the way to the player -> serve such streams via LocalProxy.
+            val playUrl = if (viaProxy || LocalProxy.needsWrap(url)) {
+                LocalProxy.wrap(url, mapOf("Referer" to referer, "User-Agent" to mobileUA), isM3u8)
+            } else url
+            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 proxy=${playUrl != url}")
             // PRIMARY constructor (9 positional args, no default-args) - R8 strips the synthetic
             // DefaultConstructorMarker constructor (AGENTS.md Erkenntnis #18).
             val link = ExtractorLink(
                 source,                                                          // source
                 source,                                                          // name
-                url,                                                             // url
+                playUrl,                                                         // url (LocalProxy if needed)
                 referer,                                                         // referer
                 quality,                                                         // quality
                 emptyMap(),                                                      // headers

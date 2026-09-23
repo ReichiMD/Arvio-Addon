@@ -43,6 +43,11 @@ internal object TurnstileSolver {
 
     private const val TAG = "ArvioAddon[TurnstileSolver]"
     private const val DEFAULT_TIMEOUT_MS = 45_000L
+    private const val WEBVIEW_UA =
+        "Mozilla/5.0 (Linux; Android 13; TCL C7K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    // Hosters Serienstream links to (s.to "Provider" names). A sub-frame document on one of these
+    // hosts after the gate URL was set is the resolved hoster embed page.
+    private val HOSTER_HOST = Regex("""voe|vidoza|dood|ds2play|streamtape|filemoon|vidmoly|luluvdo|lulustream|vidhide|vidhd|mixdrop|supervideo|savefiles|vidsonic|streamwish|jamesbornmain""")
     private const val POLL_INTERVAL_MS = 500L
 
     /**
@@ -102,6 +107,10 @@ internal object TurnstileSolver {
             Log.w(TAG, "solveGate: no context (init not called?)")
             return null
         }
+        // Logged-in visitors get a lower gate tier (no ALTCHA, on residential IPs no gate at all),
+        // Buero docs/themen/62. Same User-Agent as the WebView below.
+        val loggedIn = SerienstreamLogin.ensureLoggedIn(WEBVIEW_UA)
+        Log.d(TAG, "solveGate: loggedIn=$loggedIn")
         val latch = CountDownLatch(1)
         val resultUrl = arrayOfNulls<String>(1)
         val mainHandler = Handler(Looper.getMainLooper())
@@ -134,9 +143,9 @@ internal object TurnstileSolver {
                 settings.domStorageEnabled = true
                 settings.javaScriptCanOpenWindowsAutomatically = true
                 settings.setSupportMultipleWindows(false)
-                settings.userAgentString =
-                    "Mozilla/5.0 (Linux; Android 13; TCL C7K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                settings.userAgentString = WEBVIEW_UA
                 CookieManager.getInstance().setAcceptCookie(true)
+                if (loggedIn) SerienstreamLogin.applyToWebView()
                 CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
                 webView.addJavascriptInterface(bridge, "Bridge")
 
@@ -154,6 +163,22 @@ internal object TurnstileSolver {
                         request: android.webkit.WebResourceRequest?
                     ): android.webkit.WebResourceResponse? {
                         val url = request?.url?.toString() ?: return null
+                        // Without a gate (logged in), /r?t= answers with a redirect straight to the
+                        // hoster embed page inside the player iframe. Catch that sub-frame document
+                        // load: it IS the result. Only known hoster hosts count (ads load iframes too).
+                        if (phase.get() == 1 && resultUrl[0] == null && request?.isForMainFrame == false) {
+                            val host = request?.url?.host?.lowercase() ?: ""
+                            val accept = request?.requestHeaders?.get("Accept") ?: ""
+                            if ((accept.isEmpty() || accept.contains("text/html")) && !host.endsWith("serienstream.to")) {
+                                if (HOSTER_HOST.containsMatchIn(host)) {
+                                    Log.d(TAG, "hoster frame caught: $url")
+                                    resultUrl[0] = url
+                                    latch.countDown()
+                                } else {
+                                    Log.d(TAG, "sub-frame html ignored (not a known hoster): $url")
+                                }
+                            }
+                        }
                         // Cloudflare Turnstile loads challenge resources from rotating subdomains
                         // like brunhild.challenges.cloudflare.com that have NO public DNS A-record
                         // (only a SOA). The WebView's system DNS fails with ERR_NAME_NOT_RESOLVED,
@@ -352,6 +377,9 @@ internal object TurnstileSolver {
   if(f){
     if(!f.getAttribute('target')){f.setAttribute('target','player-iframe');}
   }
+  var tierEl=document.getElementById('episode-redirect-gate-root');
+  var tier=tierEl?(tierEl.getAttribute('data-redirect-gate-tier')||'none'):'?';
+  log('gate tier='+tier);
   var iframe=document.getElementById('player-iframe');
   log('iframe found='+(!!iframe));
   if(!iframe){log('no player-iframe');done('');return;}
@@ -387,7 +415,7 @@ internal object TurnstileSolver {
         log('diag try='+tries+': ts='+tsVal.slice(0,8)+' al='+alVal.slice(0,8)+' tpIF='+tpIframe+' tsApi='+tsApi+' tsScript='+tsScript+' alScript='+alScript+' gateInit='+gateInit+' apW='+apWidget+' modal='+modalVis+' err='+errTxt.slice(0,30));
         log('tpHtml='+tpHtml);
       }
-      if(tsVal&&alVal){
+      if(tsVal&&(alVal||tier!=='turnstile_altcha')){
         clearInterval(iv);
         log('turnstile+altcha ready, submitting form');
         try{f.submit();}catch(e){log('submit threw: '+e.message);done('');}

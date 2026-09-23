@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class SerienstreamPlugin : Plugin() {
     override fun load(context: Context) {
-        android.util.Log.d("ArvioAddon[SerienstreamPlugin]", "load() — provider ENABLED (Turnstile WebView solver)")
+        android.util.Log.d("ArvioAddon[SerienstreamPlugin]", "load() — provider ENABLED (login + WebView gate)")
         // Initialise the WebView-based Turnstile solver with the Activity context ARVIO hands us.
         // Cloudflare Turnstile validates residential IP + real browser fingerprint + behaviour
         // simultaneously; a token from a 2captcha-style solver (minted on a different IP) is rejected.

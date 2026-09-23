@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 54
+version = 55
 
 
 cloudstream {
@@ -25,7 +25,7 @@ cloudstream {
      * passes silently. This is the mobile-app use-case Cloudflare itself documents.
      * See AGENTS.md "RECHERCHE (17.08.2026): Browser-CAPTCHA-Bypass" Kategorie 3.
      */
-    status = 0 // switched off 23.09.2026: Turnstile gate unsolved, delivers nothing (code kept)
+    status = 1 // 23.09.2026: re-enabled with account login (lower gate tier, Buero docs/themen/62)
 
     tvTypes = listOf("TvSeries")
 
