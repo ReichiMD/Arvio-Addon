@@ -706,6 +706,7 @@ class SerienstreamProvider : TmdbProvider() {
             val jsUrl = if (jsUrlRaw.startsWith("http")) jsUrlRaw else resolveRelative(jsUrlRaw, currentUrl)
             val jsRes = httpGet(jsUrl)
             val lutMatch = Regex("""(\[(?:'\W{2}'[,\]]){1,9})""").find(jsRes.text)
+            DebugLog.t(dbg, "resolveVoe: pattern1 jsUrl=$jsUrl -> ${jsRes.code} (${jsRes.text.length}B) lut=${lutMatch != null}")
             if (lutMatch != null) {
                 val decoded = try { voeDecode(ct, lutMatch.groupValues[1]) } catch (t: Throwable) { null }
                 if (decoded != null) {
@@ -842,11 +843,15 @@ class SerienstreamProvider : TmdbProvider() {
         return found
     }
 
+    // java.net.URL does the resolving (like Vavoo): the old string logic turned "/js/loader.js"
+    // on https://host/e/x into "" + path -> "no protocol" and every VOE mirror failed (v59, device).
     private fun resolveRelative(maybeRelative: String, baseUrl: String): String {
         if (maybeRelative.startsWith("http")) return maybeRelative
-        val root = baseUrl.substringBefore("/").dropLastWhile { it != '/' }
-        return if (maybeRelative.startsWith("/")) root + maybeRelative
-        else baseUrl.substringBeforeLast("/") + "/" + maybeRelative
+        return try {
+            java.net.URL(java.net.URL(baseUrl), maybeRelative).toString()
+        } catch (_: Throwable) {
+            baseUrl.substringBeforeLast("/") + "/" + maybeRelative.trimStart('/')
+        }
     }
 
     private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit): Boolean =
