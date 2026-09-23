@@ -527,6 +527,8 @@ class FilmpalastProvider : TmdbProvider() {
         // obfuscated by R8). callback is (ExtractorLink)->Unit; ARVIO collects results thread-safely
         // (no ConcurrentModificationException observed in v26). Each future has a 2s timeout so a
         // hung hoster never blocks the whole budget; pool is always shut down in finally.
+        // 3s like Vavoo: Firestream (token page + API + playlist) needed ~2.3s on the device and was
+        // cut off at 2s (Buero docs/themen/61, 23.09.2026).
         val pool = java.util.concurrent.Executors.newFixedThreadPool(minOf(fixed.size, 4))
         var any = false
         try {
@@ -539,8 +541,8 @@ class FilmpalastProvider : TmdbProvider() {
             }
             for (f in futures) {
                 try {
-                    // 2s per future; a hung hoster is abandoned but others continue.
-                    if (f.get(2, java.util.concurrent.TimeUnit.SECONDS)) any = true
+                    // 3s per future; a hung hoster is abandoned but others continue.
+                    if (f.get(3, java.util.concurrent.TimeUnit.SECONDS)) any = true
                 } catch (t: Throwable) {
                     DebugLog.w(dbg, "loadLinks: hoster future threw ${t.javaClass.name}: ${t.message}")
                 }
@@ -789,6 +791,11 @@ class FilmpalastProvider : TmdbProvider() {
             redirects++
         }
         if (redirects > 0) DebugLog.t(dbg, "resolveVoe: followed $redirects redirects to $currentUrl")
+        // Origin of the player page after the redirects = the Referer a browser would send.
+        // All VOE streams go through LocalProxy with it (same as Vavoo, Buero docs/themen/61).
+        val voeRef = try {
+            val u = java.net.URL(currentUrl); u.protocol + "://" + u.host + "/"
+        } catch (_: Throwable) { "https://voe.sx/" }
 
         val p1 = Regex("""json">\["([^"]+)"\]</script>\s*<script\s*src="([^"]+)""")
         val m1 = p1.find(currentText)
@@ -814,9 +821,13 @@ class FilmpalastProvider : TmdbProvider() {
                     val file = decoded.optString("file", "")
                     val direct = decoded.optString("direct_access_url", "")
                     when {
-                        source.startsWith("http") -> { emitLink("VOE", source, "https://voe.sx/", callback); found = true }
-                        file.startsWith("http") -> { emitLink("VOE", file, "https://voe.sx/", callback); found = true }
-                        direct.startsWith("http") -> { emitLink("VOE", direct, "https://voe.sx/", callback); found = true }
+                        source.startsWith("http") -> {
+                            emitLink("VOE", source, voeRef, callback, true); found = true
+                            // VOE's progressive mp4 as a second choice (plays when HLS is refused).
+                            if (direct.startsWith("http")) emitLink("VOE MP4", direct, voeRef, callback, true)
+                        }
+                        file.startsWith("http") -> { emitLink("VOE", file, voeRef, callback, true); found = true }
+                        direct.startsWith("http") -> { emitLink("VOE", direct, voeRef, callback, true); found = true }
                     }
                     DebugLog.t(dbg, "resolveVoe: voe_decode -> source=$source file=$file direct=$direct found=$found")
                 }
@@ -839,7 +850,7 @@ class FilmpalastProvider : TmdbProvider() {
             )
             for (p in urlPatterns) {
                 p.findAll(text).forEach { m ->
-                    emitLink("VOE", m.groupValues[1], "https://voe.sx/", callback); found = true
+                    emitLink("VOE", m.groupValues[1], voeRef, callback, true); found = true
                 }
                 if (found) break
             }
@@ -1019,17 +1030,33 @@ class FilmpalastProvider : TmdbProvider() {
     }
 
     private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit) {
+        emitLink(source, url, referer, callback, false)
+    }
+
+    private fun emitLink(
+        source: String,
+        url: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit,
+        viaProxy: Boolean
+    ) {
         try {
             val isM3u8 = url.contains(".m3u8")
             val quality = detectQuality(url, isM3u8)
-            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 referer=$referer")
+            // ARVIO blocks URLs containing "caching" etc. as pending debrid torrents (VOE CDN hosts
+            // are named that way), and its player drops our Referer/User-Agent when the source is
+            // picked on the details page - such streams are served through LocalProxy.
+            val playUrl = if (viaProxy || LocalProxy.needsWrap(url)) {
+                LocalProxy.wrap(url, mapOf("Referer" to referer, "User-Agent" to mobileUA), isM3u8)
+            } else url
+            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 referer=$referer proxy=${playUrl != url}")
             // Use the PRIMARY constructor (all 9 positional args, no default-args) - R8 strips the
             // synthetic DefaultConstructorMarker constructor (like MainPageData, Erkenntnis #6),
             // so named-arg/default-arg construction throws NoSuchMethodError at runtime.
             val link = ExtractorLink(
                 source,                                                          // source
                 source,                                                          // name
-                url,                                                             // url
+                playUrl,                                                         // url (LocalProxy if needed)
                 referer,                                                         // referer
                 quality,                                                         // quality (detected, see detectQuality)
                 emptyMap(),                                                      // headers (was default)
