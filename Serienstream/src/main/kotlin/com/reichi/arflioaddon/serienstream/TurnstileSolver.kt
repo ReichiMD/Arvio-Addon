@@ -187,9 +187,13 @@ internal object TurnstileSolver {
                         // the IP of challenges.cloudflare.com (which IS resolvable) with the original
                         // Host header + SNI. Cloudflare's edge accepts the Host header and serves
                         // the correct content (verified: --resolve works, HTTP 404 on bad path).
-                        if (url.contains(".challenges.cloudflare.com")) {
+                        // Only when the system DNS really cannot resolve the host: the rewritten response
+                        // lacks CORS headers, and on the device (23.09.2026) Turnstile's own fetch was
+                        // then blocked ("Access to fetch ... blocked"), so the widget never finished.
+                        if (url.contains(".challenges.cloudflare.com") &&
+                            !systemDnsResolves(request?.url?.host ?: "")) {
                             return try {
-                                interceptCloudflareChallenge(url, request)
+                                interceptCloudflareChallenge(url, request!!)
                             } catch (t: Throwable) {
                                 Log.w(TAG, "shouldInterceptRequest threw for $url: ${t.javaClass.name}: ${t.message}")
                                 null
@@ -542,14 +546,38 @@ internal object TurnstileSolver {
                 mimeType.substringAfter("charset=").trim()
             } else "UTF-8"
             val cleanMime = mimeType.substringBefore(";").trim()
-            android.webkit.WebResourceResponse(cleanMime, encoding, java.io.ByteArrayInputStream(body))
-                .also { it.setStatusCodeAndReasonPhrase(statusCode, reason) }
+            // Keep the upstream headers (minus framing ones we already consumed) and make sure the
+            // caller's origin may read the answer - Turnstile fetches these resources with CORS.
+            val outHeaders = java.util.HashMap<String, String>()
+            for ((k, v) in respHeaders) {
+                val lk = k.lowercase()
+                if (lk != "content-length" && lk != "transfer-encoding" && lk != "connection" && lk != "content-type") outHeaders[k] = v
+            }
+            val origin = request.requestHeaders?.get("Origin")
+            if (!origin.isNullOrEmpty()) {
+                outHeaders["Access-Control-Allow-Origin"] = origin
+                outHeaders["Access-Control-Allow-Credentials"] = "true"
+            }
+            android.webkit.WebResourceResponse(cleanMime, encoding, statusCode, reason.ifEmpty { "OK" }, outHeaders,
+                java.io.ByteArrayInputStream(body))
         } catch (t: Throwable) {
             Log.w(TAG, "interceptCloudflareChallenge: read failed: ${t.message}")
             null
         } finally {
             try { conn.close() } catch (_: Throwable) {}
         }
+    }
+
+    private val dnsCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** true when the system resolver finds the host (then the WebView loads it natively). */
+    private fun systemDnsResolves(host: String): Boolean {
+        if (host.isEmpty()) return true
+        dnsCache[host]?.let { return it }
+        val ok = try { java.net.InetAddress.getByName(host); true } catch (_: Throwable) { false }
+        dnsCache[host] = ok
+        Log.d(TAG, "systemDnsResolves: $host -> $ok" + if (ok) " (loaded natively)" else " (intercepting)")
+        return ok
     }
 
     private fun readLineFromStream(stream: java.io.InputStream): String? {
