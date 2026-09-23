@@ -839,13 +839,16 @@ class VavooProvider : TmdbProvider() {
         try {
             val isM3u8 = url.contains(".m3u8")
             val quality = detectQuality(url, isM3u8)
+            // ARVIO blocks URLs containing "caching" etc. as pending debrid torrents (VOE CDN hosts
+            // are named that way) - hand it a local redirect instead, see LocalRedirect.
+            val playUrl = if (LocalRedirect.needsWrap(url)) LocalRedirect.wrap(url, isM3u8) else url
             DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 referer=$referer")
             // PRIMARY constructor (9 positional args, no default-args) — R8 strips the synthetic
             // DefaultConstructorMarker constructor (Erkenntnis #18).
             val link = ExtractorLink(
                 source,
                 source,
-                url,
+                playUrl,
                 referer,
                 quality,
                 emptyMap(),
