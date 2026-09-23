@@ -30,51 +30,23 @@ import zipfile
 # (internal name, obfuscated internal name)
 # Map extracted from ARVIO v1.9.983 sideload APK (classes5.dex) by matching method signatures
 # to the known kotlin.coroutines.* / kotlin.jvm.functions.* interfaces.
-RENAMES = [
-    # kotlin.coroutines.*
-    ("kotlin/coroutines/Continuation", "j7/d"),
-    ("kotlin/coroutines/CoroutineContext", "j7/j"),
-    ("kotlin/coroutines/CoroutineContext$Element", "j7/j$a"),
-    ("kotlin/coroutines/CoroutineContext$Key", "j7/j$b"),
-    ("kotlin/coroutines/ContinuationInterceptor", "j7/g"),
-    ("kotlin/coroutines/ContinuationInterceptor$Key", "j7/f"),
-    ("kotlin/coroutines/ContinuationInterceptor$DefaultImpls", "j7/a"),
-    ("kotlin/coroutines/CombinedContext", "j7/c"),
-    ("kotlin/coroutines/EmptyCoroutineContext", "j7/k"),
-    ("kotlin/coroutines/CoroutineContext$DefaultImpls", "j7/e"),
-    ("kotlin/coroutines/CoroutineContextKt", "j7/h"),
-    ("kotlin/coroutines/StackFrameContinuation", "j7/m"),
-    # kotlin.jvm.functions.* (Function base + Function0..Function21, FunctionN)
-    ("kotlin/jvm/functions/Function", "d7/o"),
-    ("kotlin/jvm/functions/Function0", "x7/a"),
-    ("kotlin/jvm/functions/Function1", "x7/l"),
-    ("kotlin/jvm/functions/Function2", "x7/p"),
-    ("kotlin/jvm/functions/Function3", "x7/q"),
-    ("kotlin/jvm/functions/Function4", "x7/r"),
-    ("kotlin/jvm/functions/Function5", "x7/s"),
-    ("kotlin/jvm/functions/Function6", "x7/t"),
-    ("kotlin/jvm/functions/Function7", "x7/u"),
-    ("kotlin/jvm/functions/Function8", "x7/v"),
-    ("kotlin/jvm/functions/Function9", "x7/w"),
-    ("kotlin/jvm/functions/Function10", "x7/b"),
-    ("kotlin/jvm/functions/Function11", "x7/c"),
-    ("kotlin/jvm/functions/Function12", "x7/e"),
-    ("kotlin/jvm/functions/Function13", "x7/f"),
-    ("kotlin/jvm/functions/Function14", "x7/g"),
-    ("kotlin/jvm/functions/Function15", "x7/h"),
-    ("kotlin/jvm/functions/Function16", "x7/i"),
-    ("kotlin/jvm/functions/Function17", "x7/j"),
-    ("kotlin/jvm/functions/Function18", "x7/k"),
-    ("kotlin/jvm/functions/Function19", "x7/m"),
-    ("kotlin/jvm/functions/Function20", "x7/d"),
-    ("kotlin/jvm/functions/Function21", "x7/n"),
-    ("kotlin/jvm/functions/FunctionN", "x7/x"),
-    # okhttp3 (ARVIO obfuscates the okhttp3 package to rb/*; only ~3 classes kept).
-    # Our code references okhttp3.Interceptor only transitively via the cloudstream3
-    # `app.get` extension's get$default method descriptor. jsoup + com.lagradost.* are NOT
-    # obfuscated (kept by R8), so only okhttp3 types need remapping.
-    ("okhttp3/Interceptor", "rb/c0"),
-]
+def _load_renames():
+    """The rename table is NOT fixed: it differs for every ARVIO build. It is produced by
+    scripts/find_arvio_names.py from the exact ARVIO APK the plugin is built for and stored in
+    scripts/arvio-names.txt (or the file named by $ARVIO_NAMES_FILE). An EMPTY table means
+    'no renaming' - that is the build for an ARVIO that keeps kotlin names (docs: Weg A)."""
+    path = os.environ.get('ARVIO_NAMES_FILE') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'arvio-names.txt')
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.split('#', 1)[0].strip()
+            if line:
+                real, obf = line.split()
+                out.append((real, obf))
+    return out
+
+
+RENAMES = _load_renames()
 
 # Precompute descriptor-form and exact-form replacements for fast, safe substitution.
 # Order: apply descriptor form and exact form. Since each form is anchored ('L'+name+';' or

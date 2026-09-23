@@ -1,5 +1,13 @@
 # AGENTS.md вҖ“ДҸвҖ”ДӣвҖ“ГӯвҖңД–вҖ“ГӯвҖҡГ„Гә Ventix Arvio Addon
 
+> ⚠️ **Seit 23.09.2026: Plugins sind an EINE ARVIO-Version gebunden.** ARVIOs R8 benennt Kotlin-Klassen
+> bei jedem Build anders (`Continuation` = `j7.d` in v1.9.983, `o7.a` in v2.0.0). Die Umbenennungs-Tabelle
+> steht in `scripts/arvio-names.txt` (Version in `scripts/arvio-version.txt`), erzeugt von
+> `scripts/find_arvio_names.py` aus der echten APK. `scripts/check_against_arvio.py` prüft jede .cs3 vor
+> dem Veröffentlichen gegen die APK. **Nach einem ARVIO-Update:** Actions → Build → „Run workflow".
+> Hintergrund und Dauerlösung: Büro-Repo `Arvio-B-ro`, `docs/themen/61`.
+
+
 Dieses Repo baut ein **Cloudstream3-kompatibles Plugin** fвҖ“ДҸвҖңДҸвҖ“ГӯвҖ”Д—r die **ARVIO** Android-TV-App (sideload-APK).
 Ziel: Ventix-FunktionalitвҖ“ДҸвҖңДҸвҖ“ГӯвҖқВ®t (deutsche Web-Scraper + Stalker-VOD) als Plugin in ARVIO laufen lassen вҖ“ДҸвҖ”ДӣвҖ“ГӯвҖңД–вҖ“ГӯвҖҡГ„Гә clientseitig, ohne Server.
 
