@@ -546,13 +546,19 @@ class SerienstreamProvider : TmdbProvider() {
             when {
                 host.contains("dood") || host.contains("ds2play") || host.contains("playmogo") ||
                     host.contains("vidply") -> resolveDoodstream(finalUrl, sourceName, callback)
-                host.contains("voe.") || host.endsWith("voe.sx") -> resolveVoe(finalUrl, sourceName, callback)
+                // VOE hands out rotating mirror domains (e.g. jamesbornmain.com) -> trust s.to's provider name too.
+                host.contains("voe.") || host.endsWith("voe.sx") || provider.equals("VOE", ignoreCase = true) ->
+                    resolveVoe(finalUrl, sourceName, callback)
                 host.contains("streamtape") -> resolveStreamtape(finalUrl, sourceName, callback)
                 host.contains("filemoon") -> resolveFileMoon(finalUrl, sourceName, callback)
                 host.contains("vidhide") || host.contains("vidhd") -> resolveVidHide(finalUrl, sourceName, callback)
                 else -> {
                     // If we got a real hoster page (200), try generic scrape for direct URLs.
-                    if (resolved.code in 200..299) genericResolve(finalUrl, resolved.text, sourceName, callback)
+                    // The WebView gate only yields the URL (empty body) -> fetch the hoster page first.
+                    if (resolved.code in 200..299) {
+                        val page = if (resolved.text.isEmpty()) httpGet(finalUrl, referer = "$mainUrl/") else resolved
+                        genericResolve(finalUrl, page.text, sourceName, callback)
+                    }
                     else {
                         DebugLog.w(dbg, "resolveHost: $provider final=$finalUrl code=${resolved.code} -> unresolved")
                         false
