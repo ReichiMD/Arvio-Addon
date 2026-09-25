@@ -25,7 +25,8 @@ import java.util.concurrent.TimeUnit
  *    If a Turnstile form shows up and gets its token, the form is submitted.
  *
  * Observation (docs/70, E3 "gut protokolliert"): page title, text, forms, iframes and scripts are
- * logged on every page, pictures of the hidden WebView go to Download/arvio-plugin/.
+ * logged on every page. Pictures of the hidden WebView (Download/arvio-plugin/) are off since v2 - v1 played
+ * on the device (25.09.2026); flip SAVE_PICTURES for gate debugging.
  */
 internal object AniworldGate {
 
@@ -33,7 +34,7 @@ internal object AniworldGate {
     private const val PAGE_TIMEOUT_MS = 30_000L
     private const val REDIRECT_TIMEOUT_MS = 45_000L
     private const val POLL_MS = 1000L
-    private const val SAVE_PICTURES = true
+    private const val SAVE_PICTURES = false
     private const val SNAP_W = 1080
     private const val SNAP_H = 1920
     private val SNAP_AFTER_S = longArrayOf(5L, 15L, 30L)
