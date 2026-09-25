@@ -758,6 +758,22 @@ class SerienstreamProvider : TmdbProvider() {
         return cleaned?.takeIf { it.length in 8..150 && !it.equals("VOE", true) }
     }
 
+    /**
+     * "Silo.S01E01.German.Forced.720P.WEB.H264-WAYNE.mkv" -> "Silo S01E01 German Forced 720P WEB H264":
+     * keeps title/episode (the user checks it is the right stream) and the release tags, drops the file
+     * extension and the release group, and turns dots into spaces so ARVIO can wrap it between words.
+     */
+    private fun displayFileName(fileName: String): String {
+        var n = fileName.trim().replace(Regex("""\.(mkv|mp4|avi|m4v|webm|ts)$""", RegexOption.IGNORE_CASE), "")
+        // Release group = text after the last '-' at the end of a scene name ("…H264-WAYNE").
+        val group = Regex("""-([A-Za-z0-9]+)$""").find(n)?.groupValues?.get(1)
+        if (group != null && n.count { it == '.' } >= 3 && !group.equals("DL", true) && !group.equals("Rip", true)) {
+            n = n.substring(0, n.length - group.length - 1)
+        }
+        val cleaned = n.replace('.', ' ').replace('_', ' ').replace(Regex("""\s+"""), " ").trim()
+        return if (cleaned.length >= 3) cleaned else fileName
+    }
+
     private fun voeDecode(ct: String, luts: String): JSONObject {
         val inner = luts.substringAfter("['").substringBefore("']")
         val lutItems = if (inner.isNotEmpty()) inner.split("','") else emptyList()
@@ -910,7 +926,13 @@ class SerienstreamProvider : TmdbProvider() {
             // ARVIO shows a flag chip only for whole-word language codes (GER/GERMAN, ENG/ENGLISH);
             // serienstream's labels "Deutsch"/"Englisch" match neither -> translate them for the display name.
             val label = source.replace("[Deutsch]", "[GER]").replace("[Englisch]", "[ENG]")
-            val name = if (fileName != null) "$label · $fileName" else label
+            val name = if (fileName != null) {
+                val shown = displayFileName(fileName)
+                // The file name usually names the language itself ("German") -> drop the duplicate tag.
+                val hasLang = Regex("""\b(GER|GERMAN|ENG|ENGLISH)\b""", RegexOption.IGNORE_CASE).containsMatchIn(shown)
+                val host = if (hasLang) label.replace(" [GER]", "").replace(" [ENG]", "") else label
+                "$host · $shown"
+            } else label
             DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 proxy=${playUrl != url} name=$name")
             // PRIMARY constructor (9 positional args, no default-args) - R8 strips the synthetic
             // DefaultConstructorMarker constructor (AGENTS.md Erkenntnis #18).

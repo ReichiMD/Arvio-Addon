@@ -97,6 +97,17 @@ jobs:
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
           ./gradlew make makePluginsJson
+          # ARVIO's plugin list shows only "name" (never the version) -> append the version to it.
+          # ARVIO keys scrapers by internalName, so on/off settings survive the changing name; the name
+          # also shows up as the provider chip in the source picker ("Serienstream v62").
+          python3 - <<'PY'
+          import json
+          p = "build/plugins.json"
+          plugins = json.load(open(p, encoding="utf-8"))
+          for pl in plugins:
+              pl["name"] = f'{pl["internalName"]} v{pl["version"]}'
+          json.dump(plugins, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=4)
+          PY
           cp -f */build/*.cs3 $GITHUB_WORKSPACE/builds 2>/dev/null || true
           cp -f build/plugins.json $GITHUB_WORKSPACE/builds
 
