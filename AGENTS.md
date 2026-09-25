@@ -7,6 +7,12 @@
 > dem Veröffentlichen gegen die APK. **Nach einem ARVIO-Update:** Actions → Build → „Run workflow".
 > Hintergrund und Dauerlösung: Büro-Repo `Arvio-B-ro`, `docs/themen/61`.
 
+> 🆕 **25.09.2026: AniWorld-Plugin v1 (`Aniworld/`).** Gebaut wie Serienstream, aber für die **alte** s.to-Seitenform
+> (Vorlage: `Bnyro/GermanProviders` Aniworld — `/ajax/search`, `table.seasonEpisodesList`, `li[data-link-target="/redirect/…"]`,
+> Sprach-Schlüssel aus `.changeLanguageBox`). Erst java.net, bei Browser-Prüfung ein verstecktes WebView (`AniworldGate`,
+> Fotos an). Eigenes Linkbuch (`arvio_addon_aniworld`), `GATE-STAT AniWorld …` im Log. Aus der Cloud-Sitzung ist
+> aniworld.to gesperrt (403) — alles Weitere aus dem Handy-Log. Akte: Büro `docs/themen/70`.
+
 
 Dieses Repo baut ein **Cloudstream3-kompatibles Plugin** fвҖ“ДҸвҖңДҸвҖ“ГӯвҖ”Д—r die **ARVIO** Android-TV-App (sideload-APK).
 Ziel: Ventix-FunktionalitвҖ“ДҸвҖңДҸвҖ“ГӯвҖқВ®t (deutsche Web-Scraper + Stalker-VOD) als Plugin in ARVIO laufen lassen вҖ“ДҸвҖ”ДӣвҖ“ГӯвҖңД–вҖ“ГӯвҖҡГ„Гә clientseitig, ohne Server.
