@@ -10,8 +10,11 @@ Deutsche Web-Scraper (Filmpalast) + geplant: Stalker-VOD – clientseitig, ohne 
 In ARVIO: **Einstellungen → Plugins & Extensions → Add Repository**, dann diese URL eintragen:
 
 ```
-https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/main/repo.json
+https://raw.githubusercontent.com/ReichiMD/Arvio-Addon/builds/repo.json
 ```
+
+Diese Adresse zeigt in ARVIO die Version des Addons an („Arvio Addon v122"). Die alte Adresse
+`…/main/repo.json` funktioniert weiter, zeigt aber keine Version.
 
 Anschließend den Plugin-Eintrag **Filmpalast** einschalten. ARVIO lädt die `.cs3`-Datei
 automatisch vom `builds`-Branch.

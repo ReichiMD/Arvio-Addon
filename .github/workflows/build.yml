@@ -97,16 +97,15 @@ jobs:
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
           ./gradlew make makePluginsJson
-          # ARVIO's plugin list shows only "name" (never the version) -> append the version to it.
-          # ARVIO keys scrapers by internalName, so on/off settings survive the changing name; the name
-          # also shows up as the provider chip in the source picker ("Serienstream v62").
+          # ARVIO shows no version anywhere. The repository row shows repo.json's "name", so the
+          # builds branch gets its own repo.json named "Arvio Addon v<build number>" (the number
+          # of this workflow run: grows with every release). ARVIO reads it when the repo is added.
           python3 - <<'PY'
-          import json
-          p = "build/plugins.json"
-          plugins = json.load(open(p, encoding="utf-8"))
-          for pl in plugins:
-              pl["name"] = f'{pl["internalName"]} v{pl["version"]}'
-          json.dump(plugins, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=4)
+          import json, os
+          repo = json.load(open("repo.json", encoding="utf-8"))
+          repo["name"] = f'Arvio Addon v{os.environ["GITHUB_RUN_NUMBER"]}'
+          json.dump(repo, open(os.path.join(os.environ["GITHUB_WORKSPACE"], "builds", "repo.json"), "w", encoding="utf-8"),
+                    ensure_ascii=False, indent=2)
           PY
           cp -f */build/*.cs3 $GITHUB_WORKSPACE/builds 2>/dev/null || true
           cp -f build/plugins.json $GITHUB_WORKSPACE/builds
