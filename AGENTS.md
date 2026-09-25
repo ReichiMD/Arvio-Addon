@@ -228,6 +228,8 @@ Gate-JS (`episode-redirect-gate-C_Px7kjn.js`, 4,5 KB) lГӨdt `https://challenge
 
 ### ENTSCHEIDENDE ERKENNTNIS #20-AniWorld: AniWorld = DDoS-Guard WebSocket+eval-Challenge (NICHT lГ¶sbar)
 
+> ⚠️ **Nachtrag 25.09.2026:** Überholt für den Heimanschluss — `aniworld.to` öffnet am Handy des Nutzers direkt, die DDoS-Guard-Sperre trifft nur Rechenzentrums-Adressen (Cloud-Sitzungen). AniWorld wird als eigenes Plugin gebaut: Plan und Start-Text im Büro, Akte `docs/themen/70`.
+
 **AniWorld (aniworld.to) komplett DDoS-Guard-gesperrt, selbst mit korrekter IP (190.115.16.17).** DDoS-Guard-Challenge vollstaendig deobfusziert (17.08.2026):
 - Schritt 1: GET / -> 403 + Challenge-HTML (902B) + 3 JS-Dateien (`view.js` 61KB, `index.js` 191KB, `check.js` 152B).
 - Schritt 2: `check.js` lГӨdt Image von `/.well-known/ddos-guard/id/<id>` -> setzt `__ddg2_`-Cookie (mit java.net nachbaubar вң…).
