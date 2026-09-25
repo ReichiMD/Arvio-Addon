@@ -293,6 +293,10 @@ class SerienstreamProvider : TmdbProvider() {
     private val tmdbApiUrl = "https://api.themoviedb.org/3"
     private val tmdbCache = ConcurrentHashMap<Int, TmdbMeta>()
 
+    /** Episode page URL -> (found at, links). See loadLinks. */
+    private val linkCache = ConcurrentHashMap<String, Pair<Long, List<ExtractorLink>>>()
+    private val LINK_CACHE_MS = 10 * 60 * 1000L
+
     private fun fetchTmdbMeta(tmdbId: Int, isTv: Boolean): TmdbMeta? {
         tmdbCache[tmdbId]?.let { return it }
         val path = if (isTv) "/tv/$tmdbId" else "/movie/$tmdbId"
@@ -464,6 +468,25 @@ class SerienstreamProvider : TmdbProvider() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         DebugLog.t(dbg, "loadLinks() called with data=$data")
+        // ARVIO asks twice per episode (details page, then the player). Every ask costs one pass
+        // through Cloudflare's gate, and many passes in a short time bring up the checkbox the
+        // plugin cannot click. Reuse this episode's links for a while instead of asking again.
+        linkCache[data]?.let { (at, links) ->
+            val ageS = (System.currentTimeMillis() - at) / 1000
+            if (ageS * 1000 < LINK_CACHE_MS) {
+                DebugLog.t(dbg, "loadLinks: ${links.size} link(s) from memory (${ageS}s old)")
+                links.forEach { callback.invoke(it) }
+                return true
+            }
+            linkCache.remove(data)
+        }
+        val found = ArrayList<ExtractorLink>()
+        val ok = loadLinksLive(data) { link -> found.add(link); callback.invoke(link) }
+        if (ok && found.isNotEmpty()) linkCache[data] = System.currentTimeMillis() to ArrayList<ExtractorLink>(found)
+        return ok
+    }
+
+    private fun loadLinksLive(data: String, callback: (ExtractorLink) -> Unit): Boolean {
         val res = httpGet(data)
         if (res.code !in 200..299) {
             DebugLog.w(dbg, "loadLinks: episode page $data -> HTTP ${res.code}")

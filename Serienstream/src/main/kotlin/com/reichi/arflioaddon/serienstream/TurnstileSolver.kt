@@ -43,6 +43,7 @@ internal object TurnstileSolver {
 
     private const val TAG = "ArvioAddon[TurnstileSolver]"
     private const val DEFAULT_TIMEOUT_MS = 45_000L
+    private const val SAVE_PICTURES = false
     private const val WEBVIEW_UA =
         "Mozilla/5.0 (Linux; Android 13; TCL C7K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     // Hosters Serienstream links to (s.to "Provider" names). A sub-frame document on one of these
@@ -638,6 +639,9 @@ internal object TurnstileSolver {
         } catch (t: Throwable) {
             Log.w(TAG, "observe $label: js threw ${t.javaClass.name}: ${t.message}")
         }
+        // Pictures off (user, 25.09.2026: they flood the gallery). Flip to true for gate debugging
+        // (planned for AniWorld); the log line above is kept either way.
+        if (!SAVE_PICTURES) return
         try {
             val w = if (webView.width > 0) webView.width else SNAP_W
             val h = if (webView.height > 0) webView.height else SNAP_H
