@@ -481,9 +481,37 @@ class SerienstreamProvider : TmdbProvider() {
             linkCache.remove(data)
         }
         val found = ArrayList<ExtractorLink>()
-        val ok = loadLinksLive(data) { link -> found.add(link); callback.invoke(link) }
+        val collect: (ExtractorLink) -> Unit = { link -> found.add(link); callback.invoke(link) }
+        val ok = loadLinksFromBook(data, collect) || loadLinksLive(data, collect)
         if (ok && found.isNotEmpty()) linkCache[data] = System.currentTimeMillis() to ArrayList<ExtractorLink>(found)
         return ok
+    }
+
+    /**
+     * Linkbuch (LinkBook): the hoster address the gate gave us for this episode earlier. Going
+     * there directly skips Serienstream and its Cloudflare gate entirely. A stale entry (hoster
+     * deleted the file) is dropped and the live path runs as before.
+     */
+    private fun loadLinksFromBook(data: String, callback: (ExtractorLink) -> Unit): Boolean {
+        val entries = LinkBook.get(data)
+        if (entries.isEmpty()) return false
+        val startedAt = System.currentTimeMillis()
+        for (e in entries) {
+            val ageH = (System.currentTimeMillis() - e.savedAt) / (60 * 60 * 1000L)
+            DebugLog.t(dbg, "linkbuch: try ${e.provider} ${e.hosterUrl} (saved ${ageH}h ago)")
+            val ok = try {
+                dispatchHoster(e.hosterUrl, HttpResp(200, "", e.hosterUrl), e.provider, e.language, callback)
+            } catch (t: Throwable) {
+                DebugLog.w(dbg, "linkbuch: threw ${t.javaClass.name}: ${t.message}"); false
+            }
+            if (ok) {
+                GateStats.record("linkbuch", System.currentTimeMillis() - startedAt, "${e.provider} (Eintrag ${ageH} h alt, keine Pruefung)")
+                return true
+            }
+        }
+        DebugLog.w(dbg, "linkbuch: entry for $data no longer works -> removed, asking Serienstream again")
+        LinkBook.remove(data)
+        return false
     }
 
     private fun loadLinksLive(data: String, callback: (ExtractorLink) -> Unit): Boolean {
@@ -564,6 +592,28 @@ class SerienstreamProvider : TmdbProvider() {
             }
             val finalUrl = resolved.url
             DebugLog.t(dbg, "resolveHost: $provider $hostUrl -> final=$finalUrl (code=${resolved.code})")
+            val ok = dispatchHoster(finalUrl, resolved, provider, language, callback)
+            // Only addresses that came through the gate are worth keeping (direct links cost nothing).
+            val viaGate = hostUrl.contains("/r?t=") || hostUrl.contains("/r%3Ft%3D")
+            if (ok && viaGate && finalUrl != hostUrl && finalUrl.startsWith("http")) {
+                LinkBook.put(episodePageUrl, LinkBook.Entry(finalUrl, provider, language, System.currentTimeMillis()))
+            }
+            ok
+        } catch (t: Throwable) {
+            DebugLog.w(dbg, "resolveHost: '$hostUrl' threw ${t.javaClass.name}: ${t.message}")
+            false
+        }
+    }
+
+    /** Hand a hoster embed URL to the matching extractor. */
+    private fun dispatchHoster(
+        finalUrl: String,
+        resolved: HttpResp,
+        provider: String,
+        language: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        return try {
             val host = try { URI(finalUrl).host?.lowercase() ?: "" } catch (_: Throwable) { "" }
             val sourceName = if (language.isNotEmpty()) "$provider [$language]" else provider
             when {
@@ -589,7 +639,7 @@ class SerienstreamProvider : TmdbProvider() {
                 }
             }
         } catch (t: Throwable) {
-            DebugLog.w(dbg, "resolveHost: '$hostUrl' threw ${t.javaClass.name}: ${t.message}")
+            DebugLog.w(dbg, "dispatchHoster: '$finalUrl' threw ${t.javaClass.name}: ${t.message}")
             false
         }
     }

@@ -68,6 +68,9 @@ internal object TurnstileSolver {
 
     fun isAvailable(): Boolean = context != null
 
+    /** Application context for the plugin's own small storage (LinkBook, GateStats). */
+    fun appContext(): Context? = context
+
     /**
      * Result of a Turnstile solve: the token (cf-turnstile-response value) plus the cookies that
      * the WebView collected while loading the page (so the caller can reuse the same session).
@@ -110,6 +113,10 @@ internal object TurnstileSolver {
         }
         // Logged-in visitors get a lower gate tier (no ALTCHA, on residential IPs no gate at all),
         // Buero docs/themen/62. Same User-Agent as the WebView below.
+        val startedAt = System.currentTimeMillis()
+        // GateStats: what Cloudflare did during this pass (set from the injected script's log lines).
+        val tapWanted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val tsError = arrayOfNulls<String>(1)
         val loggedIn = SerienstreamLogin.ensureLoggedIn(WEBVIEW_UA)
         Log.d(TAG, "solveGate: loggedIn=$loggedIn")
         val latch = CountDownLatch(1)
@@ -132,6 +139,8 @@ internal object TurnstileSolver {
             @android.webkit.JavascriptInterface
             fun onLog(msg: String) {
                 Log.d(TAG, "bridge.log: $msg")
+                if (msg.contains("before-interactive")) tapWanted.set(true)
+                if (msg.contains("error-callback")) tsError[0] = msg.substringAfter("code=", "?")
             }
         }
 
@@ -273,6 +282,12 @@ internal object TurnstileSolver {
         }
 
         val resolved = resultUrl[0]
+        val took = System.currentTimeMillis() - startedAt
+        when {
+            tapWanted.get() -> GateStats.record("kaestchen", took, if (resolved != null) "(trotzdem Adresse erhalten)" else "(keine Adresse)")
+            resolved != null -> GateStats.record("durch", took, "")
+            else -> GateStats.record("fehler", took, "phase=${phase.get()}" + (tsError[0]?.let { " cf-code=$it" } ?: ""))
+        }
         if (resolved == null) {
             Log.w(TAG, "solveGate: no hoster URL produced (phase=${phase.get()})")
             return null
