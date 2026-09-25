@@ -713,7 +713,7 @@ class SerienstreamProvider : TmdbProvider() {
                     val streamUrl = decoded.optString("source", "").ifEmpty { decoded.optString("file", "") }
                         .ifEmpty { decoded.optString("direct_access_url", "") }
                     if (streamUrl.startsWith("http")) {
-                        emitLink(source, streamUrl, voeRef, callback, true); found = true
+                        emitLink(source, streamUrl, voeRef, callback, true, voeTitle(decoded, text)); found = true
                     }
                 }
             }
@@ -725,12 +725,37 @@ class SerienstreamProvider : TmdbProvider() {
                 Regex(""""mp4"\s*:\s*"(https?://[^"]+\.mp4[^"]*)""""),
                 Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""")
             ).forEach { p ->
-                p.findAll(text).forEach { emitLink(source, it.groupValues[1], voeRef, callback, true); found = true }
+                p.findAll(text).forEach { emitLink(source, it.groupValues[1], voeRef, callback, true, voeTitle(null, text)); found = true }
                 if (found) return@forEach
             }
         }
         DebugLog.t(dbg, "resolveVoe: $url found=$found")
         return found
+    }
+
+    /**
+     * The release file name VOE shows in its player ("Silo.S01E01.German.Forced.720P.WEB.H264-WAYNE.mkv").
+     * Tried in order: decoded player config, og:title, <title>. ARVIO shows ExtractorLink.name as the
+     * source title and reads resolution/codec badges from it, so the name is worth passing on.
+     */
+    private fun voeTitle(decoded: JSONObject?, html: String): String? {
+        val fromJson = decoded?.let { d ->
+            listOf("title", "file_title", "name", "filename").map { d.optString(it, "") }.firstOrNull { it.isNotBlank() }
+        }
+        val fromOg = Regex("""<meta[^>]+(?:property|name)=["']og:title["'][^>]+content=["']([^"']+)""", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1)
+        val fromTitle = Regex("""<title>([^<]+)</title>""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
+        val raw = fromJson ?: fromOg ?: fromTitle
+        val cleaned = raw?.trim()
+            ?.removePrefix("Watch ")?.removePrefix("watch ")
+            ?.replace(Regex("""\s*[-|]\s*VOE.*$""", RegexOption.IGNORE_CASE), "")
+            ?.trim()
+        val keys = StringBuilder()
+        decoded?.keys()?.let { iter -> while (iter.hasNext()) { if (keys.isNotEmpty()) keys.append(','); keys.append(iter.next()) } }
+        val from = when { fromJson != null -> "json"; fromOg != null -> "og"; fromTitle != null -> "title"; else -> "none" }
+        DebugLog.t(dbg, "resolveVoe: title=$cleaned from=$from keys=[$keys]")
+        // Generic page titles ("VOE", "Video") carry no information.
+        return cleaned?.takeIf { it.length in 8..150 && !it.equals("VOE", true) }
     }
 
     private fun voeDecode(ct: String, luts: String): JSONObject {
@@ -855,7 +880,7 @@ class SerienstreamProvider : TmdbProvider() {
     }
 
     private fun emitLink(source: String, url: String, referer: String, callback: (ExtractorLink) -> Unit): Boolean =
-        emitLink(source, url, referer, callback, false)
+        emitLink(source, url, referer, callback, false, null)
 
     private fun emitLink(
         source: String,
@@ -863,6 +888,16 @@ class SerienstreamProvider : TmdbProvider() {
         referer: String,
         callback: (ExtractorLink) -> Unit,
         viaProxy: Boolean
+    ): Boolean = emitLink(source, url, referer, callback, viaProxy, null)
+
+    /** [fileName]: release name from the hoster, shown by ARVIO as the source title next to [source]. */
+    private fun emitLink(
+        source: String,
+        url: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit,
+        viaProxy: Boolean,
+        fileName: String?
     ): Boolean {
         return try {
             val isM3u8 = url.contains(".m3u8")
@@ -872,12 +907,16 @@ class SerienstreamProvider : TmdbProvider() {
             val playUrl = if (viaProxy || LocalProxy.needsWrap(url)) {
                 LocalProxy.wrap(url, mapOf("Referer" to referer, "User-Agent" to mobileUA), isM3u8)
             } else url
-            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 proxy=${playUrl != url}")
+            // ARVIO shows a flag chip only for whole-word language codes (GER/GERMAN, ENG/ENGLISH);
+            // serienstream's labels "Deutsch"/"Englisch" match neither -> translate them for the display name.
+            val label = source.replace("[Deutsch]", "[GER]").replace("[Englisch]", "[ENG]")
+            val name = if (fileName != null) "$label · $fileName" else label
+            DebugLog.t(dbg, "emitLink: source=$source url=$url quality=$quality isM3u8=$isM3u8 proxy=${playUrl != url} name=$name")
             // PRIMARY constructor (9 positional args, no default-args) - R8 strips the synthetic
             // DefaultConstructorMarker constructor (AGENTS.md Erkenntnis #18).
             val link = ExtractorLink(
                 source,                                                          // source
-                source,                                                          // name
+                name,                                                            // name (ARVIO: source title)
                 playUrl,                                                         // url (LocalProxy if needed)
                 referer,                                                         // referer
                 quality,                                                         // quality
@@ -899,16 +938,24 @@ class SerienstreamProvider : TmdbProvider() {
         return try {
             val res = httpGet(url, headers = mapOf("Range" to "bytes=0-8192"))
             if (res.code !in 200..299 && res.code != 206) return Qualities.P720.value
-            val heights = Regex("RESOLUTION=(\\d+)x(\\d+)", RegexOption.IGNORE_CASE)
-                .findAll(res.text).mapNotNull { it.groupValues[2].toIntOrNull() }.toList()
-            val h = heights.maxOrNull() ?: return Qualities.P720.value
-            when {
-                h >= 2160 -> Qualities.P2160.value
-                h >= 1080 -> Qualities.P1080.value
-                h >= 720 -> Qualities.P720.value
-                h >= 480 -> Qualities.P480.value
-                else -> Qualities.P360.value
-            }
+            val sizes = Regex("RESOLUTION=(\\d+)x(\\d+)", RegexOption.IGNORE_CASE)
+                .findAll(res.text).mapNotNull { m ->
+                    val w = m.groupValues[1].toIntOrNull(); val h = m.groupValues[2].toIntOrNull()
+                    if (w != null && h != null) w to h else null
+                }.toList()
+            DebugLog.t(dbg, "detectQuality: resolutions=${sizes.joinToString(",") { "${it.first}x${it.second}" }}")
+            if (sizes.isEmpty()) return Qualities.P720.value
+            // Width OR height: widescreen releases are flatter than 16:9 (720p Silo = 1280x640,
+            // 1080p cinemascope = 1920x800) and were reported one tier too low by height alone.
+            sizes.map { (w, h) ->
+                when {
+                    w >= 3200 || h >= 2000 -> Qualities.P2160.value
+                    w >= 1800 || h >= 1000 -> Qualities.P1080.value
+                    w >= 1200 || h >= 700 -> Qualities.P720.value
+                    w >= 800 || h >= 460 -> Qualities.P480.value
+                    else -> Qualities.P360.value
+                }
+            }.maxOrNull() ?: Qualities.P720.value
         } catch (_: Throwable) {
             Qualities.P720.value
         }
